@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Imágenes fijadas; no usar *-latest.
+        os: [macos-26, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      # rustup (preinstalado en los runners) instala la versión de rust-toolchain.toml.
+      - name: Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Pin npm (packageManager)
+        run: npm install -g npm@11.4.2
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Format
+        run: npm run format:check
+
+      - name: Lint frontend
+        run: npm run lint
+
+      # Typecheck + build; Tauri necesita dist/ para compilar el host.
+      - name: Build frontend
+        run: npm run build:web
+
+      - name: Clippy
+        run: npm run lint:rust
+
+      - name: Rust tests
+        run: npm run test:rust
+
+      - name: Generated contracts are up to date
+        shell: bash
+        run: |
+          changes="$(git status --porcelain -- apps/desktop/src/contracts/generated)"
+          if [ -n "$changes" ]; then
+            echo "Tipos generados desactualizados; ejecuta cargo test y versiona el resultado:"
+            echo "$changes"
+            exit 1
+          fi
+
+      - name: Build desktop app (debug, no bundle)
+        run: npm run tauri -- build --debug --no-bundle

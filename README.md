@@ -1,0 +1,79 @@
+# Kanban IA
+
+Kanban desktop local para historias, épicas y agentes de IA. Estado: **M0 / HU-001**, base ejecutable sin funcionalidades de producto todavía. Planificación en [`docs/`](docs/) y [`docs/BACKLOG.md`](docs/BACKLOG.md).
+
+## Requisitos
+
+| Herramienta | Versión verificada | Notas |
+|---|---|---|
+| Rust | 1.99.1 | Fijado en `rust-toolchain.toml`; rustup lo instala automáticamente. Instalar rustup desde https://rustup.rs |
+| Node.js | 22.16.0 (`.nvmrc`) | Vite 8 exige `^20.19.0 \|\| >=22.12.0` |
+| npm | 11.4.2 | Gestor del monorepo (workspaces); usar `npm ci` con el lockfile |
+
+Requisitos de sistema de Tauri 2 (https://v2.tauri.app/start/prerequisites/):
+
+- **macOS**: Xcode Command Line Tools (`xcode-select --install`).
+- **Windows**: Microsoft C++ Build Tools ("Desktop development with C++") y WebView2 (preinstalado en Windows 10 1803+ y 11).
+
+## Primeros pasos
+
+```sh
+npm ci
+npm run dev          # abre la ventana de Kanban IA (tauri dev con recarga en caliente)
+```
+
+La primera compilación de Rust tarda varios minutos. Abrir `http://localhost:1420` en un navegador muestra la interfaz sin núcleo: el panel indica el error de forma explícita.
+
+## Comandos
+
+| Comando | Qué hace |
+|---|---|
+| `npm run dev` | App de escritorio en modo desarrollo |
+| `npm run build:web` | Typecheck (`tsc`) y build del frontend en `apps/desktop/dist` |
+| `npm run typecheck` | Solo typecheck del frontend |
+| `npm run lint` | ESLint (type-checked, react-hooks), 0 warnings |
+| `npm run lint:rust` | Clippy con `-D warnings` |
+| `npm run test:rust` | Pruebas Rust; también regenera los tipos TS del contrato |
+| `npm run format` / `format:check` | Prettier + rustfmt |
+| `npm run check` | Todo lo anterior, en el orden de CI |
+| `npm run tauri -- build --debug --no-bundle` | Binario de escritorio sin instalador (`target/debug/kanbania-desktop`) |
+
+Pruebas puntuales:
+
+```sh
+cargo test -p kanbania-core                                  # un crate
+cargo test -p kanbania-desktop --test ipc_app_info           # un archivo de pruebas de integración
+cargo test -p kanbania-core combines_host_data               # por nombre de prueba
+```
+
+El crate del host (`kanbania-desktop`) necesita `apps/desktop/dist` para compilar: ejecuta `npm run build:web` antes de `cargo test`/`clippy` en un clon limpio.
+
+## Estructura
+
+```text
+apps/desktop/                 React 19 + Vite 8 + TypeScript 6 (estricto)
+  src/features/<feature>/     vistas y hooks por funcionalidad
+  src/shared/ipc/commands.ts  envoltorios tipados de comandos Tauri
+  src/contracts/generated/    tipos generados desde Rust (ts-rs). No editar.
+  src-tauri/                  host Tauri 2: adapta casos de uso del núcleo a comandos IPC
+crates/core/                  casos de uso y reglas, sin dependencia de Tauri
+  src/features/<slice>/       vertical slices con entrada pública
+```
+
+Contrato de frontera: los tipos se definen en Rust con `#[derive(TS)] #[ts(export)]` y se generan en `apps/desktop/src/contracts/generated/` al ejecutar `cargo test` (ruta configurada en `.cargo/config.toml`). Se versionan en Git y CI falla si están desactualizados. Los nombres de comando se registran en `apps/desktop/src-tauri/src/lib.rs` (`register_commands`).
+
+## Versiones principales
+
+Tauri 2.12.5 (CLI/API 2.12.4), React 19.3.1, Vite 8.3.7, TypeScript 6.0.3, ts-rs 12.0.1, ESLint 10.14.0. Versiones exactas en `package.json` y lockfiles (`package-lock.json`, `Cargo.lock`). Se eligió TypeScript 6.0 (como la plantilla oficial de Tauri) porque typescript-eslint 8.72 soporta `<6.1`.
+
+## CI
+
+`.github/workflows/ci.yml` ejecuta en `macos-26` y `windows-2025`: formato, lint, typecheck/build web, clippy, pruebas, verificación de tipos generados y build debug del host. Acciones fijadas por SHA. No requiere credenciales.
+
+## Notas
+
+- Identificador de la app: `dev.ikkidev.kanbania`.
+- Iconos actuales: los de la plantilla de Tauri, provisionales hasta definir la marca.
+- CSP estricta en producción (`tauri.conf.json`); en desarrollo se desactiva (`devCsp: null`) para la recarga en caliente de Vite.
+- `npm audit` reporta avisos moderados de `minimatch` en dependencias de ESLint (solo desarrollo, sin impacto en la app).
+- Licencia: pendiente de decisión del propietario.

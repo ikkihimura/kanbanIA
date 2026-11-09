@@ -1,0 +1,14 @@
+node_modules/
+dist/
+/target/
+apps/desktop/src-tauri/gen/schemas/
+
+*.log
+*.local
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Paquete original de planificación (copia de respaldo local)
+/kanban-ia-contexto-claude.zip

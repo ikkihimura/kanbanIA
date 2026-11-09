@@ -1,0 +1,10 @@
+# Documentación y especificaciones se editan a mano; generado y dependencias se excluyen.
+*.md
+docs/
+.claude/
+node_modules/
+target/
+dist/
+apps/desktop/src-tauri/gen/
+apps/desktop/src/contracts/generated/
+package-lock.json

@@ -1,0 +1,38 @@
+# Backlog ejecutable
+
+Todas las historias comienzan en `pending`. Dependencias son obligatorias; el orden numérico es orientativo. HU-009 precede la finalización de HU-007. No implementar M3/M4 al solicitar únicamente MVP M2.
+
+| Historia | Hito | Dependencias | Estado | Evidencia |
+|---|---|---|---|---|
+| [HU-001 — Base desktop ejecutable](stories/HU-001.md) | M0 | — | in_progress | 2026-11-09, macOS 26 arm64: `npm run check` OK (prettier, eslint 0 warnings, tsc+vite build, clippy -D warnings, 6 pruebas Rust: 3 núcleo + 3 IPC en `apps/desktop/src-tauri/tests/ipc_app_info.rs`); `tauri build --debug --no-bundle` OK y ventana con datos de versión confirmada visualmente por el propietario; `npm run dev` arranca. **Bloqueo:** CI (`.github/workflows/ci.yml`) nunca ejecutado (sin remoto); Windows sin evidencia. Done tras CI verde en ambos SO. |
+| [HU-002 — Almacenamiento y propietario único](stories/HU-002.md) | M0 | 001 | pending | — |
+| [HU-003 — Proyecto y repositorios](stories/HU-003.md) | M1 | 002 | pending | — |
+| [HU-004 — Columnas y reglas de flujo](stories/HU-004.md) | M1 | 003 | pending | — |
+| [HU-005 — Historias y criterios de aceptación](stories/HU-005.md) | M1 | 004 | pending | — |
+| [HU-006 — Épicas, subtareas y dependencias](stories/HU-006.md) | M1 | 005 | pending | — |
+| [HU-007 — Board accesible y persistente](stories/HU-007.md) | M1 | 006 | pending | — |
+| [HU-008 — Perfiles y avatares pixelados](stories/HU-008.md) | M1 | 005 | pending | — |
+| [HU-009 — Entregas, aceptación y atención](stories/HU-009.md) | M1 | 006,008 | pending | — |
+| [HU-010 — Portabilidad Markdown](stories/HU-010.md) | M1 | 006 | pending | — |
+| [HU-011 — Copia y restauración local](stories/HU-011.md) | M1 | 002,010 | pending | — |
+| [HU-012 — Servicio local autenticado](stories/HU-012.md) | M2 | 002,009 | pending | — |
+| [HU-013 — MCP de consulta y contexto](stories/HU-013.md) | M2 | 012 | pending | — |
+| [HU-014 — Reclamar historias y renovar](stories/HU-014.md) | M2 | 013 | pending | — |
+| [HU-015 — Reportes y entregas por MCP](stories/HU-015.md) | M2 | 014,009 | pending | — |
+| [HU-016 — Validación del MVP integrado](stories/HU-016.md) | M2 | 007,008,010,011,015 | pending | — |
+| [HU-017 — Ejecuciones e instantáneas](stories/HU-017.md) | M3 | 016 | pending | — |
+| [HU-018 — Worktrees y supervisor de procesos](stories/HU-018.md) | M3 | 017 | pending | — |
+| [HU-019 — Primer adaptador ACP real](stories/HU-019.md) | M3 | 018 | pending | — |
+| [HU-020 — Aprobaciones y atención en ejecución](stories/HU-020.md) | M3 | 019 | pending | — |
+| [HU-021 — Segundo adaptador y capacidades](stories/HU-021.md) | M3 | 020 | pending | — |
+| [HU-022 — Alpha macOS y Windows](stories/HU-022.md) | M4 | 016,021 | pending | — |
+
+## Orden recomendado
+
+M0: 001 → 002.
+M1: 003 → 004 → 005 → 006 → 008 → 009 → 007 → 010 → 011.
+M2: 012 → 013 → 014 → 015 → 016.
+M3: 017 → 018 → 019 → 020 → 021.
+M4: 022.
+
+Estados: pending, in_progress, blocked, done. Evidencia: rutas de pruebas/reporte y resultados reales; registrar bloqueos y plataforma pendiente. Este archivo es seguimiento del desarrollo, no la base de datos del producto.

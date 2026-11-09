@@ -1,0 +1,25 @@
+[package]
+name = "kanbania-desktop"
+description = "Host desktop Tauri de Kanban IA"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# Nombre distinto del binario para evitar colisiones en Windows (cargo#8519).
+name = "kanbania_desktop_lib"
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[dependencies]
+kanbania-core = { workspace = true }
+tauri = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tauri = { workspace = true, features = ["test"] }
+
+[lints]
+workspace = true

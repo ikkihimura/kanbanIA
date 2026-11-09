@@ -1,0 +1,69 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+# Kanban IA — instrucciones para Claude Code
+
+Construimos un kanban desktop local para historias, épicas y agentes de IA, con estética retro y avatares pixelados. Idioma inicial: español; identificadores de código en inglés.
+
+## Estado actual y comandos
+- Base de HU-001: monorepo con workspace Cargo (`crates/core`, `apps/desktop/src-tauri`) y workspace npm (`apps/desktop`). Repositorio git local sin remoto. Versiones y requisitos en README.
+- Comandos (desde la raíz):
+  - `npm ci`: instalar. `npm run dev`: app con recarga en caliente.
+  - `npm run check`: todo lo de CI (formato, lint, typecheck+build web, clippy, pruebas). Ejecútalo antes de dar una historia por terminada.
+  - Por partes: `npm run lint`, `npm run typecheck`, `npm run build:web`, `npm run lint:rust`, `npm run test:rust`, `npm run format`.
+  - Una prueba Rust: `cargo test -p kanbania-core <nombre>` o `cargo test -p kanbania-desktop --test ipc_app_info`.
+  - Binario sin instalador: `npm run tauri -- build --debug --no-bundle`.
+  - Aún no hay runner de pruebas de frontend; añadir Vitest cuando una historia requiera pruebas UI (HU-007) y documentarlo aquí.
+- Orden obligatorio en clon limpio: `npm run build:web` antes de cargo clippy/test, porque `tauri::generate_context!` exige `apps/desktop/dist`.
+- Contrato Rust→TS: tipos con `#[derive(TS)] #[ts(export)]` en el núcleo; `cargo test` los escribe en `apps/desktop/src/contracts/generated/` (versionados, no editar a mano; CI falla si cambian). Cada comando nuevo: caso de uso en `crates/core/src/features/`, adaptador fino en `src-tauri/src/commands/`, alta en `register_commands` (`lib.rs`), envoltorio en `apps/desktop/src/shared/ipc/commands.ts` y prueba IPC en `src-tauri/tests/` con origen `tauri://localhost`.
+- Lints: clippy prohíbe `unwrap`/`expect`/`panic`/`dbg!` fuera de pruebas (`Cargo.toml` + `clippy.toml`); `unsafe` prohibido. ESLint type-checked estricto, 0 warnings.
+- Seguridad Tauri: CSP estricta en producción, `devCsp: null` en desarrollo; capability `default` sin permisos. Todo plugin nuevo necesita permisos explícitos y mínimos.
+- Entorno (macOS arm64, 2026-11-09): Node 22.16 (`.nvmrc`), npm 11.4.2 (`packageManager`), Rust 1.99.1 fijado en `rust-toolchain.toml` vía rustup (cambiar la versión allí, no con Homebrew). Windows solo se verifica en CI (`macos-26`, `windows-2025`). Esta terminal no puede capturar pantalla: pide al usuario la verificación visual de la ventana.
+- Solo se desarrolla con Claude Code; no hay configuraciones de Cursor, Codex ni Copilot que mantener.
+- Cada historia incluye criterios CA-n, verificación requerida y un prompt listo para usar. `EMPEZAR-AQUI.md` contiene los prompts de inicio y avance por hito.
+
+## Antes de trabajar
+- Lee `docs/CONTEXTO.md`, `docs/ARQUITECTURA.md` y la historia asignada en `docs/stories/`.
+- Consulta `docs/BACKLOG.md` para dependencias y estado. Implementa una historia por iteración, salvo autorización explícita para un hito. Respeta el orden recomendado: HU-009 precede la finalización de HU-007.
+- Inspecciona el repositorio: inicialmente este paquete contiene documentación, no una aplicación existente.
+- Verifica versiones y APIs en documentación oficial antes de elegir dependencias (`docs/FUENTES.md`). Registra versiones y comandos reales en README; conserva lockfiles. No inventes comandos ya disponibles.
+
+## Decisiones
+- Tauri 2, React, TypeScript estricto y Vite; Rust con vertical slices; SQLite como autoridad local.
+- Markdown es exportación/importación explícita; no sincronización bidireccional automática. Los Markdown de este backlog son especificaciones de desarrollo, no la persistencia del producto.
+- Un núcleo Rust aplica reglas a todas las entradas: UI, MCP y futuras integraciones.
+- Primero planificación + MCP. ACP y supervisión de procesos son un hito posterior.
+- No crear SaaS, cuentas, facturación, marketplace ni sincronización remota en el MVP.
+
+## Mapa de arquitectura (detalle en `docs/ARQUITECTURA.md`)
+- `apps/desktop/` (React/Vite + host Tauri) → `crates/core/` (casos de uso en `src/features/<entidad>/<caso>`, infraestructura en `src/platform/`; sin dependencia de Tauri). M2 añade `crates/local-service/` (único propietario de escrituras, API loopback autenticada, Axum propuesto) y `crates/mcp/` (adaptador stdio que llama a ese servicio, nunca abre su propia conexión SQLite). M3 añade `crates/runner/`. No crees crates de hitos futuros por adelantado.
+- Flujo de escritura único: UI (Tauri IPC) y MCP (stdio → loopback → host) terminan en los mismos casos de uso del core. El MCP del MVP requiere la app abierta; un solo host por perfil de datos.
+- Protocolo de mutación: `expected_revision` en ediciones (revisión obsoleta → `conflict` + estado vigente); `request_id` ligado a identidad+operación+hash del payload para idempotencia. Errores estructurados con `code`, mensaje seguro y `request_id`.
+- Columnas con categoría semántica (backlog/ready/active/review/done); las reglas usan la categoría, no el nombre. Blocked es atributo con motivo. Mover a done = aceptación humana explícita; un agente nunca aprueba su propio trabajo; ejecución completada ≠ historia aceptada.
+- SQLite fuera del repo (directorio de datos de la app), WAL, foreign keys, migraciones transaccionales; logs voluminosos de ejecuciones en JSONL rotados, no en SQLite.
+- Pruebas de slice a través de su entrada pública con SQLite temporal real; reloj controlable para claims y expiraciones; los mocks no prueban compatibilidad con proveedores reales.
+
+## Implementación
+- Organiza por caso de uso, con un punto de registro público por slice, validación y pruebas de comportamiento. Infraestructura común en platform; no repositorios genéricos ni capas service/repository por defecto.
+- Usa errores tipados, transacciones cortas, control de revisión e idempotencia en mutaciones reintentables. Evita panic/unwrap en rutas de producción.
+- Toda entrada externa se valida: IDs, pertenencia al proyecto, rutas, transiciones y límites. Sanitiza Markdown y evita ejecución de HTML.
+- No accedas directamente a SQLite desde frontend o agentes. No almacenes secretos en historias, Git o logs.
+- Mantén la UI accesible por teclado; texto normal para lectura, pixel art para identidad; respeta movimiento reducido. Tokens o costos desconocidos se muestran como "no disponible", nunca como cero.
+- No ejecutes shell arbitrario a partir de texto generado. Mantén permisos del usuario; no uses bypassPermissions ni desactives comprobaciones para avanzar.
+
+## Agentes de desarrollo
+Los perfiles de `.claude/agents/` construyen esta aplicación: no son los agentes que el producto administrará. El Claude principal coordina e integra. Delega solo tareas acotadas; no hace falta invocar todos los perfiles en cada historia.
+- Implementan: `rust-engineer` (core, SQLite, migraciones), `desktop-ui-engineer` (React/Tauri, accesibilidad), `agent-integration-engineer` (MCP, ACP, procesos).
+- Solo lectura, sin Bash: `architecture-reviewer`, `quality-reviewer`, `security-reviewer`. Piden evidencia al coordinador; no afirman haber ejecutado pruebas.
+
+No permitas edición simultánea de los mismos archivos. El coordinador posee contratos compartidos, lockfiles y migraciones; serializa esos cambios. Cada delegación incluye historia, archivos permitidos, dependencias y resultado esperado.
+
+## Definición de terminado
+- Criterios de aceptación cumplidos y verificados; pruebas relevantes para comportamiento y errores.
+- Formato, tipos, lint y build aplicables pasan; no se exige ejecutar plataformas no disponibles, pero se registra la limitación.
+- Sin datos simulados haciéndose pasar por integración real. Demos claramente etiquetadas.
+- Revisión de permisos y persistencia cuando aplique; ningún secreto en diffs.
+- Actualiza `docs/BACKLOG.md` con estado (pending/in_progress/blocked/done) y evidencia; no marques done con verificaciones obligatorias pendientes.
+- Entrega resumen, archivos, comprobaciones ejecutadas, resultados y riesgos restantes. No hagas push, publicación o gasto externo sin instrucción.
+- Si falta una credencial o plataforma, completa lo independiente y registra el bloqueo exacto. No atribuyas éxito a comprobaciones que no ejecutaste.
