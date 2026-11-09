@@ -1,4 +1,5 @@
 import { AppInfoPanel } from "../features/app-info/AppInfoPanel";
+import { StoragePanel } from "../features/storage-status/StoragePanel";
 
 export function App() {
   return (
@@ -12,7 +13,10 @@ export function App() {
           Base desktop lista. El tablero llegará en los próximos hitos.
         </p>
       </header>
-      <AppInfoPanel />
+      <div className="shell__panels">
+        <StoragePanel />
+        <AppInfoPanel />
+      </div>
     </main>
   );
 }

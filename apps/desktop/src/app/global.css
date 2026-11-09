@@ -67,6 +67,11 @@ body {
   color: var(--color-muted);
 }
 
+.shell__panels {
+  display: grid;
+  gap: 32px;
+}
+
 /* Borde "pixelado": esquinas recortadas con sombras escalonadas. */
 .panel {
   padding: 24px;
@@ -95,6 +100,11 @@ body {
   color: var(--color-danger);
 }
 
+.panel__ok {
+  margin: 0 0 16px;
+  color: var(--color-accent);
+}
+
 .panel__error p {
   margin: 0 0 8px;
 }
@@ -113,6 +123,10 @@ body {
 .facts dd {
   margin: 0;
   font-family: var(--font-mono);
+}
+
+.facts__path {
+  overflow-wrap: anywhere;
 }
 
 .button {

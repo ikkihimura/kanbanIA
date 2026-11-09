@@ -12,11 +12,23 @@ Construimos un kanban desktop local para historias, épicas y agentes de IA, con
   - `npm ci`: instalar. `npm run dev`: app con recarga en caliente.
   - `npm run check`: todo lo de CI (formato, lint, typecheck+build web, clippy, pruebas). Ejecútalo antes de dar una historia por terminada.
   - Por partes: `npm run lint`, `npm run typecheck`, `npm run build:web`, `npm run lint:rust`, `npm run test:rust`, `npm run format`.
-  - Una prueba Rust: `cargo test -p kanbania-core <nombre>` o `cargo test -p kanbania-desktop --test ipc_app_info`.
+  - Una prueba Rust: `cargo test -p kanbania-core <nombre>`, `cargo test -p kanbania-core --test storage` o `cargo test -p kanbania-desktop --test ipc_storage`.
+  - App con perfil de datos aparte: `KANBANIA_DATA_DIR=/ruta npm run dev`.
   - Binario sin instalador: `npm run tauri -- build --debug --no-bundle`.
   - Aún no hay runner de pruebas de frontend; añadir Vitest cuando una historia requiera pruebas UI (HU-007) y documentarlo aquí.
 - Orden obligatorio en clon limpio: `npm run build:web` antes de cargo clippy/test, porque `tauri::generate_context!` exige `apps/desktop/dist`.
 - Contrato Rust→TS: tipos con `#[derive(TS)] #[ts(export)]` en el núcleo; `cargo test` los escribe en `apps/desktop/src/contracts/generated/` (versionados, no editar a mano; CI falla si cambian). Cada comando nuevo: caso de uso en `crates/core/src/features/`, adaptador fino en `src-tauri/src/commands/`, alta en `register_commands` (`lib.rs`), envoltorio en `apps/desktop/src/shared/ipc/commands.ts` y prueba IPC en `src-tauri/tests/` con origen `tauri://localhost`.
+- Almacenamiento (HU-002, `crates/core/src/platform/`):
+  - `Store::open(data_dir)` toma el bloqueo exclusivo, configura WAL/foreign keys/busy timeout, guarda una copia en `backups/` si hay migraciones pendientes sobre una base existente, y migra.
+  - Migraciones en `crates/core/migrations/NNNN_descripcion.sql`, embebidas con `sqlx::migrate!`. Nunca edites una ya aplicada (su checksum lo impide); añade una nueva. No uses `-- no-transaction`. Tablas `STRICT`.
+  - Las mutaciones van por `store.write(|conn| Box::pin(async move { … }))` (`BEGIN IMMEDIATE`) o `store.write_idempotent(&MutationKey, &payload, …)` cuando reciben `request_id`. Lecturas con `store.reader()`.
+  - Para entidades editables, usa la columna `revision` y `UPDATE … WHERE id = ? AND revision = ?`, seguido de `revision::ensure_updated(...)`.
+  - Errores: `CoreError` en Rust; hacia transportes, `to_payload(request_id)` → `ErrorPayload { code, message, recoverable, requestId?, current? }`. No pongas detalles internos en el mensaje.
+  - Usa `sqlx::query`/`query_as` en tiempo de ejecución, no las macros `query!` (requieren base en compilación).
+  - Pruebas: SQLite temporal real (`tempfile`), nunca mocks de la base.
+  - Si falla una migración sobre una base existente, `Store::open` restaura la copia previa: la base queda exactamente como estaba.
+  - Deuda conocida: `mutation_receipts` y `backups/` no tienen retención. Las migraciones corren en el arranque, antes de mostrar la ventana.
+  - En M2, no expongas `databasePath` ni rutas locales por MCP o el servicio local: los agentes son lectores no confiables.
 - Lints: clippy prohíbe `unwrap`/`expect`/`panic`/`dbg!` fuera de pruebas (`Cargo.toml` + `clippy.toml`); `unsafe` prohibido. ESLint type-checked estricto, 0 warnings.
 - Seguridad Tauri: CSP estricta en producción, `devCsp: null` en desarrollo; capability `default` sin permisos. Todo plugin nuevo necesita permisos explícitos y mínimos.
 - Entorno (macOS arm64, 2026-11-09): Node 22.16 (`.nvmrc`), npm 11.4.2 (`packageManager`), Rust 1.99.1 fijado en `rust-toolchain.toml` vía rustup (cambiar la versión allí, no con Homebrew). Windows solo se verifica en CI (`macos-26`, `windows-2025`). Esta terminal no puede capturar pantalla: pide al usuario la verificación visual de la ventana.

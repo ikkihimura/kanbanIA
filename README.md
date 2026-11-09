@@ -70,6 +70,23 @@ Tauri 2.12.5 (CLI/API 2.12.4), React 19.3.1, Vite 8.3.7, TypeScript 6.0.3, ts-rs
 
 `.github/workflows/ci.yml` ejecuta en `macos-26` y `windows-2025`: formato, lint, typecheck/build web, clippy, pruebas, verificación de tipos generados y build debug del host. Acciones fijadas por SHA. No requiere credenciales.
 
+## Datos locales
+
+La aplicación guarda todo en SQLite dentro del directorio de datos del sistema:
+
+- macOS: `~/Library/Application Support/dev.ikkidev.kanbania/`
+- Windows: `%APPDATA%\dev.ikkidev.kanbania\`
+
+Para usar otro perfil (pruebas, depuración): `KANBANIA_DATA_DIR=/ruta npm run dev`.
+
+| Archivo | Uso |
+|---|---|
+| `kanbania.sqlite3` (+ `-wal`, `-shm`) | Base de datos en modo WAL. No copies solo el `.sqlite3` con la app abierta |
+| `kanbania.lock` | Bloqueo exclusivo: un solo proceso escritor por directorio. El sistema lo libera si la app termina |
+| `backups/pre-migration-vN.sqlite3` | Copia consistente previa a aplicar migraciones sobre una base existente |
+
+Si otra instancia ya usa los datos, la nueva ventana muestra el error `storage_locked` con opción de reintentar. Una migración fallida se revierte por completo y la app muestra `storage_migration_failed` sin modificar los datos. Una base creada por una versión más reciente muestra `storage_newer_schema` y no se toca. La base debe estar en disco local: no se admite una carpeta de red.
+
 ## Notas
 
 - Identificador de la app: `dev.ikkidev.kanbania`.

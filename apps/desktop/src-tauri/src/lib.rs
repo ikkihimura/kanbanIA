@@ -2,19 +2,52 @@
 //! No contiene reglas de negocio.
 
 mod commands;
+mod storage;
 
-use tauri::{Builder, Runtime};
+use std::path::PathBuf;
+
+pub use storage::StorageSlot;
+use tauri::{App, Builder, Manager, RunEvent, Runtime};
 
 /// Registra los comandos IPC. Lo usan el arranque real y las pruebas de contrato.
 pub fn register_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
-    builder.invoke_handler(tauri::generate_handler![commands::app_info::get_app_info])
+    builder.invoke_handler(tauri::generate_handler![
+        commands::app_info::get_app_info,
+        commands::storage::get_storage_status,
+        commands::storage::retry_open_storage,
+    ])
+}
+
+fn resolve_data_dir<R: Runtime>(app: &App<R>) -> tauri::Result<PathBuf> {
+    match std::env::var_os(storage::DATA_DIR_ENV) {
+        Some(dir) => Ok(PathBuf::from(dir)),
+        None => app.path().app_data_dir(),
+    }
 }
 
 pub fn run() {
-    let result = register_commands(Builder::default()).run(tauri::generate_context!());
+    let app = register_commands(Builder::default())
+        .setup(|app| {
+            let data_dir = resolve_data_dir(app)?;
+            let slot = tauri::async_runtime::block_on(StorageSlot::open(data_dir));
+            app.manage(slot);
+            Ok(())
+        })
+        .build(tauri::generate_context!());
 
-    if let Err(error) = result {
-        eprintln!("Kanban IA no pudo iniciarse: {error}");
-        std::process::exit(1);
-    }
+    let app = match app {
+        Ok(app) => app,
+        Err(error) => {
+            eprintln!("Kanban IA no pudo iniciarse: {error}");
+            std::process::exit(1);
+        }
+    };
+
+    app.run(|handle, event| {
+        if let RunEvent::Exit = event
+            && let Some(slot) = handle.try_state::<StorageSlot>()
+        {
+            tauri::async_runtime::block_on(slot.close());
+        }
+    });
 }

@@ -20,6 +20,7 @@ tauri = { workspace = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 tauri = { workspace = true, features = ["test"] }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

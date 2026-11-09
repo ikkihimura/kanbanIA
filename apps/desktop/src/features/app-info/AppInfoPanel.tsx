@@ -1,14 +1,15 @@
 import { useRef } from "react";
-import { useAppInfo } from "./useAppInfo";
+import { getAppInfo } from "../../shared/ipc/commands";
+import { useIpcResource } from "../../shared/ipc/useIpcResource";
 
 export function AppInfoPanel() {
-  const { state, retry } = useAppInfo();
+  const { state, run } = useIpcResource(getAppInfo);
   // El botón desaparece al reintentar; el foco pasa al título para no perderse en <body>.
   const titleRef = useRef<HTMLHeadingElement>(null);
 
   function handleRetry() {
     titleRef.current?.focus();
-    retry();
+    run();
   }
 
   return (
@@ -46,16 +47,16 @@ export function AppInfoPanel() {
       {state.status === "ready" && (
         <dl className="facts">
           <dt>Aplicación</dt>
-          <dd>{state.info.productName}</dd>
+          <dd>{state.data.productName}</dd>
           <dt>Versión</dt>
-          <dd>{state.info.appVersion}</dd>
+          <dd>{state.data.appVersion}</dd>
           <dt>Núcleo</dt>
-          <dd>{state.info.coreVersion}</dd>
+          <dd>{state.data.coreVersion}</dd>
           <dt>Contrato</dt>
-          <dd>v{state.info.contractVersion}</dd>
+          <dd>v{state.data.contractVersion}</dd>
           <dt>Plataforma</dt>
           <dd>
-            {state.info.os} · {state.info.arch}
+            {state.data.os} · {state.data.arch}
           </dd>
         </dl>
       )}
