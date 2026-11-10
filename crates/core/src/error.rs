@@ -6,8 +6,15 @@ use ts_rs::TS;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
-    #[error("dato inválido en `{field}`: {reason}")]
+    /// `reason` es un texto en español apto para el usuario.
+    #[error("{reason}")]
     Validation { field: &'static str, reason: String },
+
+    #[error("{entity} ya existe")]
+    AlreadyExists {
+        entity: &'static str,
+        field: &'static str,
+    },
 
     #[error("{entity} no encontrado")]
     NotFound { entity: &'static str },
@@ -44,6 +51,7 @@ pub enum CoreError {
 pub enum ErrorCode {
     Validation,
     NotFound,
+    AlreadyExists,
     Conflict,
     IdempotencyConflict,
     StorageLocked,
@@ -65,6 +73,10 @@ pub struct ErrorPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub request_id: Option<String>,
+    /// Campo de entrada al que se refiere el error, para mostrarlo junto al formulario.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub field: Option<String>,
     /// Estado vigente de la entidad en un conflicto de revisión.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -76,6 +88,7 @@ impl CoreError {
         match self {
             Self::Validation { .. } => ErrorCode::Validation,
             Self::NotFound { .. } => ErrorCode::NotFound,
+            Self::AlreadyExists { .. } => ErrorCode::AlreadyExists,
             Self::Conflict { .. } => ErrorCode::Conflict,
             Self::IdempotencyConflict => ErrorCode::IdempotencyConflict,
             Self::StorageLocked => ErrorCode::StorageLocked,
@@ -89,7 +102,9 @@ impl CoreError {
     pub fn to_payload(&self, request_id: Option<&str>) -> ErrorPayload {
         let (message, recoverable) = match self {
             // Validación y no encontrado describen datos del propio usuario: es seguro mostrarlos.
-            Self::Validation { .. } | Self::NotFound { .. } => (self.to_string(), true),
+            Self::Validation { .. } | Self::NotFound { .. } | Self::AlreadyExists { .. } => {
+                (self.to_string(), true)
+            }
             Self::Conflict { .. } => (
                 "Otra edición cambió estos datos. Revisa el estado actual y vuelve a intentarlo."
                     .into(),
@@ -128,6 +143,12 @@ impl CoreError {
             message,
             recoverable,
             request_id: request_id.map(str::to_owned),
+            field: match self {
+                Self::Validation { field, .. } | Self::AlreadyExists { field, .. } => {
+                    Some((*field).to_owned())
+                }
+                _ => None,
+            },
             current: match self {
                 Self::Conflict { current } => Some(current.clone()),
                 _ => None,

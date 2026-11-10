@@ -15,6 +15,15 @@ pub fn register_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         commands::app_info::get_app_info,
         commands::storage::get_storage_status,
         commands::storage::retry_open_storage,
+        commands::projects::list_projects,
+        commands::projects::create_project,
+        commands::projects::rename_project,
+        commands::projects::open_project,
+        commands::projects::get_last_opened_project,
+        commands::repositories::list_repositories,
+        commands::repositories::link_repository,
+        commands::repositories::relocate_repository,
+        commands::repositories::unlink_repository,
     ])
 }
 
@@ -27,6 +36,8 @@ fn resolve_data_dir<R: Runtime>(app: &App<R>) -> tauri::Result<PathBuf> {
 
 pub fn run() {
     let app = register_commands(Builder::default())
+        // Solo el selector de carpetas: capability `dialog:allow-open`.
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_dir = resolve_data_dir(app)?;
             let slot = tauri::async_runtime::block_on(StorageSlot::open(data_dir));

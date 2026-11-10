@@ -11,6 +11,10 @@ export type ErrorPayload = { code: ErrorCode, message: string,
  */
 recoverable: boolean, requestId?: string, 
 /**
+ * Campo de entrada al que se refiere el error, para mostrarlo junto al formulario.
+ */
+field?: string, 
+/**
  * Estado vigente de la entidad en un conflicto de revisión.
  */
 current?: JsonValue, };

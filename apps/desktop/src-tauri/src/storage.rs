@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use kanbania_core::error::CoreError;
+use kanbania_core::error::{CoreError, ErrorPayload};
 use kanbania_core::platform::storage::{StorageStatus, Store};
 use tauri::async_runtime::Mutex;
 
@@ -51,6 +51,18 @@ impl StorageSlot {
             SlotState::Ready(store) => StorageStatus::of(store).await,
             SlotState::Unavailable(status) => status.clone(),
             SlotState::Closed => StorageStatus::from_error(&CoreError::StorageLocked),
+        }
+    }
+
+    /// Almacén listo para un comando, o el error que la UI debe mostrar.
+    /// `Store` es un manejador barato (pool compartido); no debe guardarse más allá del comando.
+    pub async fn store(&self) -> Result<Store, ErrorPayload> {
+        match &*self.state.lock().await {
+            SlotState::Ready(store) => Ok(store.clone()),
+            SlotState::Unavailable(StorageStatus::Unavailable { error }) => Err(error.clone()),
+            SlotState::Unavailable(StorageStatus::Ready { .. }) | SlotState::Closed => {
+                Err(CoreError::StorageLocked.to_payload(None))
+            }
         }
     }
 

@@ -87,6 +87,18 @@ Para usar otro perfil (pruebas, depuración): `KANBANIA_DATA_DIR=/ruta npm run d
 
 Si otra instancia ya usa los datos, la nueva ventana muestra el error `storage_locked` con opción de reintentar. Una migración fallida se revierte por completo y la app muestra `storage_migration_failed` sin modificar los datos. Una base creada por una versión más reciente muestra `storage_newer_schema` y no se toca. La base debe estar en disco local: no se admite una carpeta de red.
 
+## Proyectos y repositorios
+
+Un proyecto agrupa trabajo y puede vincular varios repositorios Git locales. Al iniciar, la app reabre el último proyecto abierto.
+
+Política de rutas de repositorio (`crates/core/src/features/repositories/git_path.rs`):
+
+- Ruta absoluta a la **raíz del working tree**: carpeta con `.git/` (que contiene `HEAD`) o con un archivo `.git` que empieza por `gitdir:` (worktrees y submódulos). No se admiten subcarpetas ni repositorios bare.
+- Se resuelven los enlaces simbólicos y se guarda la ruta real.
+- Un repositorio no puede vincularse dos veces al mismo proyecto. La comparación es por identidad de carpeta, así que otra grafía (mayúsculas, Unicode, `..`, enlace simbólico) también cuenta como duplicado. Sí puede pertenecer a varios proyectos.
+- Kanban IA **nunca escribe** en el repositorio: solo lee metadatos y el inicio del archivo `.git`.
+- El estado (`available`, `missing`, `not_a_repository`, `inaccessible`) se calcula al mostrarlo. Si se movió, **Reubicar** lo apunta a la nueva carpeta; **Desvincular** borra solo el enlace.
+
 ## Notas
 
 - Identificador de la app: `dev.ikkidev.kanbania`.

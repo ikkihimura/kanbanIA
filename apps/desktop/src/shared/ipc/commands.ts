@@ -2,7 +2,16 @@
 // los nombres de comando deben coincidir con `register_commands` en src-tauri/src/lib.rs.
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { AppInfo } from "../../contracts/generated/AppInfo";
+import type { CreateProjectInput } from "../../contracts/generated/CreateProjectInput";
+import type { ErrorPayload } from "../../contracts/generated/ErrorPayload";
+import type { LinkRepositoryInput } from "../../contracts/generated/LinkRepositoryInput";
+import type { Project } from "../../contracts/generated/Project";
+import type { ProjectSummary } from "../../contracts/generated/ProjectSummary";
+import type { RelocateRepositoryInput } from "../../contracts/generated/RelocateRepositoryInput";
+import type { RenameProjectInput } from "../../contracts/generated/RenameProjectInput";
+import type { RepositoryLink } from "../../contracts/generated/RepositoryLink";
 import type { StorageStatus } from "../../contracts/generated/StorageStatus";
+import type { UnlinkRepositoryInput } from "../../contracts/generated/UnlinkRepositoryInput";
 
 export class NotInTauriError extends Error {
   constructor() {
@@ -13,36 +22,103 @@ export class NotInTauriError extends Error {
   }
 }
 
-async function call<T>(command: string): Promise<T> {
+async function call<T>(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
   if (!isTauri()) {
     throw new NotInTauriError();
   }
-  return invoke<T>(command);
+  return invoke<T>(command, args);
 }
 
+/** Identificador para mutaciones reintentables (idempotencia en el núcleo). */
+export function newRequestId(): string {
+  return crypto.randomUUID();
+}
+
+// --- sistema ---
+
 export function getAppInfo(): Promise<AppInfo> {
-  return call<AppInfo>("get_app_info");
+  return call("get_app_info");
 }
 
 export function getStorageStatus(): Promise<StorageStatus> {
-  return call<StorageStatus>("get_storage_status");
+  return call("get_storage_status");
 }
 
 export function retryOpenStorage(): Promise<StorageStatus> {
-  return call<StorageStatus>("retry_open_storage");
+  return call("retry_open_storage");
+}
+
+// --- proyectos ---
+
+export function listProjects(): Promise<ProjectSummary[]> {
+  return call("list_projects");
+}
+
+export function createProject(input: CreateProjectInput): Promise<Project> {
+  return call("create_project", { input });
+}
+
+export function renameProject(input: RenameProjectInput): Promise<Project> {
+  return call("rename_project", { input });
+}
+
+export function openProject(id: string): Promise<Project> {
+  return call("open_project", { id });
+}
+
+export function getLastOpenedProject(): Promise<Project | null> {
+  return call("get_last_opened_project");
+}
+
+// --- repositorios ---
+
+export function listRepositories(projectId: string): Promise<RepositoryLink[]> {
+  return call("list_repositories", { projectId });
+}
+
+export function linkRepository(
+  input: LinkRepositoryInput,
+): Promise<RepositoryLink> {
+  return call("link_repository", { input });
+}
+
+export function relocateRepository(
+  input: RelocateRepositoryInput,
+): Promise<RepositoryLink> {
+  return call("relocate_repository", { input });
+}
+
+export function unlinkRepository(input: UnlinkRepositoryInput): Promise<void> {
+  return call("unlink_repository", { input });
+}
+
+// --- errores ---
+
+export function isErrorPayload(error: unknown): error is ErrorPayload {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    "message" in error &&
+    typeof error.message === "string"
+  );
 }
 
 /** Mensaje legible para errores de `invoke`: `ErrorPayload` del núcleo, `Error` o texto. */
 export function describeError(error: unknown): string {
+  if (isErrorPayload(error)) return error.message;
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
-  if (
-    typeof error === "object" &&
-    error !== null &&
-    "message" in error &&
-    typeof error.message === "string"
-  ) {
-    return error.message;
-  }
   return "Error desconocido al comunicarse con el núcleo.";
+}
+
+/** Error normalizado para la UI; conserva `code`, `field` y `current` si vienen del núcleo. */
+export type UiError = Pick<ErrorPayload, "message"> &
+  Partial<Pick<ErrorPayload, "code" | "field" | "current">>;
+
+export function toUiError(error: unknown): UiError {
+  return isErrorPayload(error) ? error : { message: describeError(error) };
 }

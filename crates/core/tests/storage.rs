@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use kanbania_core::error::{CoreError, ErrorCode};
 use kanbania_core::platform::idempotency::MutationKey;
 use kanbania_core::platform::revision;
-use kanbania_core::platform::storage::{DATABASE_FILE, Store};
+use kanbania_core::platform::storage::{DATABASE_FILE, Store, latest_schema_version};
 use serde::{Deserialize, Serialize};
 use sqlx::SqliteConnection;
 
@@ -148,7 +148,11 @@ async fn creates_database_with_wal_foreign_keys_and_latest_schema() {
 
     assert_eq!(store.database_path().file_name().unwrap(), DATABASE_FILE);
     assert!(store.database_path().exists());
-    assert_eq!(store.schema_version().await.unwrap(), 1);
+    assert_eq!(
+        store.schema_version().await.unwrap(),
+        latest_schema_version()
+    );
+    assert!(latest_schema_version() >= 2);
 
     // Cada conexión del pool debe tener la configuración, no solo la primera.
     let mut conns = Vec::new();

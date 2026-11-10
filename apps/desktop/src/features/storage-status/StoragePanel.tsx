@@ -1,9 +1,15 @@
 import { useRef } from "react";
+import type { StorageStatus } from "../../contracts/generated/StorageStatus";
 import { getStorageStatus, retryOpenStorage } from "../../shared/ipc/commands";
-import { useIpcResource } from "../../shared/ipc/useIpcResource";
+import type { ResourceState } from "../../shared/ipc/useIpcResource";
 
-export function StoragePanel() {
-  const { state, run } = useIpcResource(getStorageStatus);
+interface Props {
+  state: ResourceState<StorageStatus>;
+  run: (next?: () => Promise<StorageStatus>) => void;
+}
+
+/** Estado del almacenamiento. El App comparte el mismo recurso para decidir si mostrar proyectos. */
+export function StoragePanel({ state, run }: Props) {
   const titleRef = useRef<HTMLHeadingElement>(null);
 
   const storage = state.status === "ready" ? state.data : null;

@@ -36,6 +36,11 @@ const MIGRATIONS_TABLE: &str = "_sqlx_migrations";
 
 pub(crate) static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
+/// Versión de esquema que deja `Store::open` (última migración embebida).
+pub fn latest_schema_version() -> i64 {
+    MIGRATOR.iter().map(|m| m.version).max().unwrap_or(0)
+}
+
 /// Futuro devuelto por las operaciones dentro de una transacción. `Send` para poder usarse
 /// desde comandos asíncronos de Tauri y, en M2, del servicio local.
 pub type TxFuture<'c, T> = Pin<Box<dyn Future<Output = Result<T, CoreError>> + Send + 'c>>;
@@ -236,15 +241,19 @@ mod tests {
     use super::*;
     use crate::error::ErrorCode;
 
-    const MIGRATION_0001: &str = include_str!("../../../migrations/0001_mutation_receipts.sql");
+    /// Última versión real; las migraciones de prueba usan 9001+ para ir siempre después.
+    fn latest() -> i64 {
+        latest_schema_version()
+    }
 
+    /// Migrador con todas las migraciones reales (mismo contenido y checksum) más `extra`.
     async fn migrator_with(extra: &[(&str, &str)]) -> (tempfile::TempDir, Migrator) {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("0001_mutation_receipts.sql"),
-            MIGRATION_0001,
-        )
-        .unwrap();
+        let real = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        for entry in std::fs::read_dir(real).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), dir.path().join(entry.file_name())).unwrap();
+        }
         for (name, sql) in extra {
             std::fs::write(dir.path().join(name), sql).unwrap();
         }
@@ -295,9 +304,9 @@ mod tests {
         store.close().await;
         drop(store);
 
-        // La 0002 crea una tabla y luego falla: nada de ella debe quedar aplicado.
+        // La 9001 crea una tabla y luego falla: nada de ella debe quedar aplicado.
         let (_src, broken) = migrator_with(&[(
-            "0002_broken.sql",
+            "9001_broken.sql",
             "CREATE TABLE should_not_exist (x INTEGER);\nINSERT INTO missing_table VALUES (1);",
         )])
         .await;
@@ -309,13 +318,13 @@ mod tests {
         assert!(
             data.path()
                 .join(BACKUP_DIR)
-                .join("pre-migration-v1.sqlite3")
+                .join(format!("pre-migration-v{}.sqlite3", latest()))
                 .exists()
         );
 
         // El bloqueo se liberó y la versión actual abre la base intacta.
         let store = Store::open(data.path()).await.unwrap();
-        assert_eq!(store.schema_version().await.unwrap(), 1);
+        assert_eq!(store.schema_version().await.unwrap(), latest());
         assert_eq!(receipt_count(&store).await, 1);
         assert!(!table_exists(&store, "should_not_exist").await);
     }
@@ -328,22 +337,22 @@ mod tests {
         store.close().await;
         drop(store);
 
-        // 0002 se aplica y confirma (cambia datos y esquema); 0003 falla después.
+        // 9001 se aplica y confirma (cambia datos y esquema); 9002 falla después.
         let (_src, partial) = migrator_with(&[
             (
-                "0002_ok.sql",
-                "CREATE TABLE added_by_0002 (x INTEGER);\n\
-                 UPDATE mutation_receipts SET operation = 'changed_by_0002';",
+                "9001_ok.sql",
+                "CREATE TABLE added_by_9001 (x INTEGER);\n\
+                 UPDATE mutation_receipts SET operation = 'changed_by_9001';",
             ),
-            ("0003_broken.sql", "INSERT INTO missing_table VALUES (1);"),
+            ("9002_broken.sql", "INSERT INTO missing_table VALUES (1);"),
         ])
         .await;
         let error = Store::open_with(data.path(), &partial).await.unwrap_err();
         assert_eq!(error.code(), ErrorCode::StorageMigrationFailed);
 
         let store = Store::open(data.path()).await.unwrap();
-        assert_eq!(store.schema_version().await.unwrap(), 1);
-        assert!(!table_exists(&store, "added_by_0002").await);
+        assert_eq!(store.schema_version().await.unwrap(), latest());
+        assert!(!table_exists(&store, "added_by_9001").await);
         let operation: String = sqlx::query_scalar("SELECT operation FROM mutation_receipts")
             .fetch_one(store.reader())
             .await
@@ -355,7 +364,7 @@ mod tests {
     async fn database_from_newer_version_is_rejected_without_changes() {
         let data = tempfile::tempdir().unwrap();
         let (_src, newer) = migrator_with(&[(
-            "0002_future.sql",
+            "9001_future.sql",
             "CREATE TABLE future_feature (x INTEGER);",
         )])
         .await;
@@ -368,7 +377,7 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::StorageNewerSchema);
 
         let store = Store::open_with(data.path(), &newer).await.unwrap();
-        assert_eq!(store.schema_version().await.unwrap(), 2);
+        assert_eq!(store.schema_version().await.unwrap(), 9001);
         assert!(table_exists(&store, "future_feature").await);
         assert_eq!(receipt_count(&store).await, 1);
     }

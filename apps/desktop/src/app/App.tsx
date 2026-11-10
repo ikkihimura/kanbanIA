@@ -1,22 +1,42 @@
 import { AppInfoPanel } from "../features/app-info/AppInfoPanel";
+import { Workspace } from "../features/projects/Workspace";
 import { StoragePanel } from "../features/storage-status/StoragePanel";
+import { getStorageStatus } from "../shared/ipc/commands";
+import { useIpcResource } from "../shared/ipc/useIpcResource";
 
 export function App() {
+  const storage = useIpcResource(getStorageStatus);
+  const ready =
+    storage.state.status === "ready" && storage.state.data.status === "ready";
+
   return (
-    <main className="shell">
+    <div className="shell">
       <header className="shell__header">
-        <h1 className="shell__title">
+        <p className="shell__brand" aria-hidden="true">
           Kanban IA
-          <span className="shell__cursor" aria-hidden="true" />
-        </h1>
-        <p className="shell__subtitle">
-          Base desktop lista. El tablero llegará en los próximos hitos.
+          <span className="shell__cursor" />
         </p>
       </header>
-      <div className="shell__panels">
-        <StoragePanel />
-        <AppInfoPanel />
-      </div>
-    </main>
+
+      {/* Sin almacenamiento listo no se muestran datos: solo el estado y la opción de reintentar. */}
+      {ready ? (
+        <Workspace />
+      ) : (
+        <main className="view">
+          <h1 className="view__title">Kanban IA</h1>
+          <StoragePanel {...storage} />
+        </main>
+      )}
+
+      {ready && (
+        <details className="system">
+          <summary>Sistema</summary>
+          <div className="shell__panels">
+            <StoragePanel {...storage} />
+            <AppInfoPanel />
+          </div>
+        </details>
+      )}
+    </div>
   );
 }

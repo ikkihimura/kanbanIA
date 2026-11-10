@@ -29,6 +29,14 @@ Construimos un kanban desktop local para historias, épicas y agentes de IA, con
   - Si falla una migración sobre una base existente, `Store::open` restaura la copia previa: la base queda exactamente como estaba.
   - Deuda conocida: `mutation_receipts` y `backups/` no tienen retención. Las migraciones corren en el arranque, antes de mostrar la ventana.
   - En M2, no expongas `databasePath` ni rutas locales por MCP o el servicio local: los agentes son lectores no confiables.
+- Patrón de slice (HU-003, ver `features/projects` y `features/repositories`):
+  - Un archivo por caso de uso. Los tipos de entrada son `#[derive(Deserialize, TS)]` con `requestId` (creaciones) o `expectedRevision` (ediciones). Las validaciones de disco van antes de abrir la transacción.
+  - SQL estático: sqlx 0.9 rechaza `format!`. Para prefijos comunes, usa una macro con `concat!` (`select_project!`, `select_link!`).
+  - Los slices se llaman entre sí solo vía funciones `pub(crate)` explícitas (p. ej. `projects::ensure_project_exists`).
+  - Host: un archivo por feature en `src-tauri/src/commands/`. Obtén el almacén con `slot.store().await?`, mapea errores con `e.to_payload(Some(&input.request_id))` y usa el actor `UI_ACTOR`. Registra el comando en `lib.rs` y añade su prueba en `src-tauri/tests/ipc_*.rs`.
+  - `i64` hacia TS: anótalo con `#[ts(type = "number")]` (por defecto sería `bigint`).
+- UI: lecturas con `useIpcResource(load)` (`load` estable; si depende de props, monta el componente con `key`). Mutaciones con `useMutation(fn)` → `{ ok, value }`. `newRequestId()` se mantiene mientras se reintenta el mismo envío. Muestra los errores de campo con `FieldError` y `aria-describedby`; los estados siempre con texto, no solo con color.
+- Plugins Tauri: solo `dialog` con el permiso `dialog:allow-open`. Cualquier otro necesita justificación y el permiso mínimo.
 - Lints: clippy prohíbe `unwrap`/`expect`/`panic`/`dbg!` fuera de pruebas (`Cargo.toml` + `clippy.toml`); `unsafe` prohibido. ESLint type-checked estricto, 0 warnings.
 - Seguridad Tauri: CSP estricta en producción, `devCsp: null` en desarrollo; capability `default` sin permisos. Todo plugin nuevo necesita permisos explícitos y mínimos.
 - Entorno (macOS arm64, 2026-11-09): Node 22.16 (`.nvmrc`), npm 11.4.2 (`packageManager`), Rust 1.99.1 fijado en `rust-toolchain.toml` vía rustup (cambiar la versión allí, no con Homebrew). Windows solo se verifica en CI (`macos-26`, `windows-2025`). Esta terminal no puede capturar pantalla: pide al usuario la verificación visual de la ventana.

@@ -54,7 +54,10 @@ fn reports_ready_storage_with_schema_version() {
     let status = invoke(&app, "get_storage_status");
 
     assert_eq!(status["status"], "ready");
-    assert_eq!(status["schemaVersion"], 1);
+    assert_eq!(
+        status["schemaVersion"],
+        kanbania_core::platform::storage::latest_schema_version()
+    );
     assert!(
         status["databasePath"]
             .as_str()

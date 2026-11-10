@@ -89,7 +89,48 @@ fn canonicalize(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Busca un recibo previo: `Some(resultado)` si coincide, `IdempotencyConflict` si el
+/// `request_id` se usó con otra operación o payload, `None` si no existe.
+async fn find_receipt<T: DeserializeOwned>(
+    conn: &mut SqliteConnection,
+    key: &MutationKey,
+    hash: &str,
+) -> Result<Option<T>, CoreError> {
+    let previous: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT operation, payload_hash, response_json FROM mutation_receipts \
+         WHERE actor = ? AND request_id = ?",
+    )
+    .bind(&key.actor)
+    .bind(&key.request_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    match previous {
+        None => Ok(None),
+        Some((operation, stored_hash, response)) => {
+            if operation == key.operation && stored_hash == hash {
+                Ok(Some(serde_json::from_str(&response)?))
+            } else {
+                Err(CoreError::IdempotencyConflict)
+            }
+        }
+    }
+}
+
 impl Store {
+    /// Consulta de solo lectura previa a validaciones costosas o dependientes del disco:
+    /// un reintento devuelve el resultado original aunque el entorno haya cambiado.
+    /// `write_idempotent` vuelve a comprobar dentro de su transacción.
+    pub async fn replay<P, T>(&self, key: &MutationKey, payload: &P) -> Result<Option<T>, CoreError>
+    where
+        P: Serialize + ?Sized,
+        T: DeserializeOwned,
+    {
+        let hash = payload_hash(payload)?;
+        let mut conn = self.reader().acquire().await?;
+        find_receipt(&mut conn, key, &hash).await
+    }
+
     /// Ejecuta una mutación reintentable. Ver la documentación del módulo.
     pub async fn write_idempotent<P, T, F>(
         &self,
@@ -105,20 +146,8 @@ impl Store {
         let hash = payload_hash(payload)?;
         let mut tx = self.begin_write().await?;
 
-        let previous: Option<(String, String, String)> = sqlx::query_as(
-            "SELECT operation, payload_hash, response_json FROM mutation_receipts \
-             WHERE actor = ? AND request_id = ?",
-        )
-        .bind(&key.actor)
-        .bind(&key.request_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-
-        if let Some((operation, stored_hash, response)) = previous {
-            if operation == key.operation && stored_hash == hash {
-                return Ok(serde_json::from_str(&response)?);
-            }
-            return Err(CoreError::IdempotencyConflict);
+        if let Some(previous) = find_receipt(&mut tx, key, &hash).await? {
+            return Ok(previous);
         }
 
         let result = mutation(&mut tx).await?;
