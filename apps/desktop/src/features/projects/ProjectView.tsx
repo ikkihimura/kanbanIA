@@ -3,6 +3,7 @@ import type { Project } from "../../contracts/generated/Project";
 import { renameProject } from "../../shared/ipc/commands";
 import { useMutation } from "../../shared/ipc/useMutation";
 import { FieldError } from "../../shared/ui/FieldError";
+import { ColumnsSection } from "../columns/ColumnsSection";
 import { RepositoriesSection } from "../repositories/RepositoriesSection";
 
 interface Props {
@@ -121,6 +122,7 @@ export function ProjectView({ project, onBack, onChanged }: Props) {
         </form>
       )}
 
+      <ColumnsSection key={`columns-${project.id}`} projectId={project.id} />
       <RepositoriesSection key={project.id} projectId={project.id} />
     </main>
   );

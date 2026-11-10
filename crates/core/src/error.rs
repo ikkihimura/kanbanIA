@@ -26,6 +26,21 @@ pub enum CoreError {
     #[error("request_id reutilizado con otra operación o payload")]
     IdempotencyConflict,
 
+    /// La columna destino alcanzó su límite de trabajo en curso.
+    #[error(
+        "La columna «{column}» admite como máximo {limit} tarjetas y ya tiene {current}. \
+         Mueve o termina alguna antes, o sube el límite."
+    )]
+    WipLimitExceeded {
+        column: String,
+        limit: i64,
+        current: i64,
+    },
+
+    /// Completar trabajo (columna de categoría «hecho») exige aceptación humana explícita.
+    #[error("Para mover una tarjeta a «{column}» hace falta aceptarla explícitamente.")]
+    AcceptanceRequired { column: String },
+
     #[error("los datos están abiertos por otra instancia")]
     StorageLocked,
 
@@ -54,6 +69,8 @@ pub enum ErrorCode {
     AlreadyExists,
     Conflict,
     IdempotencyConflict,
+    WipLimitExceeded,
+    AcceptanceRequired,
     StorageLocked,
     StorageNewerSchema,
     StorageMigrationFailed,
@@ -91,6 +108,8 @@ impl CoreError {
             Self::AlreadyExists { .. } => ErrorCode::AlreadyExists,
             Self::Conflict { .. } => ErrorCode::Conflict,
             Self::IdempotencyConflict => ErrorCode::IdempotencyConflict,
+            Self::WipLimitExceeded { .. } => ErrorCode::WipLimitExceeded,
+            Self::AcceptanceRequired { .. } => ErrorCode::AcceptanceRequired,
             Self::StorageLocked => ErrorCode::StorageLocked,
             Self::NewerSchema(_) => ErrorCode::StorageNewerSchema,
             Self::MigrationFailed(_) => ErrorCode::StorageMigrationFailed,
@@ -101,10 +120,12 @@ impl CoreError {
 
     pub fn to_payload(&self, request_id: Option<&str>) -> ErrorPayload {
         let (message, recoverable) = match self {
-            // Validación y no encontrado describen datos del propio usuario: es seguro mostrarlos.
-            Self::Validation { .. } | Self::NotFound { .. } | Self::AlreadyExists { .. } => {
-                (self.to_string(), true)
-            }
+            // Describen datos del propio usuario (nombres, límites): es seguro mostrarlos.
+            Self::Validation { .. }
+            | Self::NotFound { .. }
+            | Self::AlreadyExists { .. }
+            | Self::WipLimitExceeded { .. }
+            | Self::AcceptanceRequired { .. } => (self.to_string(), true),
             Self::Conflict { .. } => (
                 "Otra edición cambió estos datos. Revisa el estado actual y vuelve a intentarlo."
                     .into(),

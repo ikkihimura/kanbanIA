@@ -35,6 +35,11 @@ Construimos un kanban desktop local para historias, épicas y agentes de IA, con
   - Los slices se llaman entre sí solo vía funciones `pub(crate)` explícitas (p. ej. `projects::ensure_project_exists`).
   - Host: un archivo por feature en `src-tauri/src/commands/`. Obtén el almacén con `slot.store().await?`, mapea errores con `e.to_payload(Some(&input.request_id))` y usa el actor `UI_ACTOR`. Registra el comando en `lib.rs` y añade su prueba en `src-tauri/tests/ipc_*.rs`.
   - `i64` hacia TS: anótalo con `#[ts(type = "number")]` (por defecto sería `bigint`).
+- Columnas y tarjetas (HU-004):
+  - Toda entrada de tarjetas a una columna llama a `columns::ensure_capacity` dentro de la transacción. Si añades una vía nueva (importar, MCP…), debe pasar por ahí.
+  - Entrar en una columna `done` exige la aceptación de HU-009 (`AcceptanceRequired` hasta entonces).
+  - Posiciones densas 0..n en columnas y tarjetas.
+  - `stories` es mínima a propósito: HU-005 la amplía con nuevas migraciones, sin reescribir la 0003.
 - UI: lecturas con `useIpcResource(load)` (`load` estable; si depende de props, monta el componente con `key`). Mutaciones con `useMutation(fn)` → `{ ok, value }`. `newRequestId()` se mantiene mientras se reintenta el mismo envío. Muestra los errores de campo con `FieldError` y `aria-describedby`; los estados siempre con texto, no solo con color.
 - Plugins Tauri: solo `dialog` con el permiso `dialog:allow-open`. Cualquier otro necesita justificación y el permiso mínimo.
 - Lints: clippy prohíbe `unwrap`/`expect`/`panic`/`dbg!` fuera de pruebas (`Cargo.toml` + `clippy.toml`); `unsafe` prohibido. ESLint type-checked estricto, 0 warnings.

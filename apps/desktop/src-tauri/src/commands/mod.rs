@@ -1,4 +1,5 @@
 pub mod app_info;
+pub mod columns;
 pub mod projects;
 pub mod repositories;
 pub mod storage;

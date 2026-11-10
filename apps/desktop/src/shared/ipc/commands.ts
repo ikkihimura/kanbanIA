@@ -2,16 +2,21 @@
 // los nombres de comando deben coincidir con `register_commands` en src-tauri/src/lib.rs.
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { AppInfo } from "../../contracts/generated/AppInfo";
+import type { Column } from "../../contracts/generated/Column";
+import type { CreateColumnInput } from "../../contracts/generated/CreateColumnInput";
 import type { CreateProjectInput } from "../../contracts/generated/CreateProjectInput";
+import type { DeleteColumnInput } from "../../contracts/generated/DeleteColumnInput";
 import type { ErrorPayload } from "../../contracts/generated/ErrorPayload";
 import type { LinkRepositoryInput } from "../../contracts/generated/LinkRepositoryInput";
 import type { Project } from "../../contracts/generated/Project";
 import type { ProjectSummary } from "../../contracts/generated/ProjectSummary";
 import type { RelocateRepositoryInput } from "../../contracts/generated/RelocateRepositoryInput";
 import type { RenameProjectInput } from "../../contracts/generated/RenameProjectInput";
+import type { ReorderColumnInput } from "../../contracts/generated/ReorderColumnInput";
 import type { RepositoryLink } from "../../contracts/generated/RepositoryLink";
 import type { StorageStatus } from "../../contracts/generated/StorageStatus";
 import type { UnlinkRepositoryInput } from "../../contracts/generated/UnlinkRepositoryInput";
+import type { UpdateColumnInput } from "../../contracts/generated/UpdateColumnInput";
 
 export class NotInTauriError extends Error {
   constructor() {
@@ -93,6 +98,28 @@ export function relocateRepository(
 
 export function unlinkRepository(input: UnlinkRepositoryInput): Promise<void> {
   return call("unlink_repository", { input });
+}
+
+// --- columnas ---
+
+export function listColumns(projectId: string): Promise<Column[]> {
+  return call("list_columns", { projectId });
+}
+
+export function createColumn(input: CreateColumnInput): Promise<Column> {
+  return call("create_column", { input });
+}
+
+export function updateColumn(input: UpdateColumnInput): Promise<Column> {
+  return call("update_column", { input });
+}
+
+export function reorderColumn(input: ReorderColumnInput): Promise<Column> {
+  return call("reorder_column", { input });
+}
+
+export function deleteColumn(input: DeleteColumnInput): Promise<void> {
+  return call("delete_column", { input });
 }
 
 // --- errores ---

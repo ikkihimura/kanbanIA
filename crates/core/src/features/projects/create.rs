@@ -3,6 +3,7 @@ use ts_rs::TS;
 
 use super::project::{Project, load_project, validate_name};
 use crate::error::CoreError;
+use crate::features::columns::seed_default_columns;
 use crate::platform::idempotency::MutationKey;
 use crate::platform::storage::Store;
 
@@ -40,6 +41,8 @@ pub async fn create_project(
                     .bind(&name)
                     .execute(&mut *conn)
                     .await?;
+                // Mismo commit: un proyecto nunca existe sin su flujo inicial de columnas.
+                seed_default_columns(conn, &id).await?;
                 load_project(conn, &id)
                     .await?
                     .ok_or(CoreError::NotFound { entity: "Proyecto" })

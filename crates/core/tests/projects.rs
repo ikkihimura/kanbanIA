@@ -138,6 +138,31 @@ async fn create_rename_open_and_reopen_after_restart() {
 }
 
 #[tokio::test]
+async fn rapid_openings_keep_strict_recency_order() {
+    let env = Env::new().await;
+    let projects = [
+        env.project("Uno").await,
+        env.project("Dos").await,
+        env.project("Tres").await,
+    ];
+    // Muchas aperturas seguidas, dentro del mismo milisegundo con frecuencia.
+    for _ in 0..20 {
+        for p in &projects {
+            open_project(&env.store, &p.id).await.unwrap();
+        }
+    }
+    let last = last_opened_project(&env.store).await.unwrap().unwrap();
+    assert_eq!(last.name, "Tres");
+    let names: Vec<String> = list_projects(&env.store)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(names, ["Tres", "Dos", "Uno"]);
+}
+
+#[tokio::test]
 async fn list_orders_by_most_recently_opened() {
     let env = Env::new().await;
     let a = env.project("Alfa").await;

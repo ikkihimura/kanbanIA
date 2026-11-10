@@ -99,6 +99,15 @@ Política de rutas de repositorio (`crates/core/src/features/repositories/git_pa
 - Kanban IA **nunca escribe** en el repositorio: solo lee metadatos y el inicio del archivo `.git`.
 - El estado (`available`, `missing`, `not_a_repository`, `inaccessible`) se calcula al mostrarlo. Si se movió, **Reubicar** lo apunta a la nueva carpeta; **Desvincular** borra solo el enlace.
 
+## Columnas y límites WIP
+
+Cada proyecto empieza con el flujo Backlog · Listo · En curso · Revisión · Hecho. Las columnas se pueden crear, renombrar, reordenar y eliminar.
+
+- **Tipo de etapa** (`backlog`, `ready`, `active`, `review`, `done`): las reglas dependen del tipo, nunca del nombre visible.
+- **Límite WIP** opcional (1–999). Se aplica en el núcleo a toda entrada de tarjetas: crear, mover y destino al eliminar otra columna. Bajarlo por debajo de las tarjetas actuales está permitido: solo bloquea nuevas entradas, y la UI marca la columna como excedida.
+- **Columnas «hecho»**: solo reciben trabajo aceptado. Hasta HU-009, entrar en ellas devuelve `acceptance_required`. Una columna con tarjetas no puede cambiar a ese tipo ni dejar de serlo.
+- **Eliminar** una columna con tarjetas exige elegir destino. Las tarjetas se mueven al final de ese destino, en el mismo orden y en una sola transacción. Siempre queda al menos una columna que no es «hecho».
+
 ## Notas
 
 - Identificador de la app: `dev.ikkidev.kanbania`.

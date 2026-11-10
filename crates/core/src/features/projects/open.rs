@@ -8,8 +8,15 @@ pub async fn open_project(store: &Store, id: &str) -> Result<Project, CoreError>
     store
         .write(move |conn| {
             Box::pin(async move {
+                // Estrictamente creciente aunque dos aperturas caigan en el mismo milisegundo:
+                // el orden por recencia (y "reabrir el último") nunca depende de un empate.
                 let rows = sqlx::query(
-                    "UPDATE projects SET last_opened_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                    "UPDATE projects SET last_opened_at = max( \
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), \
+                         coalesce( \
+                             (SELECT strftime('%Y-%m-%dT%H:%M:%fZ', max(last_opened_at), \
+                                              '+0.001 seconds') FROM projects), \
+                             '')) \
                      WHERE id = ?",
                 )
                 .bind(&id)

@@ -24,6 +24,11 @@ pub fn register_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         commands::repositories::link_repository,
         commands::repositories::relocate_repository,
         commands::repositories::unlink_repository,
+        commands::columns::list_columns,
+        commands::columns::create_column,
+        commands::columns::update_column,
+        commands::columns::reorder_column,
+        commands::columns::delete_column,
     ])
 }
 
