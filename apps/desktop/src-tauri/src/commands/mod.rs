@@ -1,7 +1,9 @@
 pub mod app_info;
 pub mod columns;
+pub mod epics;
 pub mod exit;
 pub mod projects;
+pub mod relations;
 pub mod repositories;
 pub mod storage;
 pub mod stories;

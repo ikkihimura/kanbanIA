@@ -10,6 +10,10 @@ pub enum CoreError {
     #[error("{reason}")]
     Validation { field: &'static str, reason: String },
 
+    /// La relación crearía un ciclo (subtareas o dependencias). `reason` es apto para el usuario.
+    #[error("{reason}")]
+    Cycle { field: &'static str, reason: String },
+
     #[error("{entity} ya existe")]
     AlreadyExists {
         entity: &'static str,
@@ -67,6 +71,7 @@ pub enum ErrorCode {
     Validation,
     NotFound,
     AlreadyExists,
+    Cycle,
     Conflict,
     IdempotencyConflict,
     WipLimitExceeded,
@@ -106,6 +111,7 @@ impl CoreError {
             Self::Validation { .. } => ErrorCode::Validation,
             Self::NotFound { .. } => ErrorCode::NotFound,
             Self::AlreadyExists { .. } => ErrorCode::AlreadyExists,
+            Self::Cycle { .. } => ErrorCode::Cycle,
             Self::Conflict { .. } => ErrorCode::Conflict,
             Self::IdempotencyConflict => ErrorCode::IdempotencyConflict,
             Self::WipLimitExceeded { .. } => ErrorCode::WipLimitExceeded,
@@ -124,6 +130,7 @@ impl CoreError {
             Self::Validation { .. }
             | Self::NotFound { .. }
             | Self::AlreadyExists { .. }
+            | Self::Cycle { .. }
             | Self::WipLimitExceeded { .. }
             | Self::AcceptanceRequired { .. } => (self.to_string(), true),
             Self::Conflict { .. } => (
@@ -165,9 +172,9 @@ impl CoreError {
             recoverable,
             request_id: request_id.map(str::to_owned),
             field: match self {
-                Self::Validation { field, .. } | Self::AlreadyExists { field, .. } => {
-                    Some((*field).to_owned())
-                }
+                Self::Validation { field, .. }
+                | Self::AlreadyExists { field, .. }
+                | Self::Cycle { field, .. } => Some((*field).to_owned()),
                 _ => None,
             },
             current: match self {

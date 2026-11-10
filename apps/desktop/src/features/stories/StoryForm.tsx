@@ -14,10 +14,15 @@ interface Props {
   story: StoryDetail;
   onSaved: (story: StoryDetail) => void;
   onDirtyChange: (dirty: boolean) => void;
+  /**
+   * Fin de la edición: tras guardar con éxito (`saved`) o sin cambios que guardar (`null`).
+   * Ante un conflicto o un error no se llama: el borrador sigue en pantalla.
+   */
+  onDone: (saved: StoryDetail | null) => void;
 }
 
 /** Editor de una historia no archivada. El borrador nunca se pierde por un conflicto. */
-export function StoryForm({ story, onSaved, onDirtyChange }: Props) {
+export function StoryForm({ story, onSaved, onDirtyChange, onDone }: Props) {
   const id = useId();
   const [base, setBase] = useState(story);
   const [draft, setDraft] = useState<StoryDraft>(() => draftFrom(story));
@@ -54,6 +59,7 @@ export function StoryForm({ story, onSaved, onDirtyChange }: Props) {
       setConflict(null);
       setSaved(true);
       onSaved(result.value);
+      onDone(result.value);
     } else if (result.error.code === "conflict" && result.error.current) {
       // La versión vigente se muestra junto al borrador, que se conserva intacto.
       setConflict(result.error.current as unknown as StoryDetail);
@@ -77,7 +83,10 @@ export function StoryForm({ story, onSaved, onDirtyChange }: Props) {
       aria-label="Editar historia"
       onSubmit={(event) => {
         event.preventDefault();
-        void submit(base);
+        // Sin cambios de contenido no hay nada que guardar (las relaciones se guardan al
+        // momento): solo se vuelve al proyecto.
+        if (dirty) void submit(base);
+        else onDone(null);
       }}
     >
       <div role="status" aria-live="polite" className="story-form__status">
@@ -318,13 +327,9 @@ export function StoryForm({ story, onSaved, onDirtyChange }: Props) {
           type="submit"
           className="button"
           aria-busy={save.pending}
-          disabled={save.pending || !dirty || conflict !== null}
+          disabled={save.pending || conflict !== null}
         >
-          {save.pending
-            ? "Guardando…"
-            : !dirty && saved
-              ? "Guardado ✓"
-              : "Guardar"}
+          {save.pending ? "Guardando…" : "Guardar y volver"}
         </button>
       </div>
     </form>

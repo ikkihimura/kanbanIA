@@ -415,6 +415,62 @@ textarea[aria-invalid="true"] {
   color: var(--color-warn);
 }
 
+.notice {
+  margin: 0;
+  padding: 8px 12px;
+  color: var(--color-accent);
+  border: 2px solid var(--color-accent);
+}
+
+/* ---------- épicas y relaciones ---------- */
+
+.progress {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.progress__bar {
+  width: 12rem;
+  height: 12px;
+  accent-color: var(--color-accent);
+}
+
+.relations {
+  display: grid;
+  gap: 16px;
+}
+
+.relations__saved {
+  min-height: 1.5em;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  color: var(--color-accent);
+}
+
+.relations__title {
+  margin: 0 0 8px;
+  font-size: 0.9375rem;
+  color: var(--color-muted);
+}
+
+.relations__list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.relations__item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
 /* ---------- diálogo modal ---------- */
 
 .modal-backdrop {

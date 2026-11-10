@@ -119,6 +119,14 @@ Cada historia tiene un número por proyecto (`#N`) que no se reutiliza, título 
 - **Archivar** saca la historia del tablero y del límite WIP sin borrar nada. **Restaurar** la devuelve al final de la columna elegida y aplica el WIP.
 - **Cambios sin guardar**: cerrar la ventana (botón, ⌘W, Alt+F4) o salir (⌘Q) con un borrador pendiente muestra un aviso para seguir editando o salir sin guardar.
 
+## Épicas, subtareas y dependencias
+
+- **Épicas** (`E-n`): agrupan historias. Su **avance** es aceptadas ÷ historias no archivadas de la épica. Sin historias se muestra «Sin historias», nunca 0 % ni 100 %. La aceptación llega en HU-009; hasta entonces el avance es 0 de N.
+- **Subtareas**: una historia puede colgar de otra del mismo proyecto.
+- **Dependencias**: «A depende de B». Los prerequisitos sin aceptar, incluidos los archivados, se muestran como bloqueo. Por ahora no impiden mover la tarjeta; el bloqueo de ejecución llega con las reclamaciones de agentes (HU-014).
+- Se rechazan los **ciclos** directos e indirectos (subtareas y dependencias) y las relaciones entre proyectos distintos.
+- Las relaciones se guardan al momento desde el editor, sin interferir con el borrador del texto. «Guardar y volver» guarda el contenido y vuelve al proyecto.
+
 ## Notas
 
 - Identificador de la app: `dev.ikkidev.kanbania`.

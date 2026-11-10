@@ -8,4 +8,12 @@ export type StorySummary = { id: string, projectId: string, number: number, colu
 /**
  * `null` si está archivada (fuera del orden del tablero).
  */
-position: number | null, title: string, priority: Priority, archivedAt: string | null, criteriaCount: number, revision: number, };
+position: number | null, title: string, priority: Priority, archivedAt: string | null, 
+/**
+ * Aceptación vigente (la establece HU-009).
+ */
+acceptedAt: string | null, epicId: string | null, parentId: string | null, 
+/**
+ * Prerequisitos sin aceptar: bloqueada si > 0.
+ */
+pendingPrerequisites: number, criteriaCount: number, revision: number, };

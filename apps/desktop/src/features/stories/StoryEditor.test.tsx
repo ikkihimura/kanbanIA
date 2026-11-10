@@ -22,6 +22,8 @@ vi.mock("../../shared/ipc/commands", async (importOriginal) => {
     listStories: vi.fn(),
     createStory: vi.fn(),
     setUnsavedChanges: vi.fn(),
+    getStoryRelations: vi.fn(),
+    listEpics: vi.fn(),
   };
 });
 
@@ -38,6 +40,7 @@ function story(overrides: Partial<StoryDetail> = {}): StoryDetail {
     description: "Texto inicial",
     priority: "medium",
     archivedAt: null,
+    acceptedAt: null,
     criteria: [{ id: "k1", number: 1, text: "Descarga un archivo" }],
     revision: 1,
     createdAt: "2026-11-09T10:00:00.000Z",
@@ -73,6 +76,10 @@ function summaryOf(detail: StoryDetail): StorySummary {
     title: detail.title,
     priority: detail.priority,
     archivedAt: null,
+    acceptedAt: null,
+    epicId: null,
+    parentId: null,
+    pendingPrerequisites: 0,
     criteriaCount: detail.criteria.length,
     revision: detail.revision + 1,
   };
@@ -87,12 +94,31 @@ function conflictWith(current: StoryDetail): ErrorPayload {
   };
 }
 
-function renderEditor() {
-  return render(<StoryEditor projectId="p1" storyId="s1" onBack={vi.fn()} />);
+function renderEditor(onBack = vi.fn()) {
+  const view = render(
+    <StoryEditor
+      projectId="p1"
+      storyId="s1"
+      onBack={onBack}
+      onOpenStory={vi.fn()}
+    />,
+  );
+  return { ...view, onBack };
 }
 
 beforeEach(() => {
   mocked.setUnsavedChanges.mockResolvedValue(undefined);
+  mocked.getStoryRelations.mockResolvedValue({
+    storyId: "s1",
+    epic: null,
+    parent: null,
+    children: [],
+    prerequisites: [],
+    dependents: [],
+    pendingPrerequisites: 0,
+  });
+  mocked.listEpics.mockResolvedValue([]);
+  mocked.listStories.mockResolvedValue([]);
   mocked.getStory.mockResolvedValue(story());
   mocked.listColumns.mockResolvedValue([]);
 });
@@ -113,7 +139,7 @@ describe("StoryEditor", () => {
     expect(await screen.findByDisplayValue("Exportar CSV")).toBeInTheDocument();
   });
 
-  it("indica cambios sin guardar y luego guardado", async () => {
+  it("indica cambios sin guardar, guarda y vuelve al proyecto con aviso", async () => {
     const user = userEvent.setup();
     mocked.updateStory.mockImplementation((input) =>
       Promise.resolve(
@@ -127,7 +153,7 @@ describe("StoryEditor", () => {
         }),
       ),
     );
-    renderEditor();
+    const { onBack } = renderEditor();
 
     const title = await screen.findByLabelText("Título");
     await user.clear(title);
@@ -136,11 +162,11 @@ describe("StoryEditor", () => {
     await user.type(screen.getByLabelText("Nuevo"), "Con cabeceras");
     expect(screen.getByText("Cambios sin guardar")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Guardar" }));
+    await user.click(screen.getByRole("button", { name: "Guardar y volver" }));
 
-    expect(
-      await screen.findByRole("button", { name: "Guardado ✓" }),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(onBack).toHaveBeenCalledWith("Historia #7 guardada.");
+    });
     expect(mocked.updateStory).toHaveBeenCalledWith({
       projectId: "p1",
       id: "s1",
@@ -153,8 +179,21 @@ describe("StoryEditor", () => {
         { text: "Con cabeceras" },
       ],
     });
-    // El criterio nuevo ya tiene su número estable.
-    expect(screen.getByLabelText("CA-2")).toHaveValue("Con cabeceras");
+  });
+
+  it("sin cambios de contenido, «Guardar y volver» vuelve sin guardar", async () => {
+    const user = userEvent.setup();
+    const { onBack } = renderEditor();
+
+    const button = await screen.findByRole("button", {
+      name: "Guardar y volver",
+    });
+    expect(button).toBeEnabled();
+    expect(button).toHaveAttribute("aria-busy", "false");
+    await user.click(button);
+
+    expect(onBack).toHaveBeenCalledWith(undefined);
+    expect(mocked.updateStory).not.toHaveBeenCalled();
   });
 
   it("informa al host de los cambios sin guardar para proteger el cierre", async () => {
@@ -162,21 +201,63 @@ describe("StoryEditor", () => {
     mocked.updateStory.mockImplementation((input) =>
       Promise.resolve(story({ title: input.title, revision: 2 })),
     );
-    const { unmount } = renderEditor();
+    const { unmount, onBack } = renderEditor();
 
     const title = await screen.findByLabelText("Título");
     await user.type(title, "!");
     expect(mocked.setUnsavedChanges).toHaveBeenLastCalledWith(true);
 
-    await user.click(screen.getByRole("button", { name: "Guardar" }));
-    await screen.findByRole("button", { name: "Guardado ✓" });
+    await user.click(screen.getByRole("button", { name: "Guardar y volver" }));
+    await waitFor(() => {
+      expect(onBack).toHaveBeenCalled();
+    });
     expect(mocked.setUnsavedChanges).toHaveBeenLastCalledWith(false);
 
-    await user.type(screen.getByLabelText("Título"), "?");
-    expect(mocked.setUnsavedChanges).toHaveBeenLastCalledWith(true);
     // Salir del editor deja de bloquear el cierre.
     unmount();
     expect(mocked.setUnsavedChanges).toHaveBeenLastCalledWith(false);
+  });
+
+  it("abrir otra historia desde relaciones con cambios sin guardar pide confirmación", async () => {
+    const user = userEvent.setup();
+    mocked.getStoryRelations.mockResolvedValue({
+      storyId: "s1",
+      epic: null,
+      parent: null,
+      children: [
+        {
+          id: "s2",
+          number: 8,
+          title: "Subtarea",
+          state: "pending",
+          archived: false,
+        },
+      ],
+      prerequisites: [],
+      dependents: [],
+      pendingPrerequisites: 0,
+    });
+    const onOpenStory = vi.fn();
+    render(
+      <StoryEditor
+        projectId="p1"
+        storyId="s1"
+        onBack={vi.fn()}
+        onOpenStory={onOpenStory}
+      />,
+    );
+
+    await user.type(await screen.findByLabelText("Título"), "!");
+    await user.click(
+      await screen.findByRole("button", { name: "#8 Subtarea" }),
+    );
+    expect(onOpenStory).not.toHaveBeenCalled();
+    expect(
+      screen.getByText("Tienes cambios sin guardar. ¿Salir y descartarlos?"),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Salir sin guardar" }));
+    expect(onOpenStory).toHaveBeenCalledWith("s2");
   });
 
   it("ante un conflicto conserva el borrador y permite mantenerlo", async () => {
@@ -194,12 +275,12 @@ describe("StoryEditor", () => {
           story({ description: input.description, revision: 3, criteria: [] }),
         ),
       );
-    renderEditor();
+    const { onBack } = renderEditor();
 
     const description = await screen.findByLabelText("Descripción en Markdown");
     await user.clear(description);
     await user.type(description, "Mi borrador largo");
-    await user.click(screen.getByRole("button", { name: "Guardar" }));
+    await user.click(screen.getByRole("button", { name: "Guardar y volver" }));
 
     expect(
       await screen.findByText("Otra edición guardó cambios mientras editabas"),
@@ -221,9 +302,11 @@ describe("StoryEditor", () => {
     expect(retry?.description).toBe("Mi borrador largo");
     // CA-1 ya no existe en la versión vigente: se reenvía como criterio nuevo, no se pierde.
     expect(retry?.criteria).toEqual([{ text: "Descarga un archivo" }]);
-    expect(
-      await screen.findByRole("button", { name: "Guardado ✓" }),
-    ).toBeInTheDocument();
+    // El conflicto no volvió al proyecto; conservar la versión sí, tras guardarla.
+    await waitFor(() => {
+      expect(onBack).toHaveBeenCalledTimes(1);
+    });
+    expect(onBack).toHaveBeenCalledWith("Historia #7 guardada.");
   });
 
   it("puede descartar el borrador y adoptar la versión guardada", async () => {
@@ -236,7 +319,7 @@ describe("StoryEditor", () => {
     const title = await screen.findByLabelText("Título");
     await user.clear(title);
     await user.type(title, "Mío");
-    await user.click(screen.getByRole("button", { name: "Guardar" }));
+    await user.click(screen.getByRole("button", { name: "Guardar y volver" }));
     await user.click(
       await screen.findByRole("button", {
         name: "Descartar mi borrador y usar la guardada",
@@ -261,28 +344,13 @@ describe("StoryEditor", () => {
 
     const title = await screen.findByLabelText("Título");
     await user.type(title, " ");
-    await user.click(screen.getByRole("button", { name: "Guardar" }));
+    await user.click(screen.getByRole("button", { name: "Guardar y volver" }));
 
     expect(await screen.findByText("El título es obligatorio.")).toBeVisible();
     expect(screen.getByLabelText("Título")).toHaveAttribute(
       "aria-invalid",
       "true",
     );
-  });
-
-  it("tras guardar, el botón dice «Guardado» y no simula seguir trabajando", async () => {
-    const user = userEvent.setup();
-    mocked.updateStory.mockImplementation((input) =>
-      Promise.resolve(story({ title: input.title, revision: 2 })),
-    );
-    renderEditor();
-    const title = await screen.findByLabelText("Título");
-    await user.type(title, "!");
-    await user.click(screen.getByRole("button", { name: "Guardar" }));
-
-    const button = await screen.findByRole("button", { name: "Guardado ✓" });
-    expect(button).toBeDisabled();
-    expect(button).toHaveAttribute("aria-busy", "false");
   });
 
   it("restaurar envía la columna que se muestra si la original ya no es válida", async () => {

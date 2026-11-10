@@ -43,6 +43,14 @@ pub fn register_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
             commands::stories::update_story,
             commands::stories::archive_story,
             commands::stories::restore_story,
+            commands::epics::list_epics,
+            commands::epics::create_epic,
+            commands::epics::update_epic,
+            commands::relations::get_story_relations,
+            commands::relations::set_story_epic,
+            commands::relations::set_story_parent,
+            commands::relations::add_story_dependency,
+            commands::relations::remove_story_dependency,
         ])
 }
 

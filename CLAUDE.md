@@ -10,7 +10,8 @@ Construimos un kanban desktop local para historias, épicas y agentes de IA, con
 - Base de HU-001: monorepo con workspace Cargo (`crates/core`, `apps/desktop/src-tauri`) y workspace npm (`apps/desktop`). Repositorio git local sin remoto. Versiones y requisitos en README.
 - Comandos (desde la raíz):
   - `npm ci`: instalar. `npm run dev`: app con recarga en caliente.
-  - `npm run check`: todo lo de CI (formato, lint, typecheck+build web, clippy, pruebas). Ejecútalo antes de dar una historia por terminada.
+  - `npm run check`: todo lo de CI. Primero regenera los contratos TS (`npm run contracts`) y después pasa formato, lint, typecheck+build web, pruebas UI, clippy y pruebas Rust. Ejecútalo antes de dar una historia por terminada.
+  - Si cambias un tipo `#[ts(export)]`, ejecuta `npm run contracts` antes de tocar el frontend: los tipos generados solo se actualizan con las pruebas del núcleo.
   - Por partes: `npm run lint`, `npm run typecheck`, `npm run build:web`, `npm run lint:rust`, `npm run test:rust`, `npm run format`.
   - Una prueba Rust: `cargo test -p kanbania-core <nombre>`, `cargo test -p kanbania-core --test storage` o `cargo test -p kanbania-desktop --test ipc_storage`.
   - App con perfil de datos aparte: `KANBANIA_DATA_DIR=/ruta npm run dev`.
@@ -41,6 +42,14 @@ Construimos un kanban desktop local para historias, épicas y agentes de IA, con
   - Entrar en una columna `done` exige la aceptación de HU-009 (`AcceptanceRequired` hasta entonces).
   - Posiciones densas 0..n en columnas y tarjetas.
   - Historias (HU-005): número `#N` por proyecto y criterios `CA-n` estables, que nunca se reutilizan. La edición es de documento completo con una sola revisión. Archivar pone `position = NULL`: toda consulta de posición o recuento debe excluir las archivadas (`archived_at IS NULL`), y restaurar es una entrada (WIP + «hecho»).
+- Relaciones (HU-006, `features/relations`):
+  - Son tablas de enlace (`story_epics`, `story_parents`, `story_dependencies`) con claves foráneas compuestas `(project_id, …)`.
+  - No cambian la revisión de la historia y son idempotentes.
+  - Ciclos: CTE recursivos en `relations/graph.rs` dentro de la transacción.
+  - Para «archivada», mira `StoryRef.archived`, no `state` (que prioriza «aceptada»).
+  - «Aceptada» = `accepted_at IS NOT NULL`, y solo la escribe HU-009.
+  - `pendingPrerequisites` se calcula en SQL (`stories/story.rs`) y en Rust (`relations/get.rs`); una prueba vigila que coincidan.
+- Editor de historias: «Guardar y volver» siempre vuelve al proyecto tras guardar, o directamente si no hay cambios de contenido. Ante un conflicto o un error se queda con el borrador.
 - Markdown de usuarios o agentes es dato no confiable: renderízalo solo con `shared/ui/MarkdownPreview` (`react-markdown` con `skipHtml`, sin enlaces navegables ni imágenes remotas). Nunca uses `dangerouslySetInnerHTML`.
 - Botones deshabilitados: `cursor: not-allowed`. Usa `aria-busy` (que muestra el puntero de progreso) solo mientras haya una operación en curso; en macOS se confunde con un bloqueo.
 - UI: lecturas con `useIpcResource(load)` (`load` estable; si depende de props, monta el componente con `key`). Mutaciones con `useMutation(fn)` → `{ ok, value }`. `newRequestId()` se mantiene mientras se reintenta el mismo envío. Muestra los errores de campo con `FieldError` y `aria-describedby`; los estados siempre con texto, no solo con color.

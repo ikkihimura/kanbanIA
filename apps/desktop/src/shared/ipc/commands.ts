@@ -3,6 +3,13 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { AppInfo } from "../../contracts/generated/AppInfo";
+import type { CreateEpicInput } from "../../contracts/generated/CreateEpicInput";
+import type { DependencyInput } from "../../contracts/generated/DependencyInput";
+import type { Epic } from "../../contracts/generated/Epic";
+import type { SetStoryEpicInput } from "../../contracts/generated/SetStoryEpicInput";
+import type { SetStoryParentInput } from "../../contracts/generated/SetStoryParentInput";
+import type { StoryRelations } from "../../contracts/generated/StoryRelations";
+import type { UpdateEpicInput } from "../../contracts/generated/UpdateEpicInput";
 import type { ArchiveStoryInput } from "../../contracts/generated/ArchiveStoryInput";
 import type { CreateStoryInput } from "../../contracts/generated/CreateStoryInput";
 import type { RestoreStoryInput } from "../../contracts/generated/RestoreStoryInput";
@@ -156,6 +163,53 @@ export function archiveStory(input: ArchiveStoryInput): Promise<StorySummary> {
 
 export function restoreStory(input: RestoreStoryInput): Promise<StorySummary> {
   return call("restore_story", { input });
+}
+
+// --- épicas ---
+
+export function listEpics(projectId: string): Promise<Epic[]> {
+  return call("list_epics", { projectId });
+}
+
+export function createEpic(input: CreateEpicInput): Promise<Epic> {
+  return call("create_epic", { input });
+}
+
+export function updateEpic(input: UpdateEpicInput): Promise<Epic> {
+  return call("update_epic", { input });
+}
+
+// --- relaciones ---
+
+export function getStoryRelations(
+  projectId: string,
+  storyId: string,
+): Promise<StoryRelations> {
+  return call("get_story_relations", { projectId, storyId });
+}
+
+export function setStoryEpic(
+  input: SetStoryEpicInput,
+): Promise<StoryRelations> {
+  return call("set_story_epic", { input });
+}
+
+export function setStoryParent(
+  input: SetStoryParentInput,
+): Promise<StoryRelations> {
+  return call("set_story_parent", { input });
+}
+
+export function addStoryDependency(
+  input: DependencyInput,
+): Promise<StoryRelations> {
+  return call("add_story_dependency", { input });
+}
+
+export function removeStoryDependency(
+  input: DependencyInput,
+): Promise<StoryRelations> {
+  return call("remove_story_dependency", { input });
 }
 
 // --- cierre con cambios sin guardar ---

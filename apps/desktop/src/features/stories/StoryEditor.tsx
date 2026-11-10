@@ -11,16 +11,24 @@ import { useMutation } from "../../shared/ipc/useMutation";
 import { formatDateTime } from "../../shared/ui/format";
 import { MarkdownPreview } from "../../shared/ui/MarkdownPreview";
 import { useUnsavedChangesGuard } from "../../shared/ui/useUnsavedChangesGuard";
+import { RelationsPanel } from "../relations/RelationsPanel";
 import { PRIORITY_LABEL } from "./priorities";
 import { StoryForm } from "./StoryForm";
 
 interface Props {
   projectId: string;
   storyId: string;
-  onBack: () => void;
+  /** Volver al proyecto, opcionalmente con un aviso (p. ej. «Historia #3 guardada»). */
+  onBack: (notice?: string) => void;
+  onOpenStory: (storyId: string) => void;
 }
 
-export function StoryEditor({ projectId, storyId, onBack }: Props) {
+export function StoryEditor({
+  projectId,
+  storyId,
+  onBack,
+  onOpenStory,
+}: Props) {
   const load = useCallback(
     () => getStory(projectId, storyId),
     [projectId, storyId],
@@ -28,7 +36,8 @@ export function StoryEditor({ projectId, storyId, onBack }: Props) {
   const { state, run } = useIpcResource(load);
   const titleRef = useRef<HTMLHeadingElement>(null);
   const [dirty, setDirty] = useState(false);
-  const [confirmLeave, setConfirmLeave] = useState(false);
+  // Navegación pendiente de confirmar porque hay cambios sin guardar.
+  const [pendingLeave, setPendingLeave] = useState<(() => void) | null>(null);
   const [confirmArchive, setConfirmArchive] = useState(false);
   // Versión conocida más reciente (tras guardar), para encabezado y archivo.
   const [latest, setLatest] = useState<StoryDetail | null>(null);
@@ -47,6 +56,11 @@ export function StoryEditor({ projectId, storyId, onBack }: Props) {
     run(load, { keepData: true });
   }, [run, load]);
 
+  function leave(action: () => void) {
+    if (dirty) setPendingLeave(() => action);
+    else action();
+  }
+
   async function handleArchive(current: StoryDetail) {
     const result = await archive.mutate({
       projectId,
@@ -64,15 +78,16 @@ export function StoryEditor({ projectId, storyId, onBack }: Props) {
           type="button"
           className="link-button"
           onClick={() => {
-            if (dirty) setConfirmLeave(true);
-            else onBack();
+            leave(() => {
+              onBack();
+            });
           }}
         >
           ← Proyecto
         </button>
       </nav>
 
-      {confirmLeave && (
+      {pendingLeave && (
         <div
           className="repo__confirm panel"
           role="alertdialog"
@@ -83,7 +98,7 @@ export function StoryEditor({ projectId, storyId, onBack }: Props) {
             <button
               type="button"
               className="button button--danger"
-              onClick={onBack}
+              onClick={pendingLeave}
             >
               Salir sin guardar
             </button>
@@ -92,7 +107,7 @@ export function StoryEditor({ projectId, storyId, onBack }: Props) {
               className="button button--secondary"
               autoFocus
               onClick={() => {
-                setConfirmLeave(false);
+                setPendingLeave(null);
               }}
             >
               Seguir editando
@@ -179,6 +194,18 @@ export function StoryEditor({ projectId, storyId, onBack }: Props) {
             </p>
           )}
 
+          <RelationsPanel
+            key={`relations-${story.id}-${story.archivedAt ?? "active"}`}
+            projectId={projectId}
+            storyId={story.id}
+            readOnly={story.archivedAt !== null}
+            onOpenStory={(id) => {
+              leave(() => {
+                onOpenStory(id);
+              });
+            }}
+          />
+
           {story.archivedAt ? (
             <ArchivedStory story={story} onRestored={reload} />
           ) : (
@@ -188,6 +215,13 @@ export function StoryEditor({ projectId, storyId, onBack }: Props) {
                 story={story}
                 onSaved={setLatest}
                 onDirtyChange={setDirty}
+                onDone={(saved) => {
+                  onBack(
+                    saved
+                      ? `Historia #${String(saved.number)} guardada.`
+                      : undefined,
+                  );
+                }}
               />
             </section>
           )}

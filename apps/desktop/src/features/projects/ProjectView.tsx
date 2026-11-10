@@ -4,6 +4,7 @@ import { renameProject } from "../../shared/ipc/commands";
 import { useMutation } from "../../shared/ipc/useMutation";
 import { FieldError } from "../../shared/ui/FieldError";
 import { ColumnsSection } from "../columns/ColumnsSection";
+import { EpicsSection } from "../epics/EpicsSection";
 import { RepositoriesSection } from "../repositories/RepositoriesSection";
 import { StoriesSection } from "../stories/StoriesSection";
 
@@ -12,6 +13,8 @@ interface Props {
   onBack: () => void;
   onChanged: (project: Project) => void;
   onOpenStory: (storyId: string) => void;
+  /** Aviso tras volver de otra pantalla (p. ej. historia guardada). */
+  notice?: string | undefined;
 }
 
 export function ProjectView({
@@ -19,6 +22,7 @@ export function ProjectView({
   onBack,
   onChanged,
   onOpenStory,
+  notice,
 }: Props) {
   const titleRef = useRef<HTMLHeadingElement>(null);
   const renameButtonRef = useRef<HTMLButtonElement>(null);
@@ -65,6 +69,12 @@ export function ProjectView({
           ← Proyectos
         </button>
       </nav>
+
+      {notice && (
+        <p className="notice" role="status">
+          ✓ {notice}
+        </p>
+      )}
 
       <header className="view__header">
         <h1 className="view__title" ref={titleRef} tabIndex={-1}>
@@ -134,6 +144,7 @@ export function ProjectView({
         projectId={project.id}
         onOpenStory={onOpenStory}
       />
+      <EpicsSection key={`epics-${project.id}`} projectId={project.id} />
       <ColumnsSection key={`columns-${project.id}`} projectId={project.id} />
       <RepositoriesSection key={project.id} projectId={project.id} />
     </main>

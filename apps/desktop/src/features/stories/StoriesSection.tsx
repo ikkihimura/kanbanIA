@@ -3,6 +3,7 @@ import type { Priority } from "../../contracts/generated/Priority";
 import {
   createStory,
   listColumns,
+  listEpics,
   listStories,
   newRequestId,
 } from "../../shared/ipc/commands";
@@ -23,6 +24,8 @@ export function StoriesSection({ projectId, onOpenStory }: Props) {
     [projectId],
   );
   const loadColumns = useCallback(() => listColumns(projectId), [projectId]);
+  const loadEpics = useCallback(() => listEpics(projectId), [projectId]);
+  const epics = useIpcResource(loadEpics);
   const stories = useIpcResource(loadStories);
   const columns = useIpcResource(loadColumns);
   const [title, setTitle] = useState("");
@@ -48,6 +51,12 @@ export function StoriesSection({ projectId, onOpenStory }: Props) {
       ? (columns.state.data.find((c) => c.id === id)?.name ?? "")
       : "";
   const all = stories.state.status === "ready" ? stories.state.data : [];
+  const epicNumber = (id: string | null) =>
+    id && epics.state.status === "ready"
+      ? epics.state.data.find((e) => e.id === id)?.number
+      : undefined;
+  const storyNumber = (id: string | null) =>
+    id ? all.find((s) => s.id === id)?.number : undefined;
   const visible = showArchived ? all : all.filter((s) => !s.archivedAt);
   const archivedCount = all.length - all.filter((s) => !s.archivedAt).length;
 
@@ -154,8 +163,20 @@ export function StoriesSection({ projectId, onOpenStory }: Props) {
                   {story.criteriaCount === 1
                     ? "1 criterio"
                     : `${String(story.criteriaCount)} criterios`}
+                  {epicNumber(story.epicId) !== undefined &&
+                    ` · E-${String(epicNumber(story.epicId))}`}
+                  {storyNumber(story.parentId) !== undefined &&
+                    ` · subtarea de #${String(storyNumber(story.parentId))}`}
                   {story.archivedAt ? " · archivada" : ""}
                 </span>
+                {story.pendingPrerequisites > 0 && (
+                  <span className="badge badge--warn">
+                    Bloqueada por {story.pendingPrerequisites}{" "}
+                    {story.pendingPrerequisites === 1
+                      ? "prerequisito sin aceptar"
+                      : "prerequisitos sin aceptar"}
+                  </span>
+                )}
               </button>
             </li>
           ))}

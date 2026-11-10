@@ -61,6 +61,13 @@ pub struct StorySummary {
     pub title: String,
     pub priority: Priority,
     pub archived_at: Option<String>,
+    /// Aceptación vigente (la establece HU-009).
+    pub accepted_at: Option<String>,
+    pub epic_id: Option<String>,
+    pub parent_id: Option<String>,
+    /// Prerequisitos sin aceptar: bloqueada si > 0.
+    #[ts(type = "number")]
+    pub pending_prerequisites: i64,
     #[ts(type = "number")]
     pub criteria_count: i64,
     #[ts(type = "number")]
@@ -95,6 +102,7 @@ pub struct StoryDetail {
     pub description: String,
     pub priority: Priority,
     pub archived_at: Option<String>,
+    pub accepted_at: Option<String>,
     pub criteria: Vec<AcceptanceCriterion>,
     #[ts(type = "number")]
     pub revision: i64,
@@ -113,6 +121,10 @@ struct StoryRow {
     description: String,
     priority: String,
     archived_at: Option<String>,
+    accepted_at: Option<String>,
+    epic_id: Option<String>,
+    parent_id: Option<String>,
+    pending_prerequisites: i64,
     criteria_count: i64,
     revision: i64,
     created_at: String,
@@ -123,9 +135,14 @@ macro_rules! select_story {
     ($tail:literal) => {
         concat!(
             "SELECT s.id, s.project_id, s.number, s.column_id, s.position, s.title, \
-             s.description, s.priority, s.archived_at, s.revision, s.created_at, s.updated_at, \
+             s.description, s.priority, s.archived_at, s.accepted_at, s.revision, \
+             s.created_at, s.updated_at, \
              (SELECT COUNT(*) FROM acceptance_criteria a WHERE a.story_id = s.id) \
-                 AS criteria_count \
+                 AS criteria_count, \
+             (SELECT epic_id FROM story_epics se WHERE se.story_id = s.id) AS epic_id, \
+             (SELECT parent_id FROM story_parents sp WHERE sp.story_id = s.id) AS parent_id, \
+             (SELECT COUNT(*) FROM story_dependencies d JOIN stories p ON p.id = d.depends_on_id \
+              WHERE d.story_id = s.id AND p.accepted_at IS NULL) AS pending_prerequisites \
              FROM stories s ",
             $tail
         )
@@ -143,6 +160,10 @@ impl StoryRow {
             position: self.position,
             title: self.title,
             archived_at: self.archived_at,
+            accepted_at: self.accepted_at,
+            epic_id: self.epic_id,
+            parent_id: self.parent_id,
+            pending_prerequisites: self.pending_prerequisites,
             criteria_count: self.criteria_count,
             revision: self.revision,
         })
@@ -159,6 +180,7 @@ impl StoryRow {
             title: self.title,
             description: self.description,
             archived_at: self.archived_at,
+            accepted_at: self.accepted_at,
             criteria,
             revision: self.revision,
             created_at: self.created_at,

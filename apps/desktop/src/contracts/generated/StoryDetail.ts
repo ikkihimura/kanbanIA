@@ -9,4 +9,4 @@ export type StoryDetail = { id: string, projectId: string, number: number, colum
 /**
  * Markdown tal como lo escribió el usuario; la UI lo renderiza sin HTML crudo.
  */
-description: string, priority: Priority, archivedAt: string | null, criteria: Array<AcceptanceCriterion>, revision: number, createdAt: string, updatedAt: string, };
+description: string, priority: Priority, archivedAt: string | null, acceptedAt: string | null, criteria: Array<AcceptanceCriterion>, revision: number, createdAt: string, updatedAt: string, };

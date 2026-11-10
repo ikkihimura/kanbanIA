@@ -12,7 +12,7 @@ import { ProjectView } from "./ProjectView";
 type View =
   | { kind: "starting" }
   | { kind: "list"; notice?: string }
-  | { kind: "project"; project: Project }
+  | { kind: "project"; project: Project; notice?: string }
   | { kind: "story"; project: Project; storyId: string };
 
 /** Navegación entre la lista de proyectos y un proyecto. Al iniciar reabre el último abierto. */
@@ -87,6 +87,7 @@ export function Workspace() {
       return (
         <ProjectView
           project={view.project}
+          notice={view.notice}
           onBack={backToList}
           onChanged={replaceProject}
           onOpenStory={(storyId) => {
@@ -100,8 +101,11 @@ export function Workspace() {
           key={view.storyId}
           projectId={view.project.id}
           storyId={view.storyId}
-          onBack={() => {
-            setView({ kind: "project", project: view.project });
+          onBack={(notice) => {
+            setView({ kind: "project", project: view.project, notice });
+          }}
+          onOpenStory={(storyId) => {
+            setView({ kind: "story", project: view.project, storyId });
           }}
         />
       );
