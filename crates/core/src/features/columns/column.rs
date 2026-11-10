@@ -99,7 +99,8 @@ macro_rules! select_column {
     ($tail:literal) => {
         concat!(
             "SELECT c.id, c.project_id, c.name, c.category, c.position, c.wip_limit, c.revision, \
-             (SELECT COUNT(*) FROM stories s WHERE s.column_id = c.id) AS card_count \
+             (SELECT COUNT(*) FROM stories s WHERE s.column_id = c.id AND s.archived_at IS NULL) \
+             AS card_count \
              FROM columns c ",
             $tail
         )

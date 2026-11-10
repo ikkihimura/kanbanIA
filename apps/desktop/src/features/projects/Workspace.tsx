@@ -6,12 +6,14 @@ import {
   openProject,
 } from "../../shared/ipc/commands";
 import { ProjectList } from "./ProjectList";
+import { StoryEditor } from "../stories/StoryEditor";
 import { ProjectView } from "./ProjectView";
 
 type View =
   | { kind: "starting" }
   | { kind: "list"; notice?: string }
-  | { kind: "project"; project: Project };
+  | { kind: "project"; project: Project }
+  | { kind: "story"; project: Project; storyId: string };
 
 /** Navegación entre la lista de proyectos y un proyecto. Al iniciar reabre el último abierto. */
 export function Workspace() {
@@ -87,6 +89,20 @@ export function Workspace() {
           project={view.project}
           onBack={backToList}
           onChanged={replaceProject}
+          onOpenStory={(storyId) => {
+            setView({ kind: "story", project: view.project, storyId });
+          }}
+        />
+      );
+    case "story":
+      return (
+        <StoryEditor
+          key={view.storyId}
+          projectId={view.project.id}
+          storyId={view.storyId}
+          onBack={() => {
+            setView({ kind: "project", project: view.project });
+          }}
         />
       );
   }

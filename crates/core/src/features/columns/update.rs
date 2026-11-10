@@ -48,11 +48,17 @@ pub async fn update_column(store: &Store, input: &UpdateColumnInput) -> Result<C
 
                 let touches_done = (current.category == ColumnCategory::Done)
                     != (input.category == ColumnCategory::Done);
-                if touches_done && current.card_count > 0 {
+                // Cuentan también las archivadas: restaurarlas no debe aterrizar en «hecho».
+                let any_stories: bool =
+                    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM stories WHERE column_id = ?)")
+                        .bind(&input.id)
+                        .fetch_one(&mut *conn)
+                        .await?;
+                if touches_done && any_stories {
                     return Err(CoreError::Validation {
                         field: "category",
-                        reason: "Una columna con tarjetas no puede pasar a «hecho» ni dejar de \
-                                 serlo: mueve antes sus tarjetas."
+                        reason: "Una columna con historias (también archivadas) no puede pasar a \
+                                 «hecho» ni dejar de serlo: muévelas antes."
                             .into(),
                     });
                 }

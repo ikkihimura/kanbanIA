@@ -1,7 +1,14 @@
 // Envoltorios tipados de los comandos IPC. Los tipos de datos vienen de Rust (ts-rs);
 // los nombres de comando deben coincidir con `register_commands` en src-tauri/src/lib.rs.
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { AppInfo } from "../../contracts/generated/AppInfo";
+import type { ArchiveStoryInput } from "../../contracts/generated/ArchiveStoryInput";
+import type { CreateStoryInput } from "../../contracts/generated/CreateStoryInput";
+import type { RestoreStoryInput } from "../../contracts/generated/RestoreStoryInput";
+import type { StoryDetail } from "../../contracts/generated/StoryDetail";
+import type { StorySummary } from "../../contracts/generated/StorySummary";
+import type { UpdateStoryInput } from "../../contracts/generated/UpdateStoryInput";
 import type { Column } from "../../contracts/generated/Column";
 import type { CreateColumnInput } from "../../contracts/generated/CreateColumnInput";
 import type { CreateProjectInput } from "../../contracts/generated/CreateProjectInput";
@@ -120,6 +127,55 @@ export function reorderColumn(input: ReorderColumnInput): Promise<Column> {
 
 export function deleteColumn(input: DeleteColumnInput): Promise<void> {
   return call("delete_column", { input });
+}
+
+// --- historias ---
+
+export function listStories(
+  projectId: string,
+  includeArchived: boolean,
+): Promise<StorySummary[]> {
+  return call("list_stories", { projectId, includeArchived });
+}
+
+export function getStory(projectId: string, id: string): Promise<StoryDetail> {
+  return call("get_story", { projectId, id });
+}
+
+export function createStory(input: CreateStoryInput): Promise<StorySummary> {
+  return call("create_story", { input });
+}
+
+export function updateStory(input: UpdateStoryInput): Promise<StoryDetail> {
+  return call("update_story", { input });
+}
+
+export function archiveStory(input: ArchiveStoryInput): Promise<StorySummary> {
+  return call("archive_story", { input });
+}
+
+export function restoreStory(input: RestoreStoryInput): Promise<StorySummary> {
+  return call("restore_story", { input });
+}
+
+// --- cierre con cambios sin guardar ---
+
+/** Nombre del evento emitido por el host (`CONFIRM_CLOSE_EVENT` en exit_guard.rs). */
+export const CONFIRM_CLOSE_EVENT = "unsaved-changes:confirm-close";
+
+export async function setUnsavedChanges(dirty: boolean): Promise<void> {
+  if (!isTauri()) return;
+  await invoke("set_unsaved_changes", { dirty });
+}
+
+export function discardAndClose(): Promise<void> {
+  return call("discard_and_close");
+}
+
+/** Escucha la petición de confirmar el cierre. Devuelve la función para dejar de escuchar. */
+export async function onConfirmClose(handler: () => void): Promise<() => void> {
+  if (!isTauri()) return () => undefined;
+  return listen(CONFIRM_CLOSE_EVENT, handler);
 }
 
 // --- errores ---

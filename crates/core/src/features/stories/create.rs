@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use super::story::{ENTITY, StorySummary, count_in_column, load_story, validate_title};
+use super::story::{ENTITY, Priority, StorySummary, count_in_column, load_story, validate_title};
 use crate::error::CoreError;
 use crate::features::columns::{
     Column, ColumnCategory, columns_of_project, ensure_capacity, load_column,
@@ -22,6 +22,9 @@ pub struct CreateStoryInput {
     /// Si se omite: primera columna «backlog» o, si no hay, la primera que no sea «hecho».
     #[ts(optional)]
     pub column_id: Option<String>,
+    /// Por defecto, `medium`.
+    #[ts(optional)]
+    pub priority: Option<Priority>,
 }
 
 #[derive(Serialize)]
@@ -29,8 +32,10 @@ struct Payload<'a> {
     project_id: &'a str,
     title: &'a str,
     column_id: Option<&'a str>,
+    priority: Priority,
 }
 
+/// Crea una historia al final de su columna, con el siguiente número del proyecto.
 pub async fn create_story(
     store: &Store,
     actor: &str,
@@ -38,10 +43,12 @@ pub async fn create_story(
 ) -> Result<StorySummary, CoreError> {
     let key = MutationKey::new(actor, OPERATION, &input.request_id)?;
     let title = validate_title(&input.title)?;
+    let priority = input.priority.unwrap_or(Priority::Medium);
     let payload = Payload {
         project_id: &input.project_id,
         title: &title,
         column_id: input.column_id.as_deref(),
+        priority,
     };
     let project_id = input.project_id.clone();
     let column_id = input.column_id.clone();
@@ -66,15 +73,24 @@ pub async fn create_story(
                 ensure_capacity(conn, &column, 1).await?;
 
                 let position = count_in_column(conn, &column.id).await?;
+                let number: i64 = sqlx::query_scalar(
+                    "SELECT COALESCE(MAX(number), 0) + 1 FROM stories WHERE project_id = ?",
+                )
+                .bind(&project_id)
+                .fetch_one(&mut *conn)
+                .await?;
                 sqlx::query(
-                    "INSERT INTO stories (id, project_id, column_id, position, title) \
-                     VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO stories \
+                     (id, project_id, number, column_id, position, title, priority) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?)",
                 )
                 .bind(&id)
                 .bind(&project_id)
+                .bind(number)
                 .bind(&column.id)
                 .bind(position)
                 .bind(&title)
+                .bind(priority.as_str())
                 .execute(&mut *conn)
                 .await?;
                 load_story(conn, &project_id, &id)

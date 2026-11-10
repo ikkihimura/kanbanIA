@@ -19,9 +19,13 @@
     "format:check": "prettier --check . && cargo fmt --all --check",
     "lint:rust": "cargo clippy --workspace --all-targets --locked -- -D warnings",
     "test:rust": "cargo test --workspace --locked",
-    "check": "npm run format:check && npm run lint && npm run build:web && npm run lint:rust && npm run test:rust"
+    "check": "npm run format:check && npm run lint && npm run build:web && npm run test:web && npm run lint:rust && npm run test:rust",
+    "test:web": "npm run test -w apps/desktop"
   },
   "devDependencies": {
     "prettier": "3.9.10"
+  },
+  "overrides": {
+    "jsdom": "29.1.1"
   }
 }

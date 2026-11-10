@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use ts_rs::TS;
 
-use super::story::{ENTITY, StorySummary, count_in_column, load_story};
+use super::story::{ENTITY, StorySummary, count_in_column, load_story, not_archived};
 use crate::error::CoreError;
 use crate::features::columns::{ColumnCategory, ensure_capacity, load_column};
 use crate::platform::storage::Store;
@@ -42,6 +42,8 @@ pub async fn move_story(store: &Store, input: &MoveStoryInput) -> Result<StorySu
                         current: serde_json::to_value(&story)?,
                     });
                 }
+                not_archived(&story)?;
+                let old_position = story.position.unwrap_or_default();
                 let destination = load_column(conn, &input.project_id, &input.to_column_id)
                     .await?
                     .ok_or(CoreError::NotFound { entity: "Columna" })?;
@@ -61,7 +63,7 @@ pub async fn move_story(store: &Store, input: &MoveStoryInput) -> Result<StorySu
                      WHERE column_id = ? AND position > ?",
                 )
                 .bind(&story.column_id)
-                .bind(story.position)
+                .bind(old_position)
                 .execute(&mut *conn)
                 .await?;
 

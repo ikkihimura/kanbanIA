@@ -67,10 +67,50 @@ pub async fn delete_column(store: &Store, input: &DeleteColumnInput) -> Result<(
                         "UPDATE stories SET column_id = ?, position = position + ?, \
                          revision = revision + 1, \
                          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
-                         WHERE project_id = ? AND column_id = ?",
+                         WHERE project_id = ? AND column_id = ? AND archived_at IS NULL",
                     )
                     .bind(&destination.id)
                     .bind(destination.card_count)
+                    .bind(&input.project_id)
+                    .bind(&input.id)
+                    .execute(&mut *conn)
+                    .await?;
+                }
+
+                // Las archivadas conservan su columna de origen para restaurarse: se reasignan
+                // al destino elegido o, sin él, a la primera columna utilizable restante.
+                // El destino indicado se valida siempre (también sin tarjetas activas). Nunca se
+                // envían archivadas a una columna «hecho»: se usa la primera utilizable.
+                let requested = match input.destination_column_id.as_deref() {
+                    Some(destination) if destination != input.id => Some(
+                        load_column(conn, &input.project_id, destination)
+                            .await?
+                            .ok_or(CoreError::NotFound { entity: ENTITY })?,
+                    ),
+                    _ => None,
+                };
+                let archived_target: Option<String> = match requested {
+                    Some(destination) if destination.category != ColumnCategory::Done => {
+                        Some(destination.id)
+                    }
+                    _ => {
+                        sqlx::query_scalar(
+                            "SELECT id FROM columns WHERE project_id = ? AND id <> ? \
+                             AND category <> 'done' ORDER BY position LIMIT 1",
+                        )
+                        .bind(&input.project_id)
+                        .bind(&input.id)
+                        .fetch_optional(&mut *conn)
+                        .await?
+                    }
+                };
+                if let Some(target) = archived_target {
+                    sqlx::query(
+                        "UPDATE stories SET column_id = ?, revision = revision + 1, \
+                         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                         WHERE project_id = ? AND column_id = ? AND archived_at IS NOT NULL",
+                    )
+                    .bind(&target)
                     .bind(&input.project_id)
                     .bind(&input.id)
                     .execute(&mut *conn)

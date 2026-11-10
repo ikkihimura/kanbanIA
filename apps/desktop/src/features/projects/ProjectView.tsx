@@ -5,14 +5,21 @@ import { useMutation } from "../../shared/ipc/useMutation";
 import { FieldError } from "../../shared/ui/FieldError";
 import { ColumnsSection } from "../columns/ColumnsSection";
 import { RepositoriesSection } from "../repositories/RepositoriesSection";
+import { StoriesSection } from "../stories/StoriesSection";
 
 interface Props {
   project: Project;
   onBack: () => void;
   onChanged: (project: Project) => void;
+  onOpenStory: (storyId: string) => void;
 }
 
-export function ProjectView({ project, onBack, onChanged }: Props) {
+export function ProjectView({
+  project,
+  onBack,
+  onChanged,
+  onOpenStory,
+}: Props) {
   const titleRef = useRef<HTMLHeadingElement>(null);
   const renameButtonRef = useRef<HTMLButtonElement>(null);
   const [editing, setEditing] = useState(false);
@@ -122,6 +129,11 @@ export function ProjectView({ project, onBack, onChanged }: Props) {
         </form>
       )}
 
+      <StoriesSection
+        key={`stories-${project.id}`}
+        projectId={project.id}
+        onOpenStory={onOpenStory}
+      />
       <ColumnsSection key={`columns-${project.id}`} projectId={project.id} />
       <RepositoriesSection key={project.id} projectId={project.id} />
     </main>

@@ -1,7 +1,8 @@
 import { useCallback, useState } from "react";
 import { toUiError, type UiError } from "./commands";
 
-export type MutationResult<R> = { ok: true; value: R } | { ok: false };
+export type MutationResult<R> =
+  { ok: true; value: R } | { ok: false; error: UiError };
 
 /**
  * Ejecuta una mutación IPC con estado `pending` y error normalizado.
@@ -18,8 +19,9 @@ export function useMutation<A, R>(fn: (args: A) => Promise<R>) {
       try {
         return { ok: true, value: await fn(args) };
       } catch (caught) {
-        setError(toUiError(caught));
-        return { ok: false };
+        const uiError = toUiError(caught);
+        setError(uiError);
+        return { ok: false, error: uiError };
       } finally {
         setPending(false);
       }

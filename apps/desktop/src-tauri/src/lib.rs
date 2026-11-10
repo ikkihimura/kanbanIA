@@ -2,34 +2,48 @@
 //! No contiene reglas de negocio.
 
 mod commands;
+mod exit_guard;
+#[cfg(target_os = "macos")]
+mod menu;
 mod storage;
 
 use std::path::PathBuf;
 
+pub use exit_guard::{CONFIRM_CLOSE_EVENT, ExitGuard};
 pub use storage::StorageSlot;
-use tauri::{App, Builder, Manager, RunEvent, Runtime};
+use tauri::{App, AppHandle, Builder, Emitter, Manager, RunEvent, Runtime, WindowEvent};
 
 /// Registra los comandos IPC. Lo usan el arranque real y las pruebas de contrato.
 pub fn register_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
-    builder.invoke_handler(tauri::generate_handler![
-        commands::app_info::get_app_info,
-        commands::storage::get_storage_status,
-        commands::storage::retry_open_storage,
-        commands::projects::list_projects,
-        commands::projects::create_project,
-        commands::projects::rename_project,
-        commands::projects::open_project,
-        commands::projects::get_last_opened_project,
-        commands::repositories::list_repositories,
-        commands::repositories::link_repository,
-        commands::repositories::relocate_repository,
-        commands::repositories::unlink_repository,
-        commands::columns::list_columns,
-        commands::columns::create_column,
-        commands::columns::update_column,
-        commands::columns::reorder_column,
-        commands::columns::delete_column,
-    ])
+    builder
+        .manage(ExitGuard::default())
+        .invoke_handler(tauri::generate_handler![
+            commands::exit::set_unsaved_changes,
+            commands::exit::discard_and_close,
+            commands::app_info::get_app_info,
+            commands::storage::get_storage_status,
+            commands::storage::retry_open_storage,
+            commands::projects::list_projects,
+            commands::projects::create_project,
+            commands::projects::rename_project,
+            commands::projects::open_project,
+            commands::projects::get_last_opened_project,
+            commands::repositories::list_repositories,
+            commands::repositories::link_repository,
+            commands::repositories::relocate_repository,
+            commands::repositories::unlink_repository,
+            commands::columns::list_columns,
+            commands::columns::create_column,
+            commands::columns::update_column,
+            commands::columns::reorder_column,
+            commands::columns::delete_column,
+            commands::stories::list_stories,
+            commands::stories::get_story,
+            commands::stories::create_story,
+            commands::stories::update_story,
+            commands::stories::archive_story,
+            commands::stories::restore_story,
+        ])
 }
 
 fn resolve_data_dir<R: Runtime>(app: &App<R>) -> tauri::Result<PathBuf> {
@@ -39,10 +53,31 @@ fn resolve_data_dir<R: Runtime>(app: &App<R>) -> tauri::Result<PathBuf> {
     }
 }
 
+/// Cancela el cierre y pide confirmación a la UI si hay cambios sin guardar.
+fn should_block_and_ask<R: Runtime>(handle: &AppHandle<R>) -> bool {
+    let blocked = handle
+        .try_state::<ExitGuard>()
+        .is_some_and(|guard| guard.should_block());
+    if blocked && let Err(error) = handle.emit_to("main", CONFIRM_CLOSE_EVENT, ()) {
+        eprintln!("No se pudo pedir confirmación de cierre: {error}");
+    }
+    blocked
+}
+
 pub fn run() {
-    let app = register_commands(Builder::default())
+    let builder = register_commands(Builder::default())
         // Solo el selector de carpetas: capability `dialog:allow-open`.
-        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_dialog::init());
+
+    // macOS: «Salir» (⌘Q) propio para que pase por `ExitGuard` (ver `menu.rs`).
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(menu::build).on_menu_event(|handle, event| {
+        if event.id() == menu::QUIT_ID && !should_block_and_ask(handle) {
+            handle.exit(0);
+        }
+    });
+
+    let app = builder
         .setup(|app| {
             let data_dir = resolve_data_dir(app)?;
             let slot = tauri::async_runtime::block_on(StorageSlot::open(data_dir));
@@ -59,11 +94,29 @@ pub fn run() {
         }
     };
 
-    app.run(|handle, event| {
-        if let RunEvent::Exit = event
-            && let Some(slot) = handle.try_state::<StorageSlot>()
-        {
-            tauri::async_runtime::block_on(slot.close());
+    app.run(|handle, event| match event {
+        // Botón de cerrar, ⌘W, Alt+F4.
+        RunEvent::WindowEvent {
+            event: WindowEvent::CloseRequested { api, .. },
+            ..
+        } => {
+            if should_block_and_ask(handle) {
+                api.prevent_close();
+            }
         }
+        // Salida pedida por el sistema o el usuario (no por `app.exit`, que trae código).
+        RunEvent::ExitRequested {
+            code: None, api, ..
+        } => {
+            if should_block_and_ask(handle) {
+                api.prevent_exit();
+            }
+        }
+        RunEvent::Exit => {
+            if let Some(slot) = handle.try_state::<StorageSlot>() {
+                tauri::async_runtime::block_on(slot.close());
+            }
+        }
+        _ => {}
     });
 }

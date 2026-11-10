@@ -32,6 +32,7 @@ La primera compilación de Rust tarda varios minutos. Abrir `http://localhost:14
 | `npm run build:web` | Typecheck (`tsc`) y build del frontend en `apps/desktop/dist` |
 | `npm run typecheck` | Solo typecheck del frontend |
 | `npm run lint` | ESLint (type-checked, react-hooks), 0 warnings |
+| `npm run test:web` | Pruebas de UI (Vitest + Testing Library + jsdom) |
 | `npm run lint:rust` | Clippy con `-D warnings` |
 | `npm run test:rust` | Pruebas Rust; también regenera los tipos TS del contrato |
 | `npm run format` / `format:check` | Prettier + rustfmt |
@@ -107,6 +108,16 @@ Cada proyecto empieza con el flujo Backlog · Listo · En curso · Revisión · 
 - **Límite WIP** opcional (1–999). Se aplica en el núcleo a toda entrada de tarjetas: crear, mover y destino al eliminar otra columna. Bajarlo por debajo de las tarjetas actuales está permitido: solo bloquea nuevas entradas, y la UI marca la columna como excedida.
 - **Columnas «hecho»**: solo reciben trabajo aceptado. Hasta HU-009, entrar en ellas devuelve `acceptance_required`. Una columna con tarjetas no puede cambiar a ese tipo ni dejar de serlo.
 - **Eliminar** una columna con tarjetas exige elegir destino. Las tarjetas se mueven al final de ese destino, en el mismo orden y en una sola transacción. Siempre queda al menos una columna que no es «hecho».
+
+## Historias
+
+Cada historia tiene un número por proyecto (`#N`) que no se reutiliza, título obligatorio (≤200), descripción en Markdown (≤20 000 caracteres), prioridad (urgente, alta, media o baja) y criterios de aceptación (≤50, de ≤500 caracteres cada uno).
+
+- **Criterios `CA-n`**: el número es estable. Borrar CA-2 no renumera CA-3, y los números no se reutilizan.
+- **Edición**: título, descripción, prioridad y criterios se guardan juntos con una sola revisión. Si otra edición guardó antes, el editor muestra la versión guardada y **conserva tu borrador**. Puedes conservar tu versión o descartarla.
+- **Vista previa segura**: no se interpreta HTML crudo (`<script>`, `onerror`…), los enlaces no navegan y las imágenes remotas no se cargan.
+- **Archivar** saca la historia del tablero y del límite WIP sin borrar nada. **Restaurar** la devuelve al final de la columna elegida y aplica el WIP.
+- **Cambios sin guardar**: cerrar la ventana (botón, ⌘W, Alt+F4) o salir (⌘Q) con un borrador pendiente muestra un aviso para seguir editando o salir sin guardar.
 
 ## Notas
 

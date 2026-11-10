@@ -56,6 +56,7 @@ async fn card(store: &Store, project: &Project, column: &Column, title: &str) ->
             project_id: project.id.clone(),
             title: title.into(),
             column_id: Some(column.id.clone()),
+            priority: None,
         },
     )
     .await
@@ -89,7 +90,7 @@ fn move_input(story: &StorySummary, to: &Column, index: i64) -> MoveStoryInput {
 }
 
 async fn titles_in(store: &Store, project: &Project, column: &Column) -> Vec<String> {
-    list_stories(store, &project.id)
+    list_stories(store, &project.id, false)
         .await
         .unwrap()
         .into_iter()
@@ -107,12 +108,12 @@ async fn assert_dense(store: &Store, project: &Project) {
         (0..cols.len() as i64).collect::<Vec<_>>(),
         "columnas"
     );
-    let stories = list_stories(store, &project.id).await.unwrap();
+    let stories = list_stories(store, &project.id, false).await.unwrap();
     for column in &cols {
         let mut in_column: Vec<i64> = stories
             .iter()
             .filter(|s| s.column_id == column.id)
-            .map(|s| s.position)
+            .filter_map(|s| s.position)
             .collect();
         in_column.sort_unstable();
         assert_eq!(
@@ -363,11 +364,11 @@ async fn delete_occupied_column_requires_destination_and_moves_cards_in_order() 
         titles_in(&store, &p, &backlog).await,
         ["B0", "L0", "L1", "L2"]
     );
-    let positions: Vec<_> = list_stories(&store, &p.id)
+    let positions: Vec<_> = list_stories(&store, &p.id, false)
         .await
         .unwrap()
         .iter()
-        .map(|s| s.position)
+        .filter_map(|s| s.position)
         .collect();
     assert_eq!(positions, [0, 1, 2, 3]);
     let cols = columns(&store, &p).await;
@@ -394,7 +395,7 @@ async fn failed_delete_rolls_back_everything() {
     let ready = column_named(&store, &p, "Listo").await;
     let before = (
         columns(&store, &p).await,
-        list_stories(&store, &p.id).await.unwrap(),
+        list_stories(&store, &p.id, false).await.unwrap(),
     );
 
     let delete_into = |destination: &Column| DeleteColumnInput {
@@ -417,7 +418,7 @@ async fn failed_delete_rolls_back_everything() {
 
     let after = (
         columns(&store, &p).await,
-        list_stories(&store, &p.id).await.unwrap(),
+        list_stories(&store, &p.id, false).await.unwrap(),
     );
     assert_eq!(after, before, "nada cambió tras los fallos");
     assert_dense(&store, &p).await;
@@ -522,6 +523,7 @@ async fn wip_limit_applies_to_create_and_move_with_explanatory_error() {
             project_id: p.id.clone(),
             title: "no cabe".into(),
             column_id: Some(active.id.clone()),
+            priority: None,
         },
     )
     .await
@@ -540,7 +542,7 @@ async fn wip_limit_applies_to_create_and_move_with_explanatory_error() {
     assert_eq!(moved.code(), ErrorCode::WipLimitExceeded);
 
     // Reordenar dentro de una columna llena no es una entrada nueva.
-    let inside = list_stories(&store, &p.id)
+    let inside = list_stories(&store, &p.id, false)
         .await
         .unwrap()
         .into_iter()
@@ -624,6 +626,7 @@ async fn moving_into_done_requires_acceptance() {
             project_id: p.id.clone(),
             title: "directo".into(),
             column_id: Some(done.id.clone()),
+            priority: None,
         },
     )
     .await
@@ -647,7 +650,7 @@ async fn move_reorders_and_keeps_positions_dense() {
         .await
         .unwrap();
     assert_eq!(titles_in(&store, &p, &backlog).await, ["B", "C", "A"]);
-    assert_eq!(a.position, 2, "índice acotado al final");
+    assert_eq!(a.position, Some(2), "índice acotado al final");
 
     move_story(&store, &move_input(&a, &ready, 0))
         .await

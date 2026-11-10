@@ -9,6 +9,7 @@ use super::column::Column;
 use crate::error::CoreError;
 
 /// Falla con `WipLimitExceeded` si `incoming` tarjetas nuevas superarían el límite de `column`.
+/// Las historias archivadas no ocupan sitio.
 /// Leer el recuento aquí (no el `card_count` cargado antes) evita usar un dato desfasado.
 pub(crate) async fn ensure_capacity(
     conn: &mut SqliteConnection,
@@ -18,10 +19,12 @@ pub(crate) async fn ensure_capacity(
     let Some(limit) = column.wip_limit else {
         return Ok(());
     };
-    let current: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stories WHERE column_id = ?")
-        .bind(&column.id)
-        .fetch_one(&mut *conn)
-        .await?;
+    let current: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM stories WHERE column_id = ? AND archived_at IS NULL",
+    )
+    .bind(&column.id)
+    .fetch_one(&mut *conn)
+    .await?;
     if current + incoming > limit {
         return Err(CoreError::WipLimitExceeded {
             column: column.name.clone(),

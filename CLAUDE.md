@@ -15,7 +15,8 @@ Construimos un kanban desktop local para historias, épicas y agentes de IA, con
   - Una prueba Rust: `cargo test -p kanbania-core <nombre>`, `cargo test -p kanbania-core --test storage` o `cargo test -p kanbania-desktop --test ipc_storage`.
   - App con perfil de datos aparte: `KANBANIA_DATA_DIR=/ruta npm run dev`.
   - Binario sin instalador: `npm run tauri -- build --debug --no-bundle`.
-  - Aún no hay runner de pruebas de frontend; añadir Vitest cuando una historia requiera pruebas UI (HU-007) y documentarlo aquí.
+  - Pruebas UI: `npm run test:web` o, en `apps/desktop`, `npx vitest run src/ruta/Archivo.test.tsx`. Para ver `console.log`: `--silent=false`. Los comandos IPC se simulan con `vi.mock("…/shared/ipc/commands", …)` conservando el resto del módulo real.
+  - jsdom está fijado en 29.1.1 con `overrides` en el `package.json` raíz: jsdom ≥30 exige Node 22.22 y el proyecto fija 22.16. Al añadir dependencias, comprueba `engines.node`.
 - Orden obligatorio en clon limpio: `npm run build:web` antes de cargo clippy/test, porque `tauri::generate_context!` exige `apps/desktop/dist`.
 - Contrato Rust→TS: tipos con `#[derive(TS)] #[ts(export)]` en el núcleo; `cargo test` los escribe en `apps/desktop/src/contracts/generated/` (versionados, no editar a mano; CI falla si cambian). Cada comando nuevo: caso de uso en `crates/core/src/features/`, adaptador fino en `src-tauri/src/commands/`, alta en `register_commands` (`lib.rs`), envoltorio en `apps/desktop/src/shared/ipc/commands.ts` y prueba IPC en `src-tauri/tests/` con origen `tauri://localhost`.
 - Almacenamiento (HU-002, `crates/core/src/platform/`):
@@ -39,9 +40,12 @@ Construimos un kanban desktop local para historias, épicas y agentes de IA, con
   - Toda entrada de tarjetas a una columna llama a `columns::ensure_capacity` dentro de la transacción. Si añades una vía nueva (importar, MCP…), debe pasar por ahí.
   - Entrar en una columna `done` exige la aceptación de HU-009 (`AcceptanceRequired` hasta entonces).
   - Posiciones densas 0..n en columnas y tarjetas.
-  - `stories` es mínima a propósito: HU-005 la amplía con nuevas migraciones, sin reescribir la 0003.
+  - Historias (HU-005): número `#N` por proyecto y criterios `CA-n` estables, que nunca se reutilizan. La edición es de documento completo con una sola revisión. Archivar pone `position = NULL`: toda consulta de posición o recuento debe excluir las archivadas (`archived_at IS NULL`), y restaurar es una entrada (WIP + «hecho»).
+- Markdown de usuarios o agentes es dato no confiable: renderízalo solo con `shared/ui/MarkdownPreview` (`react-markdown` con `skipHtml`, sin enlaces navegables ni imágenes remotas). Nunca uses `dangerouslySetInnerHTML`.
+- Botones deshabilitados: `cursor: not-allowed`. Usa `aria-busy` (que muestra el puntero de progreso) solo mientras haya una operación en curso; en macOS se confunde con un bloqueo.
 - UI: lecturas con `useIpcResource(load)` (`load` estable; si depende de props, monta el componente con `key`). Mutaciones con `useMutation(fn)` → `{ ok, value }`. `newRequestId()` se mantiene mientras se reintenta el mismo envío. Muestra los errores de campo con `FieldError` y `aria-describedby`; los estados siempre con texto, no solo con color.
-- Plugins Tauri: solo `dialog` con el permiso `dialog:allow-open`. Cualquier otro necesita justificación y el permiso mínimo.
+- Plugins Tauri: solo `dialog` con el permiso `dialog:allow-open`. Del núcleo, solo `core:event:allow-listen`/`allow-unlisten`, para la confirmación de cierre. Cualquier otro necesita justificación y el permiso mínimo.
+- Cambios sin guardar: todo editor con borrador llama a `useUnsavedChangesGuard(dirty)`. El host (`exit_guard.rs`) cancela `CloseRequested` y `ExitRequested` y emite `unsaved-changes:confirm-close`; `CloseConfirmDialog` pregunta. En macOS, «Salir» (⌘Q) es un elemento de menú propio (`menu.rs`) porque el predefinido termina el proceso sin poder cancelarse.
 - Lints: clippy prohíbe `unwrap`/`expect`/`panic`/`dbg!` fuera de pruebas (`Cargo.toml` + `clippy.toml`); `unsafe` prohibido. ESLint type-checked estricto, 0 warnings.
 - Seguridad Tauri: CSP estricta en producción, `devCsp: null` en desarrollo; capability `default` sin permisos. Todo plugin nuevo necesita permisos explícitos y mínimos.
 - Entorno (macOS arm64, 2026-11-09): Node 22.16 (`.nvmrc`), npm 11.4.2 (`packageManager`), Rust 1.99.1 fijado en `rust-toolchain.toml` vía rustup (cambiar la versión allí, no con Homebrew). Windows solo se verifica en CI (`macos-26`, `windows-2025`). Esta terminal no puede capturar pantalla: pide al usuario la verificación visual de la ventana.

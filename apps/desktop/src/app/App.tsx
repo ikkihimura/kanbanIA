@@ -1,4 +1,5 @@
 import { AppInfoPanel } from "../features/app-info/AppInfoPanel";
+import { CloseConfirmDialog } from "./CloseConfirmDialog";
 import { Workspace } from "../features/projects/Workspace";
 import { StoragePanel } from "../features/storage-status/StoragePanel";
 import { getStorageStatus } from "../shared/ipc/commands";
@@ -11,6 +12,7 @@ export function App() {
 
   return (
     <div className="shell">
+      <CloseConfirmDialog />
       <header className="shell__header">
         <p className="shell__brand" aria-hidden="true">
           Kanban IA
