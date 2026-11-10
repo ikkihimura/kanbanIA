@@ -6,7 +6,7 @@ use crate::error::CoreError;
 
 pub(crate) const ENTITY: &str = "Columna";
 const MAX_NAME_CHARS: usize = 60;
-const MAX_WIP: i64 = 999;
+pub(crate) const MAX_WIP: i64 = 999;
 
 /// Categoría semántica: las reglas usan la categoría, nunca el nombre visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -31,7 +31,7 @@ impl ColumnCategory {
         }
     }
 
-    fn parse(value: &str) -> Result<Self, CoreError> {
+    pub(crate) fn parse(value: &str) -> Result<Self, CoreError> {
         Ok(match value {
             "backlog" => Self::Backlog,
             "ready" => Self::Ready,

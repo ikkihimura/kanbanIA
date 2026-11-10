@@ -11,4 +11,7 @@ pub use epic::{Epic, EpicProgress};
 pub use list::list_epics;
 pub use update::{UpdateEpicInput, update_epic};
 
-pub(crate) use epic::load_epic;
+pub(crate) use epic::{
+    load_epic, validate_description as validate_epic_description,
+    validate_title as validate_epic_title,
+};

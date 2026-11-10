@@ -151,6 +151,16 @@ Cada historia tiene un número por proyecto (`#N`) que no se reutiliza, título 
 - Soltar archivos o enlaces externos en la ventana no hace nada (evita perder borradores navegando fuera de la app).
 - Medición (macOS arm64, sin SLA): núcleo con 300 tarjetas, crear 123 ms, listar 3,4 ms, 50 movimientos 54 ms (`crates/core/tests/board_load.rs`); render de 300 tarjetas en jsdom ≈ 400 ms.
 
+## Exportar e importar (Markdown)
+
+- **Exportar** (Configuración del proyecto): crea `kanbania-<proyecto>-<fecha>/` con `manifest.json` (formato `kanbania-package` v1), `stories/NNNN-titulo.md` y `epics/E-N-titulo.md`. Cada archivo es Markdown con una cabecera TOML entre líneas `+++` (id, número, prioridad, criterios `CA-n`, relaciones) y la descripción como cuerpo. Incluye archivadas. El estado de revisión (aceptación, bloqueo, agente asignado) va como dato informativo. No incluye rutas de repositorios, entregas ni recibos. Nunca sobrescribe una carpeta existente.
+- **Importar** (lista de proyectos): elige la carpeta y revisa la vista previa antes de aplicar. Si el proyecto existe se actualiza emparejando por id (reimportar no duplica); si no, se crea con sus columnas.
+  - Cada historia/épica: se crea, se actualiza (solo cambió el paquete), sin cambios, se conserva lo local (solo cambió lo local) o **conflicto** (cambiaron ambos: eliges cuál conservar).
+  - Nunca se borra nada ni se importa una aceptación: lo que estaba en «hecho» entra en revisión. Las historias existentes conservan columna y posición; las archivadas aquí no se modifican.
+  - El límite WIP se respeta; al restaurar un proyecto nuevo cuyo tablero ya lo superaba, se sube lo justo y se avisa.
+  - Se rechazan rutas fuera de la carpeta, enlaces simbólicos, ids duplicados o de otro proyecto, ciclos y formatos de otra versión. Un paquete inválido no cambia nada.
+- No hay sincronización automática (ni con Git): exportar e importar son acciones explícitas.
+
 ## Notas
 
 - Identificador de la app: `dev.ikkidev.kanbania`.

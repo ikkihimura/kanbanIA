@@ -8,9 +8,10 @@ import { useIpcResource } from "../../shared/ipc/useIpcResource";
 import { useMutation } from "../../shared/ipc/useMutation";
 import { FieldError } from "../../shared/ui/FieldError";
 import { formatDateTime } from "../../shared/ui/format";
+import { ImportSection } from "../portability/ImportSection";
 
 interface Props {
-  onOpen: (projectId: string) => void;
+  onOpen: (projectId: string, notice?: string) => void;
 }
 
 export function ProjectList({ onOpen }: Props) {
@@ -121,6 +122,8 @@ export function ProjectList({ onOpen }: Props) {
           </ul>
         )}
       </section>
+
+      <ImportSection onImported={onOpen} />
     </main>
   );
 }

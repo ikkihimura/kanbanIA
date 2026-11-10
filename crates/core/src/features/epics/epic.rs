@@ -118,7 +118,7 @@ pub(super) async fn epics_of_project(
     Ok(rows.into_iter().map(Epic::from).collect())
 }
 
-pub(super) fn validate_title(raw: &str) -> Result<String, CoreError> {
+pub(crate) fn validate_title(raw: &str) -> Result<String, CoreError> {
     let title = raw.trim();
     let invalid = |reason: &str| CoreError::Validation {
         field: "title",
@@ -138,7 +138,7 @@ pub(super) fn validate_title(raw: &str) -> Result<String, CoreError> {
     Ok(title.to_owned())
 }
 
-pub(super) fn validate_description(raw: &str) -> Result<String, CoreError> {
+pub(crate) fn validate_description(raw: &str) -> Result<String, CoreError> {
     if raw.chars().count() > MAX_DESCRIPTION_CHARS {
         return Err(CoreError::Validation {
             field: "description",

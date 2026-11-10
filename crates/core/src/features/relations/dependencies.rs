@@ -6,7 +6,7 @@ use super::graph::{reaches_through_dependencies, require, require_not_archived};
 use crate::error::CoreError;
 use crate::platform::storage::Store;
 
-const MAX_PREREQUISITES: i64 = 50;
+pub(crate) const MAX_PREREQUISITES: i64 = 50;
 
 /// `story_id` depende de `depends_on_id`.
 #[derive(Debug, Clone, Deserialize, TS)]

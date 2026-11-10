@@ -7,7 +7,7 @@ use crate::error::CoreError;
 pub(super) const ENTITY: &str = "Historia";
 const MAX_TITLE_CHARS: usize = 200;
 pub(super) const MAX_DESCRIPTION_CHARS: usize = 20_000;
-pub(super) const MAX_CRITERIA: usize = 50;
+pub(crate) const MAX_CRITERIA: usize = 50;
 const MAX_CRITERION_CHARS: usize = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -21,7 +21,7 @@ pub enum Priority {
 }
 
 impl Priority {
-    pub(super) fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Urgent => "urgent",
             Self::High => "high",
@@ -30,7 +30,7 @@ impl Priority {
         }
     }
 
-    fn parse(value: &str) -> Result<Self, CoreError> {
+    pub(crate) fn parse(value: &str) -> Result<Self, CoreError> {
         Ok(match value {
             "urgent" => Self::Urgent,
             "high" => Self::High,
@@ -263,7 +263,7 @@ pub(super) async fn list_rows(
 }
 
 /// Tarjetas activas (no archivadas) de una columna: lo que ocupa posiciones y cuenta para WIP.
-pub(super) async fn count_in_column(
+pub(crate) async fn count_in_column(
     conn: &mut SqliteConnection,
     column_id: &str,
 ) -> Result<i64, CoreError> {
@@ -282,7 +282,7 @@ fn invalid(field: &'static str, reason: impl Into<String>) -> CoreError {
     }
 }
 
-pub(super) fn validate_title(raw: &str) -> Result<String, CoreError> {
+pub(crate) fn validate_title(raw: &str) -> Result<String, CoreError> {
     let title = raw.trim();
     if title.is_empty() {
         return Err(invalid("title", "El título es obligatorio."));
@@ -304,7 +304,7 @@ pub(super) fn validate_title(raw: &str) -> Result<String, CoreError> {
 
 /// Markdown libre (saltos de línea y tabuladores permitidos), con límite de tamaño.
 /// Se guarda tal cual salvo los espacios finales.
-pub(super) fn validate_description(raw: &str) -> Result<String, CoreError> {
+pub(crate) fn validate_description(raw: &str) -> Result<String, CoreError> {
     if raw.chars().count() > MAX_DESCRIPTION_CHARS {
         return Err(invalid(
             "description",
@@ -323,7 +323,7 @@ pub(super) fn validate_description(raw: &str) -> Result<String, CoreError> {
     Ok(raw.trim_end().to_owned())
 }
 
-pub(super) fn validate_criterion(raw: &str) -> Result<String, CoreError> {
+pub(crate) fn validate_criterion(raw: &str) -> Result<String, CoreError> {
     let text = raw.trim();
     if text.is_empty() {
         return Err(invalid("criteria", "Un criterio no puede estar vacío."));

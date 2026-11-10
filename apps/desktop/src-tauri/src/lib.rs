@@ -65,6 +65,9 @@ pub fn register_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
             commands::review::accept_story,
             commands::review::reopen_story,
             commands::review::set_story_blocker,
+            commands::portability::export_project,
+            commands::portability::preview_import,
+            commands::portability::apply_import,
         ])
 }
 

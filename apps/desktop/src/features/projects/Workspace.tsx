@@ -44,12 +44,16 @@ export function Workspace() {
     };
   }, []);
 
-  const open = useCallback((projectId: string) => {
+  const open = useCallback((projectId: string, notice?: string) => {
     const ticket = ++latestOpen.current;
     openProject(projectId).then(
       (project) => {
         if (ticket === latestOpen.current)
-          setView({ kind: "project", project });
+          setView(
+            notice
+              ? { kind: "project", project, notice }
+              : { kind: "project", project },
+          );
       },
       (error: unknown) => {
         if (ticket !== latestOpen.current) return;

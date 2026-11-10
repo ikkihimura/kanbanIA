@@ -16,5 +16,8 @@ pub use list::list_columns;
 pub use reorder::{ReorderColumnInput, reorder_column};
 pub use update::{UpdateColumnInput, update_column};
 
-pub(crate) use column::{columns_of_project, load_column, seed_default_columns};
+pub(crate) use column::{
+    MAX_WIP, columns_of_project, load_column, seed_default_columns,
+    validate_name as validate_column_name, validate_wip,
+};
 pub(crate) use wip::ensure_capacity;

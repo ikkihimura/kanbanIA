@@ -1020,6 +1020,37 @@ textarea {
   overflow-y: auto;
 }
 
+/* ---------- importar ---------- */
+
+.import-preview {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.import-preview p {
+  margin: 0;
+}
+
+.import-preview__warnings {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--color-warn);
+}
+
+.import-preview__conflict {
+  padding: 8px 12px;
+  border: 2px solid var(--color-warn);
+}
+
+.import-preview__item {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .shell__cursor {
     animation: none;

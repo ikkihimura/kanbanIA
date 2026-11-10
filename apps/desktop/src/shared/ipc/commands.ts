@@ -3,6 +3,11 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { AppInfo } from "../../contracts/generated/AppInfo";
+import type { ApplyImportInput } from "../../contracts/generated/ApplyImportInput";
+import type { ExportProjectInput } from "../../contracts/generated/ExportProjectInput";
+import type { ExportResult } from "../../contracts/generated/ExportResult";
+import type { ImportPreview } from "../../contracts/generated/ImportPreview";
+import type { ImportResult } from "../../contracts/generated/ImportResult";
 import type { MoveStoryInput } from "../../contracts/generated/MoveStoryInput";
 import type { AcceptStoryInput } from "../../contracts/generated/AcceptStoryInput";
 import type { AttentionItem } from "../../contracts/generated/AttentionItem";
@@ -313,6 +318,22 @@ export function discardAndClose(): Promise<void> {
 export async function onConfirmClose(handler: () => void): Promise<() => void> {
   if (!isTauri()) return () => undefined;
   return listen(CONFIRM_CLOSE_EVENT, handler);
+}
+
+// --- portabilidad (HU-010) ---
+
+export function exportProject(
+  input: ExportProjectInput,
+): Promise<ExportResult> {
+  return call("export_project", { input });
+}
+
+export function previewImport(path: string): Promise<ImportPreview> {
+  return call("preview_import", { path });
+}
+
+export function applyImport(input: ApplyImportInput): Promise<ImportResult> {
+  return call("apply_import", { input });
 }
 
 // --- errores ---

@@ -12,4 +12,6 @@ pub use open::{last_opened_project, open_project};
 pub use project::Project;
 pub use rename::{RenameProjectInput, rename_project};
 
-pub(crate) use project::ensure_project_exists;
+pub(crate) use project::{
+    ensure_project_exists, load_project, validate_name as validate_project_name,
+};

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use serde::Deserialize;
+use sqlx::SqliteConnection;
 use ts_rs::TS;
 
 use super::story::{
@@ -85,76 +86,21 @@ pub async fn update_story(
                     });
                 }
 
-                // Criterios eliminados: los que ya no aparecen. Su número no se reutiliza.
-                let kept: HashSet<&str> = criteria.iter().filter_map(|c| c.id.as_deref()).collect();
-                for removed in current
-                    .criteria
-                    .iter()
-                    .filter(|c| !kept.contains(c.id.as_str()))
-                {
-                    sqlx::query("DELETE FROM acceptance_criteria WHERE id = ? AND story_id = ?")
-                        .bind(&removed.id)
-                        .bind(&input.id)
-                        .execute(&mut *conn)
-                        .await?;
-                }
-
-                let mut next_number: i64 =
-                    sqlx::query_scalar("SELECT next_criterion_number FROM stories WHERE id = ?")
-                        .bind(&input.id)
-                        .fetch_one(&mut *conn)
-                        .await?;
-                for (position, criterion) in (0_i64..).zip(&criteria) {
-                    match &criterion.id {
-                        Some(id) => {
-                            sqlx::query(
-                                "UPDATE acceptance_criteria SET text = ?, position = ?, \
-                                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
-                                 WHERE id = ? AND story_id = ? \
-                                   AND (text <> ? OR position <> ?)",
-                            )
-                            .bind(&criterion.text)
-                            .bind(position)
-                            .bind(id)
-                            .bind(&input.id)
-                            .bind(&criterion.text)
-                            .bind(position)
-                            .execute(&mut *conn)
-                            .await?;
-                        }
-                        None => {
-                            sqlx::query(
-                                "INSERT INTO acceptance_criteria \
-                                 (id, story_id, number, position, text) VALUES (?, ?, ?, ?, ?)",
-                            )
-                            .bind(uuid::Uuid::now_v7().to_string())
-                            .bind(&input.id)
-                            .bind(next_number)
-                            .bind(position)
-                            .bind(&criterion.text)
-                            .execute(&mut *conn)
-                            .await?;
-                            next_number += 1;
-                        }
-                    }
-                }
-
-                let rows = sqlx::query(
-                    "UPDATE stories SET title = ?, description = ?, priority = ?, \
-                     next_criterion_number = ?, revision = revision + 1, \
-                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
-                     WHERE project_id = ? AND id = ? AND revision = ?",
+                let criteria: Vec<(Option<String>, String)> =
+                    criteria.into_iter().map(|c| (c.id, c.text)).collect();
+                let rows = replace_document(
+                    conn,
+                    &input.project_id,
+                    &input.id,
+                    &Document {
+                        title: &title,
+                        description: &description,
+                        priority: input.priority,
+                        criteria: &criteria,
+                    },
+                    Some(input.expected_revision),
                 )
-                .bind(&title)
-                .bind(&description)
-                .bind(input.priority.as_str())
-                .bind(next_number)
-                .bind(&input.project_id)
-                .bind(&input.id)
-                .bind(input.expected_revision)
-                .execute(&mut *conn)
-                .await?
-                .rows_affected();
+                .await?;
                 // Defensa en profundidad: la revisión ya se comprobó en esta misma transacción.
                 revision::ensure_updated(
                     ENTITY,
@@ -169,6 +115,108 @@ pub async fn update_story(
             })
         })
         .await
+}
+
+/// Documento completo de una historia ya validado.
+pub(crate) struct Document<'a> {
+    pub title: &'a str,
+    pub description: &'a str,
+    pub priority: Priority,
+    /// (id, texto) en orden. Un id que la historia no tiene se crea con ese id (importación).
+    pub criteria: &'a [(Option<String>, String)],
+}
+
+/// Sustituye título, descripción, prioridad y criterios y sube la revisión. Compartida por el
+/// editor y la importación (HU-010) para que ambas apliquen las mismas reglas. Quien llama
+/// valida antes el contenido, la revisión y el archivo en la misma transacción. Con
+/// `expected_revision`, el UPDATE final la exige (devuelve las filas afectadas).
+///
+/// Criterios: los que ya no aparecen se borran; los que tienen id conocido conservan su
+/// número CA-n; los nuevos reciben el siguiente número, que nunca se reutiliza.
+pub(crate) async fn replace_document(
+    conn: &mut SqliteConnection,
+    project_id: &str,
+    id: &str,
+    document: &Document<'_>,
+    expected_revision: Option<i64>,
+) -> Result<u64, CoreError> {
+    let local: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM acceptance_criteria WHERE story_id = ?")
+            .bind(id)
+            .fetch_all(&mut *conn)
+            .await?;
+    let kept: HashSet<&str> = document
+        .criteria
+        .iter()
+        .filter_map(|(cid, _)| cid.as_deref())
+        .collect();
+    for removed in local.iter().filter(|cid| !kept.contains(cid.as_str())) {
+        sqlx::query("DELETE FROM acceptance_criteria WHERE id = ? AND story_id = ?")
+            .bind(removed)
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
+    }
+    let local: HashSet<&str> = local.iter().map(String::as_str).collect();
+    let mut next_number: i64 =
+        sqlx::query_scalar("SELECT next_criterion_number FROM stories WHERE id = ?")
+            .bind(id)
+            .fetch_one(&mut *conn)
+            .await?;
+    for (position, (criterion_id, text)) in (0_i64..).zip(document.criteria) {
+        match criterion_id {
+            Some(cid) if local.contains(cid.as_str()) => {
+                sqlx::query(
+                    "UPDATE acceptance_criteria SET text = ?, position = ?, \
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                     WHERE id = ? AND story_id = ? AND (text <> ? OR position <> ?)",
+                )
+                .bind(text)
+                .bind(position)
+                .bind(cid)
+                .bind(id)
+                .bind(text)
+                .bind(position)
+                .execute(&mut *conn)
+                .await?;
+            }
+            other => {
+                sqlx::query(
+                    "INSERT INTO acceptance_criteria (id, story_id, number, position, text) \
+                     VALUES (?, ?, ?, ?, ?)",
+                )
+                .bind(
+                    other
+                        .clone()
+                        .unwrap_or_else(|| uuid::Uuid::now_v7().to_string()),
+                )
+                .bind(id)
+                .bind(next_number)
+                .bind(position)
+                .bind(text)
+                .execute(&mut *conn)
+                .await?;
+                next_number += 1;
+            }
+        }
+    }
+    Ok(sqlx::query(
+        "UPDATE stories SET title = ?, description = ?, priority = ?, \
+         next_criterion_number = ?, revision = revision + 1, \
+         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+         WHERE project_id = ? AND id = ? AND (? IS NULL OR revision = ?)",
+    )
+    .bind(document.title)
+    .bind(document.description)
+    .bind(document.priority.as_str())
+    .bind(next_number)
+    .bind(project_id)
+    .bind(id)
+    .bind(expected_revision)
+    .bind(expected_revision)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected())
 }
 
 fn validate_criteria(drafts: &[CriterionDraft]) -> Result<Vec<ValidCriterion>, CoreError> {

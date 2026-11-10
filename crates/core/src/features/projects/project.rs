@@ -57,7 +57,7 @@ pub(crate) async fn ensure_project_exists(
 }
 
 /// Normaliza y valida el nombre: recorta espacios, 1–120 caracteres, sin caracteres de control.
-pub(super) fn validate_name(raw: &str) -> Result<String, CoreError> {
+pub(crate) fn validate_name(raw: &str) -> Result<String, CoreError> {
     let name = raw.trim();
     let invalid = |reason: &str| CoreError::Validation {
         field: "name",

@@ -17,4 +17,8 @@ pub use story::{AcceptanceCriterion, Priority, StoryDetail, StorySummary};
 pub use update::{CriterionDraft, UpdateStoryInput, update_story};
 
 pub(crate) use placement::{append_to_column, place_at_index};
-pub(crate) use story::{load_detail, load_story};
+pub(crate) use story::{
+    MAX_CRITERIA, count_in_column, load_detail, load_story, validate_criterion,
+    validate_description as validate_story_description, validate_title as validate_story_title,
+};
+pub(crate) use update::{Document, replace_document};

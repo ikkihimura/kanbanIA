@@ -21,3 +21,6 @@ pub use graph::{RelationState, StoryRef};
 pub use set_agent::{SetStoryAgentInput, set_story_agent};
 pub use set_epic::{SetStoryEpicInput, set_story_epic};
 pub use set_parent::{SetStoryParentInput, set_story_parent};
+
+pub(crate) use dependencies::MAX_PREREQUISITES;
+pub(crate) use graph::{is_self_or_ancestor, reaches_through_dependencies};

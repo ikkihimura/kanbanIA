@@ -64,7 +64,7 @@ fn validate_token(field: &'static str, value: &str, max_len: usize) -> Result<()
 
 /// Hash sobre JSON canónico (claves ordenadas a cualquier profundidad), para que el orden
 /// de iteración de un `HashMap` en el payload no cambie el hash entre procesos.
-fn payload_hash<P: Serialize + ?Sized>(payload: &P) -> Result<String, CoreError> {
+pub(crate) fn payload_hash<P: Serialize + ?Sized>(payload: &P) -> Result<String, CoreError> {
     let canonical = canonicalize(serde_json::to_value(payload)?);
     let bytes = serde_json::to_vec(&canonical)?;
     let digest = Sha256::digest(&bytes);

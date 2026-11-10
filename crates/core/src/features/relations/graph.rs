@@ -156,7 +156,7 @@ pub(super) async fn dependents(
 
 /// `true` si `target` es `start` o un antecesor suyo (siguiendo padres).
 /// `UNION` (no `UNION ALL`) garantiza que termina aunque hubiera datos cíclicos.
-pub(super) async fn is_self_or_ancestor(
+pub(crate) async fn is_self_or_ancestor(
     conn: &mut SqliteConnection,
     start: &str,
     target: &str,
@@ -175,7 +175,7 @@ pub(super) async fn is_self_or_ancestor(
 }
 
 /// `true` si `target` es alcanzable desde `start` siguiendo «depende de» (incluido `start`).
-pub(super) async fn reaches_through_dependencies(
+pub(crate) async fn reaches_through_dependencies(
     conn: &mut SqliteConnection,
     start: &str,
     target: &str,

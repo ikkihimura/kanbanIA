@@ -2,6 +2,7 @@ pub mod app_info;
 pub mod columns;
 pub mod epics;
 pub mod exit;
+pub mod portability;
 pub mod projects;
 pub mod relations;
 pub mod repositories;
