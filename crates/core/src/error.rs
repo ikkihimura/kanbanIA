@@ -14,6 +14,10 @@ pub enum CoreError {
     #[error("{reason}")]
     Cycle { field: &'static str, reason: String },
 
+    /// La identidad no puede realizar esta acción (p. ej. un agente aceptando trabajo).
+    #[error("{reason}")]
+    Forbidden { reason: String },
+
     #[error("{entity} ya existe")]
     AlreadyExists {
         entity: &'static str,
@@ -72,6 +76,7 @@ pub enum ErrorCode {
     NotFound,
     AlreadyExists,
     Cycle,
+    Forbidden,
     Conflict,
     IdempotencyConflict,
     WipLimitExceeded,
@@ -112,6 +117,7 @@ impl CoreError {
             Self::NotFound { .. } => ErrorCode::NotFound,
             Self::AlreadyExists { .. } => ErrorCode::AlreadyExists,
             Self::Cycle { .. } => ErrorCode::Cycle,
+            Self::Forbidden { .. } => ErrorCode::Forbidden,
             Self::Conflict { .. } => ErrorCode::Conflict,
             Self::IdempotencyConflict => ErrorCode::IdempotencyConflict,
             Self::WipLimitExceeded { .. } => ErrorCode::WipLimitExceeded,
@@ -138,6 +144,7 @@ impl CoreError {
                     .into(),
                 true,
             ),
+            Self::Forbidden { reason } => (reason.clone(), false),
             Self::IdempotencyConflict => (
                 "Este identificador de petición ya se usó para otra operación.".into(),
                 false,

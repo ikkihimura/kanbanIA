@@ -5,6 +5,7 @@ pub mod exit;
 pub mod projects;
 pub mod relations;
 pub mod repositories;
+pub mod review;
 pub mod storage;
 pub mod stories;
 pub mod team;

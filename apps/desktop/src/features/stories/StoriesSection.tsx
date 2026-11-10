@@ -175,6 +175,7 @@ export function StoriesSection({ projectId, onOpenStory }: Props) {
                     ` · E-${String(epicNumber(story.epicId))}`}
                   {storyNumber(story.parentId) !== undefined &&
                     ` · subtarea de #${String(storyNumber(story.parentId))}`}
+                  {story.acceptedAt ? " · aceptada" : ""}
                   {story.archivedAt ? " · archivada" : ""}
                 </span>
                 <Assignee agent={agentOf(story.agentId)} />

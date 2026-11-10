@@ -57,6 +57,13 @@ pub fn register_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
             commands::team::list_agents,
             commands::team::create_agent,
             commands::team::update_agent,
+            commands::review::get_story_review,
+            commands::review::list_attention,
+            commands::review::submit_delivery,
+            commands::review::return_delivery,
+            commands::review::accept_story,
+            commands::review::reopen_story,
+            commands::review::set_story_blocker,
         ])
 }
 

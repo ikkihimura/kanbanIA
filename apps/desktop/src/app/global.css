@@ -613,6 +613,49 @@ textarea[aria-invalid="true"] {
   color: var(--color-muted);
 }
 
+/* ---------- revisión ---------- */
+
+.review {
+  display: grid;
+  gap: 16px;
+}
+
+.review__state {
+  margin: 0;
+}
+
+.review__accept {
+  display: grid;
+  gap: 12px;
+}
+
+.review__accept .checkbox {
+  margin: 4px 0;
+}
+
+.review__blocker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.review__summary {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.review__criteria {
+  margin: 4px 0 0;
+  padding-left: 1.25rem;
+  color: var(--color-muted);
+}
+
+.attention {
+  border-left: 4px solid var(--color-warn);
+}
+
 /* ---------- diálogo modal ---------- */
 
 .modal-backdrop {

@@ -5,6 +5,7 @@ import { useMutation } from "../../shared/ipc/useMutation";
 import { FieldError } from "../../shared/ui/FieldError";
 import { ColumnsSection } from "../columns/ColumnsSection";
 import { EpicsSection } from "../epics/EpicsSection";
+import { AttentionSection } from "../review/AttentionSection";
 import { RepositoriesSection } from "../repositories/RepositoriesSection";
 import { StoriesSection } from "../stories/StoriesSection";
 
@@ -139,6 +140,11 @@ export function ProjectView({
         </form>
       )}
 
+      <AttentionSection
+        key={`attention-${project.id}`}
+        projectId={project.id}
+        onOpenStory={onOpenStory}
+      />
       <StoriesSection
         key={`stories-${project.id}`}
         projectId={project.id}

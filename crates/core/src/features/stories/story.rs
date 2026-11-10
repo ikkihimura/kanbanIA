@@ -208,7 +208,7 @@ async fn load_row(
     )
 }
 
-pub(super) async fn load_story(
+pub(crate) async fn load_story(
     conn: &mut SqliteConnection,
     project_id: &str,
     id: &str,
@@ -219,7 +219,7 @@ pub(super) async fn load_story(
         .transpose()
 }
 
-pub(super) async fn load_detail(
+pub(crate) async fn load_detail(
     conn: &mut SqliteConnection,
     project_id: &str,
     id: &str,

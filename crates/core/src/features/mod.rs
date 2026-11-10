@@ -6,5 +6,6 @@ pub mod epics;
 pub mod projects;
 pub mod relations;
 pub mod repositories;
+pub mod review;
 pub mod stories;
 pub mod team;

@@ -55,7 +55,19 @@ pub async fn delete_column(store: &Store, input: &DeleteColumnInput) -> Result<(
                     let destination = load_column(conn, &input.project_id, destination_id)
                         .await?
                         .ok_or(CoreError::NotFound { entity: ENTITY })?;
-                    if destination.category == ColumnCategory::Done {
+                    // Las tarjetas de «hecho» están aceptadas: solo pueden ir a otra «hecho»; las
+                    // demás no pueden entrar en «hecho» sin aceptación.
+                    let from_done = column.category == ColumnCategory::Done;
+                    let to_done = destination.category == ColumnCategory::Done;
+                    if from_done && !to_done {
+                        return Err(CoreError::Validation {
+                            field: "destinationColumnId",
+                            reason: "Las historias aceptadas solo pueden moverse a otra columna \
+                                     «hecho» (o reabrirse antes)."
+                                .into(),
+                        });
+                    }
+                    if !from_done && to_done {
                         return Err(CoreError::AcceptanceRequired {
                             column: destination.name,
                         });

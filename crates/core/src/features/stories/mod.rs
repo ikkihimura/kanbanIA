@@ -5,6 +5,7 @@ mod archive;
 mod create;
 mod list;
 mod move_story;
+mod placement;
 mod story;
 mod update;
 
@@ -14,3 +15,6 @@ pub use list::{get_story, list_stories};
 pub use move_story::{MoveStoryInput, move_story};
 pub use story::{AcceptanceCriterion, Priority, StoryDetail, StorySummary};
 pub use update::{CriterionDraft, UpdateStoryInput, update_story};
+
+pub(crate) use placement::append_to_column;
+pub(crate) use story::{load_detail, load_story};

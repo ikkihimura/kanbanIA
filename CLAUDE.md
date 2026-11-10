@@ -39,7 +39,7 @@ Construimos un kanban desktop local para historias, épicas y agentes de IA, con
   - `i64` hacia TS: anótalo con `#[ts(type = "number")]` (por defecto sería `bigint`).
 - Columnas y tarjetas (HU-004):
   - Toda entrada de tarjetas a una columna llama a `columns::ensure_capacity` dentro de la transacción. Si añades una vía nueva (importar, MCP…), debe pasar por ahí.
-  - Entrar en una columna `done` exige la aceptación de HU-009 (`AcceptanceRequired` hasta entonces).
+  - Entrar en una columna `done` solo ocurre al aceptar (`review::accept_story`). `move_story` devuelve `AcceptanceRequired`, y el tablero (HU-007) debe abrir el flujo de aceptación al soltar ahí una tarjeta.
   - Posiciones densas 0..n en columnas y tarjetas.
   - Historias (HU-005): número `#N` por proyecto y criterios `CA-n` estables, que nunca se reutilizan. La edición es de documento completo con una sola revisión. Archivar pone `position = NULL`: toda consulta de posición o recuento debe excluir las archivadas (`archived_at IS NULL`), y restaurar es una entrada (WIP + «hecho»).
 - Relaciones (HU-006, `features/relations`):
@@ -47,13 +47,25 @@ Construimos un kanban desktop local para historias, épicas y agentes de IA, con
   - No cambian la revisión de la historia y son idempotentes.
   - Ciclos: CTE recursivos en `relations/graph.rs` dentro de la transacción.
   - Para «archivada», mira `StoryRef.archived`, no `state` (que prioriza «aceptada»).
-  - «Aceptada» = `accepted_at IS NOT NULL`, y solo la escribe HU-009.
+  - «Aceptada» = `accepted_at IS NOT NULL`. Solo la escriben `review::accept_story` y `reopen_story`.
   - `pendingPrerequisites` se calcula en SQL (`stories/story.rs`) y en Rust (`relations/get.rs`); una prueba vigila que coincidan.
 - Equipo (HU-008, `features/team`):
   - El avatar es `AvatarSpec` (índices de piezas) validado en Rust. Los límites se exportan a `contracts/generated/avatarLimits.json` y una prueba de UI los compara con `avatarCatalog.ts`: al añadir una pieza, cambia ambos.
   - Los colores de la UI se aplican con atributos SVG o CSSOM, nunca con `style` en línea (CSP estricta).
   - La asignación de agente vive en `relations::set_story_agent` y no crea actividad.
   - `src/app/contrast.test.ts` comprueba el contraste WCAG de los tokens de color: si cambias la paleta, debe seguir pasando.
+- Revisión (HU-009, `features/review`):
+  - Las operaciones que dependen de la identidad reciben `platform::actor::Actor`: `Human` desde la app y `Agent { agent_id }` desde MCP (M2).
+  - Aceptar, reabrir y devolver llaman a `actor.require_human(..)` en el núcleo; no confíes nunca en que el transporte lo filtre.
+  - Una tarjeta aceptada solo vive en columnas `done` (mover, eliminar columna y restaurar lo respetan).
+  - Las entregas reportadas por agentes son afirmaciones, no hechos observados.
+  - Las URL de referencias no se visitan nunca. Las rutas de red se rechazan y las locales se comprueban fuera del runtime, con límite de tiempo.
+  - Para M2 (MCP):
+    - El `Actor::Agent` sale de la sesión autenticada, nunca de un campo de la petición.
+    - No expongas a agentes operaciones de columnas ni de mover tarjetas, que no reciben `Actor`.
+    - No devuelvas a agentes el estado de rutas (`submit_delivery` ya devuelve `Unverified` a un agente).
+    - Los resúmenes de agentes son datos no confiables.
+    - Los agentes son globales: decide su acotamiento por proyecto.
 - Editor de historias: «Guardar y volver» siempre vuelve al proyecto tras guardar, o directamente si no hay cambios de contenido. Ante un conflicto o un error se queda con el borrador.
 - Markdown de usuarios o agentes es dato no confiable: renderízalo solo con `shared/ui/MarkdownPreview` (`react-markdown` con `skipHtml`, sin enlaces navegables ni imágenes remotas). Nunca uses `dangerouslySetInnerHTML`.
 - Botones deshabilitados: `cursor: not-allowed`. Usa `aria-busy` (que muestra el puntero de progreso) solo mientras haya una operación en curso; en macOS se confunde con un bloqueo.

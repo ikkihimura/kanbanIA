@@ -106,7 +106,7 @@ Cada proyecto empieza con el flujo Backlog · Listo · En curso · Revisión · 
 
 - **Tipo de etapa** (`backlog`, `ready`, `active`, `review`, `done`): las reglas dependen del tipo, nunca del nombre visible.
 - **Límite WIP** opcional (1–999). Se aplica en el núcleo a toda entrada de tarjetas: crear, mover y destino al eliminar otra columna. Bajarlo por debajo de las tarjetas actuales está permitido: solo bloquea nuevas entradas, y la UI marca la columna como excedida.
-- **Columnas «hecho»**: solo reciben trabajo aceptado. Hasta HU-009, entrar en ellas devuelve `acceptance_required`. Una columna con tarjetas no puede cambiar a ese tipo ni dejar de serlo.
+- **Columnas «hecho»**: solo reciben trabajo aceptado. Solo se entra en ellas aceptando la historia (sección «Entregas, aceptación y atención»). Una columna con tarjetas no puede cambiar a ese tipo ni dejar de serlo.
 - **Eliminar** una columna con tarjetas exige elegir destino. Las tarjetas se mueven al final de ese destino, en el mismo orden y en una sola transacción. Siempre queda al menos una columna que no es «hecho».
 
 ## Historias
@@ -121,7 +121,7 @@ Cada historia tiene un número por proyecto (`#N`) que no se reutiliza, título 
 
 ## Épicas, subtareas y dependencias
 
-- **Épicas** (`E-n`): agrupan historias. Su **avance** es aceptadas ÷ historias no archivadas de la épica. Sin historias se muestra «Sin historias», nunca 0 % ni 100 %. La aceptación llega en HU-009; hasta entonces el avance es 0 de N.
+- **Épicas** (`E-n`): agrupan historias. Su **avance** es aceptadas ÷ historias no archivadas de la épica. Sin historias se muestra «Sin historias», nunca 0 % ni 100 %. Las historias se aceptan desde el panel «Revisión» del editor.
 - **Subtareas**: una historia puede colgar de otra del mismo proyecto.
 - **Dependencias**: «A depende de B». Los prerequisitos sin aceptar, incluidos los archivados, se muestran como bloqueo. Por ahora no impiden mover la tarjeta; el bloqueo de ejecución llega con las reclamaciones de agentes (HU-014).
 - Se rechazan los **ciclos** directos e indirectos (subtareas y dependencias) y las relaciones entre proyectos distintos.
@@ -133,6 +133,14 @@ Cada historia tiene un número por proyecto (`#N`) que no se reutiliza, título 
 - Cada agente (`A-n`) tiene un nombre único (su identidad), rol, proveedor y modelo (texto informativo, no conecta con ningún servicio) y capacidades de un conjunto fijo: planificar, implementar, revisar, probar y documentar. **Cambiar de modelo conserva al mismo agente y su avatar.**
 - **Avatar por piezas**: sprites originales de 16×16 dibujados por código (cabeza humana o robot, ojos, boca, pelo o tocado, accesorio) con una paleta limitada de colores con nombre. Se edita con teclado.
 - **Asignar** un agente a una historia solo registra la asignación: no inicia ejecuciones ni muestra actividad.
+
+## Entregas, aceptación y atención
+
+- **Entregas**: resumen y referencias. Las referencias son URL http(s), que la app **nunca visita** y muestra como «no verificada», o rutas locales, cuyo acceso se comprueba al mostrarlas: accesible / no encontrada / sin acceso. Una entrega es *manual* si la registra la persona y *reportada* si la envía un agente (M2). «Enviar a revisión» mueve la tarjeta a la columna de revisión **sin marcarla como hecha**. Una entrega pendiente se puede devolver con un motivo.
+- **Aceptar** solo lo hace una persona: los agentes reciben `forbidden`. Exige al menos un criterio y que todos se marquen como cumplidos, y queda registrado en el historial junto con los criterios. La tarjeta pasa a la primera columna «hecho». Sin columna «hecho» no se puede aceptar.
+- **Reabrir** pide un motivo y devuelve la tarjeta a revisión, o a la columna elegida. El historial se conserva. Una tarjeta aceptada solo sale de «hecho» reabriéndola.
+- **Bloqueo**: es un motivo marcado en la historia, no una columna.
+- **Atención (N)**, en cada proyecto: una fila por historia con todos sus motivos: bloqueo, entregas pendientes y prerequisitos sin aceptar. Los prerequisitos solo cuentan en las columnas listo, en curso y revisión.
 
 ## Notas
 

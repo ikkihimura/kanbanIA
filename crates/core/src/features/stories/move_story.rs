@@ -49,7 +49,20 @@ pub async fn move_story(store: &Store, input: &MoveStoryInput) -> Result<StorySu
                     .ok_or(CoreError::NotFound { entity: "Columna" })?;
                 let changes_column = destination.id != story.column_id;
                 if changes_column {
-                    if destination.category == ColumnCategory::Done {
+                    let accepted = story.accepted_at.is_some();
+                    let into_done = destination.category == ColumnCategory::Done;
+                    // Una tarjeta aceptada solo vive en columnas «hecho» (sale reabriéndola);
+                    // una sin aceptar solo entra en «hecho» aceptándola.
+                    if accepted && !into_done {
+                        return Err(CoreError::Validation {
+                            field: "toColumnId",
+                            reason: format!(
+                                "La historia #{} está aceptada: reábrela para sacarla de «hecho».",
+                                story.number
+                            ),
+                        });
+                    }
+                    if !accepted && into_done {
                         return Err(CoreError::AcceptanceRequired {
                             column: destination.name,
                         });

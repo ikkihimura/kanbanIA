@@ -12,6 +12,7 @@ import { formatDateTime } from "../../shared/ui/format";
 import { MarkdownPreview } from "../../shared/ui/MarkdownPreview";
 import { useUnsavedChangesGuard } from "../../shared/ui/useUnsavedChangesGuard";
 import { RelationsPanel } from "../relations/RelationsPanel";
+import { ReviewPanel } from "../review/ReviewPanel";
 import { PRIORITY_LABEL } from "./priorities";
 import { StoryForm } from "./StoryForm";
 
@@ -51,8 +52,17 @@ export function StoryEditor({
     if (state.status === "ready") titleRef.current?.focus();
   }, [state.status]);
 
+  // El formulario solo se reinicia con la versión recargada si no hay borrador: si el
+  // usuario escribió mientras otra acción cambiaba la historia, conserva su texto (al
+  // guardar verá el conflicto y podrá conservar su versión).
+  const [formEpoch, setFormEpoch] = useState(0);
+  const dirtyRef = useRef(dirty);
+  useEffect(() => {
+    dirtyRef.current = dirty;
+  }, [dirty]);
   const reload = useCallback(() => {
     setLatest(null);
+    if (!dirtyRef.current) setFormEpoch((n) => n + 1);
     run(load, { keepData: true });
   }, [run, load]);
 
@@ -206,12 +216,19 @@ export function StoryEditor({
             }}
           />
 
+          <ReviewPanel
+            key={`review-${story.id}`}
+            story={story}
+            locked={dirty}
+            onStoryChanged={reload}
+          />
+
           {story.archivedAt ? (
             <ArchivedStory story={story} onRestored={reload} />
           ) : (
             <section className="panel">
               <StoryForm
-                key={`${story.id}-${String(state.status === "ready" ? state.data.revision : 0)}`}
+                key={`${story.id}-${String(formEpoch)}`}
                 story={story}
                 onSaved={setLatest}
                 onDirtyChange={setDirty}

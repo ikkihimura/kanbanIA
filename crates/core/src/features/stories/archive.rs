@@ -3,7 +3,7 @@ use ts_rs::TS;
 
 use super::story::{ENTITY, StorySummary, count_in_column, load_story, not_archived};
 use crate::error::CoreError;
-use crate::features::columns::{ColumnCategory, ensure_capacity, load_column};
+use crate::features::columns::{ColumnCategory, columns_of_project, ensure_capacity, load_column};
 use crate::platform::storage::Store;
 
 #[derive(Debug, Clone, Deserialize, TS)]
@@ -89,11 +89,39 @@ pub async fn restore_story(
                         reason: format!("La historia #{} no está archivada.", story.number),
                     });
                 }
-                let column_id = input.column_id.as_deref().unwrap_or(&story.column_id);
-                let column = load_column(conn, &input.project_id, column_id)
-                    .await?
-                    .ok_or(CoreError::NotFound { entity: "Columna" })?;
-                if column.category == ColumnCategory::Done {
+                let accepted = story.accepted_at.is_some();
+                let column = match input.column_id.as_deref() {
+                    Some(id) => load_column(conn, &input.project_id, id)
+                        .await?
+                        .ok_or(CoreError::NotFound { entity: "Columna" })?,
+                    None => {
+                        let original = load_column(conn, &input.project_id, &story.column_id)
+                            .await?
+                            .ok_or(CoreError::NotFound { entity: "Columna" })?;
+                        // Una aceptada vuelve a «hecho»: si su columna ya no lo es, a la primera.
+                        if accepted && original.category != ColumnCategory::Done {
+                            columns_of_project(conn, &input.project_id)
+                                .await?
+                                .into_iter()
+                                .find(|c| c.category == ColumnCategory::Done)
+                                .unwrap_or(original)
+                        } else {
+                            original
+                        }
+                    }
+                };
+                let into_done = column.category == ColumnCategory::Done;
+                if accepted && !into_done {
+                    return Err(CoreError::Validation {
+                        field: "columnId",
+                        reason: format!(
+                            "La historia #{} está aceptada: se restaura en una columna «hecho» \
+                             (o reábrela antes).",
+                            story.number
+                        ),
+                    });
+                }
+                if !accepted && into_done {
                     return Err(CoreError::AcceptanceRequired {
                         column: column.name,
                     });

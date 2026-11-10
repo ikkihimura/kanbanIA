@@ -3,6 +3,14 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { AppInfo } from "../../contracts/generated/AppInfo";
+import type { AcceptStoryInput } from "../../contracts/generated/AcceptStoryInput";
+import type { AttentionItem } from "../../contracts/generated/AttentionItem";
+import type { Delivery } from "../../contracts/generated/Delivery";
+import type { ReopenStoryInput } from "../../contracts/generated/ReopenStoryInput";
+import type { ReturnDeliveryInput } from "../../contracts/generated/ReturnDeliveryInput";
+import type { SetBlockerInput } from "../../contracts/generated/SetBlockerInput";
+import type { StoryReview } from "../../contracts/generated/StoryReview";
+import type { SubmitDeliveryInput } from "../../contracts/generated/SubmitDeliveryInput";
 import type { Agent } from "../../contracts/generated/Agent";
 import type { CreateAgentInput } from "../../contracts/generated/CreateAgentInput";
 import type { SetStoryAgentInput } from "../../contracts/generated/SetStoryAgentInput";
@@ -246,6 +254,39 @@ export function createAgent(input: CreateAgentInput): Promise<Agent> {
 
 export function updateAgent(input: UpdateAgentInput): Promise<Agent> {
   return call("update_agent", { input });
+}
+
+// --- revisión y atención ---
+
+export function getStoryReview(
+  projectId: string,
+  storyId: string,
+): Promise<StoryReview> {
+  return call("get_story_review", { projectId, storyId });
+}
+
+export function listAttention(projectId: string): Promise<AttentionItem[]> {
+  return call("list_attention", { projectId });
+}
+
+export function submitDelivery(input: SubmitDeliveryInput): Promise<Delivery> {
+  return call("submit_delivery", { input });
+}
+
+export function returnDelivery(input: ReturnDeliveryInput): Promise<void> {
+  return call("return_delivery", { input });
+}
+
+export function acceptStory(input: AcceptStoryInput): Promise<StorySummary> {
+  return call("accept_story", { input });
+}
+
+export function reopenStory(input: ReopenStoryInput): Promise<StorySummary> {
+  return call("reopen_story", { input });
+}
+
+export function setStoryBlocker(input: SetBlockerInput): Promise<void> {
+  return call("set_story_blocker", { input });
 }
 
 // --- cierre con cambios sin guardar ---
