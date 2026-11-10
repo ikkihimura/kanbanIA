@@ -11,11 +11,13 @@
 mod dependencies;
 mod get;
 mod graph;
+mod set_agent;
 mod set_epic;
 mod set_parent;
 
 pub use dependencies::{DependencyInput, add_story_dependency, remove_story_dependency};
-pub use get::{EpicRef, StoryRelations, get_story_relations};
+pub use get::{AgentRef, EpicRef, StoryRelations, get_story_relations};
 pub use graph::{RelationState, StoryRef};
+pub use set_agent::{SetStoryAgentInput, set_story_agent};
 pub use set_epic::{SetStoryEpicInput, set_story_epic};
 pub use set_parent::{SetStoryParentInput, set_story_parent};

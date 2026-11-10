@@ -5,14 +5,17 @@ import type { StoryRelations } from "../../contracts/generated/StoryRelations";
 import {
   addStoryDependency,
   getStoryRelations,
+  listAgents,
   listEpics,
   listStories,
   removeStoryDependency,
+  setStoryAgent,
   setStoryEpic,
   setStoryParent,
 } from "../../shared/ipc/commands";
 import { useIpcResource } from "../../shared/ipc/useIpcResource";
 import { useMutation } from "../../shared/ipc/useMutation";
+import { PixelAvatar } from "../team/PixelAvatar";
 
 const STATE_LABEL: Record<RelationState, string> = {
   accepted: "Aceptada",
@@ -50,6 +53,7 @@ export function RelationsPanel({
   );
   const relations = useIpcResource(loadRelations);
   const epics = useIpcResource(loadEpics);
+  const agents = useIpcResource(listAgents);
   const stories = useIpcResource(loadStories);
   const [prerequisite, setPrerequisite] = useState("");
   const [announcement, setAnnouncement] = useState("");
@@ -136,6 +140,56 @@ export function RelationsPanel({
       )}
 
       <div className="form-row">
+        <div className="field">
+          <label htmlFor={`${id}-agent`}>Agente asignado</label>
+          <div className="field__inline">
+            {data.agent && (
+              <PixelAvatar
+                spec={data.agent.avatar}
+                name={data.agent.name}
+                size={32}
+                decorative
+              />
+            )}
+            <select
+              id={`${id}-agent`}
+              value={data.agent?.id ?? ""}
+              disabled={readOnly}
+              aria-busy={mutate.pending}
+              aria-describedby={`${id}-agent-hint`}
+              onChange={(event) => {
+                const agentId = event.target.value || null;
+                void apply(
+                  () => setStoryAgent({ projectId, storyId, agentId }),
+                  agentId ? "Agente asignado." : "Sin agente asignado.",
+                );
+              }}
+            >
+              <option value="">Sin agente</option>
+              {/* El asignado siempre aparece, aunque la lista no haya cargado. */}
+              {data.agent &&
+                !(
+                  agents.state.status === "ready" &&
+                  agents.state.data.some((a) => a.id === data.agent?.id)
+                ) && (
+                  <option value={data.agent.id}>
+                    A-{data.agent.number} {data.agent.name}
+                  </option>
+                )}
+              {agents.state.status === "ready" &&
+                agents.state.data.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    A-{a.number} {a.name}
+                    {a.role ? ` (${a.role})` : ""}
+                  </option>
+                ))}
+            </select>
+          </div>
+          <span id={`${id}-agent-hint`} className="field__hint">
+            Asignar no inicia ninguna ejecución ni actividad.
+          </span>
+        </div>
+
         <div className="field">
           <label htmlFor={`${id}-epic`}>Épica</label>
           <select

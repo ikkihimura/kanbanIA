@@ -14,6 +14,10 @@ position: number | null, title: string, priority: Priority, archivedAt: string |
  */
 acceptedAt: string | null, epicId: string | null, parentId: string | null, 
 /**
+ * Agente asignado (solo asignación; no implica actividad).
+ */
+agentId: string | null, 
+/**
  * Prerequisitos sin aceptar: bloqueada si > 0.
  */
 pendingPrerequisites: number, criteriaCount: number, revision: number, };

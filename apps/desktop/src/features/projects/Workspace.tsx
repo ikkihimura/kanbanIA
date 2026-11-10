@@ -7,13 +7,15 @@ import {
 } from "../../shared/ipc/commands";
 import { ProjectList } from "./ProjectList";
 import { StoryEditor } from "../stories/StoryEditor";
+import { TeamView } from "../team/TeamView";
 import { ProjectView } from "./ProjectView";
 
 type View =
   | { kind: "starting" }
   | { kind: "list"; notice?: string }
   | { kind: "project"; project: Project; notice?: string }
-  | { kind: "story"; project: Project; storyId: string };
+  | { kind: "story"; project: Project; storyId: string }
+  | { kind: "team"; from: View };
 
 /** Navegación entre la lista de proyectos y un proyecto. Al iniciar reabre el último abierto. */
 export function Workspace() {
@@ -65,6 +67,34 @@ export function Workspace() {
     setView({ kind: "project", project });
   }, []);
 
+  // Navegación principal; no aparece en el editor de historias, que tiene su propia salida
+  // protegida frente a cambios sin guardar.
+  const nav = (current: "projects" | "team") => (
+    <nav className="main-nav" aria-label="Secciones">
+      <button
+        type="button"
+        className="main-nav__item"
+        aria-current={current === "projects" ? "page" : undefined}
+        onClick={() => {
+          if (view.kind === "team") setView(view.from);
+          else if (current !== "projects") backToList();
+        }}
+      >
+        Proyectos
+      </button>
+      <button
+        type="button"
+        className="main-nav__item"
+        aria-current={current === "team" ? "page" : undefined}
+        onClick={() => {
+          if (view.kind !== "team") setView({ kind: "team", from: view });
+        }}
+      >
+        Equipo
+      </button>
+    </nav>
+  );
+
   switch (view.kind) {
     case "starting":
       return (
@@ -72,9 +102,17 @@ export function Workspace() {
           Abriendo…
         </p>
       );
+    case "team":
+      return (
+        <>
+          {nav("team")}
+          <TeamView />
+        </>
+      );
     case "list":
       return (
         <>
+          {nav("projects")}
           {view.notice && (
             <p className="view panel__error" role="alert">
               {view.notice}
@@ -85,15 +123,18 @@ export function Workspace() {
       );
     case "project":
       return (
-        <ProjectView
-          project={view.project}
-          notice={view.notice}
-          onBack={backToList}
-          onChanged={replaceProject}
-          onOpenStory={(storyId) => {
-            setView({ kind: "story", project: view.project, storyId });
-          }}
-        />
+        <>
+          {nav("projects")}
+          <ProjectView
+            project={view.project}
+            notice={view.notice}
+            onBack={backToList}
+            onChanged={replaceProject}
+            onOpenStory={(storyId) => {
+              setView({ kind: "story", project: view.project, storyId });
+            }}
+          />
+        </>
       );
     case "story":
       return (

@@ -127,6 +127,13 @@ Cada historia tiene un número por proyecto (`#N`) que no se reutiliza, título 
 - Se rechazan los **ciclos** directos e indirectos (subtareas y dependencias) y las relaciones entre proyectos distintos.
 - Las relaciones se guardan al momento desde el editor, sin interferir con el borrador del texto. «Guardar y volver» guarda el contenido y vuelve al proyecto.
 
+## Equipo: usuario y agentes
+
+- **Tú** (usuario local) y los **agentes** son entidades distintas. Los agentes son del equipo, no de un proyecto: el acotamiento por proyecto de sus sesiones llegará con MCP (M2).
+- Cada agente (`A-n`) tiene un nombre único (su identidad), rol, proveedor y modelo (texto informativo, no conecta con ningún servicio) y capacidades de un conjunto fijo: planificar, implementar, revisar, probar y documentar. **Cambiar de modelo conserva al mismo agente y su avatar.**
+- **Avatar por piezas**: sprites originales de 16×16 dibujados por código (cabeza humana o robot, ojos, boca, pelo o tocado, accesorio) con una paleta limitada de colores con nombre. Se edita con teclado.
+- **Asignar** un agente a una historia solo registra la asignación: no inicia ejecuciones ni muestra actividad.
+
 ## Notas
 
 - Identificador de la app: `dev.ikkidev.kanbania`.

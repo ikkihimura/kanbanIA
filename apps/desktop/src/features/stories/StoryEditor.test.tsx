@@ -79,6 +79,7 @@ function summaryOf(detail: StoryDetail): StorySummary {
     acceptedAt: null,
     epicId: null,
     parentId: null,
+    agentId: null,
     pendingPrerequisites: 0,
     criteriaCount: detail.criteria.length,
     revision: detail.revision + 1,
@@ -111,6 +112,7 @@ beforeEach(() => {
   mocked.getStoryRelations.mockResolvedValue({
     storyId: "s1",
     epic: null,
+    agent: null,
     parent: null,
     children: [],
     prerequisites: [],
@@ -223,6 +225,7 @@ describe("StoryEditor", () => {
     mocked.getStoryRelations.mockResolvedValue({
       storyId: "s1",
       epic: null,
+      agent: null,
       parent: null,
       children: [
         {

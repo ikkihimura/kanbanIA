@@ -3,6 +3,12 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { AppInfo } from "../../contracts/generated/AppInfo";
+import type { Agent } from "../../contracts/generated/Agent";
+import type { CreateAgentInput } from "../../contracts/generated/CreateAgentInput";
+import type { SetStoryAgentInput } from "../../contracts/generated/SetStoryAgentInput";
+import type { UpdateAgentInput } from "../../contracts/generated/UpdateAgentInput";
+import type { UpdateUserProfileInput } from "../../contracts/generated/UpdateUserProfileInput";
+import type { UserProfile } from "../../contracts/generated/UserProfile";
 import type { CreateEpicInput } from "../../contracts/generated/CreateEpicInput";
 import type { DependencyInput } from "../../contracts/generated/DependencyInput";
 import type { Epic } from "../../contracts/generated/Epic";
@@ -210,6 +216,36 @@ export function removeStoryDependency(
   input: DependencyInput,
 ): Promise<StoryRelations> {
   return call("remove_story_dependency", { input });
+}
+
+export function setStoryAgent(
+  input: SetStoryAgentInput,
+): Promise<StoryRelations> {
+  return call("set_story_agent", { input });
+}
+
+// --- equipo ---
+
+export function getUserProfile(): Promise<UserProfile> {
+  return call("get_user_profile");
+}
+
+export function updateUserProfile(
+  input: UpdateUserProfileInput,
+): Promise<UserProfile> {
+  return call("update_user_profile", { input });
+}
+
+export function listAgents(): Promise<Agent[]> {
+  return call("list_agents");
+}
+
+export function createAgent(input: CreateAgentInput): Promise<Agent> {
+  return call("create_agent", { input });
+}
+
+export function updateAgent(input: UpdateAgentInput): Promise<Agent> {
+  return call("update_agent", { input });
 }
 
 // --- cierre con cambios sin guardar ---

@@ -61,3 +61,14 @@ pub async fn remove_story_dependency(
         .await
         .map_err(|e| e.to_payload(None))
 }
+
+#[tauri::command]
+pub async fn set_story_agent(
+    slot: State<'_, StorageSlot>,
+    input: relations::SetStoryAgentInput,
+) -> Result<StoryRelations, ErrorPayload> {
+    let store = slot.store().await?;
+    relations::set_story_agent(&store, &input)
+        .await
+        .map_err(|e| e.to_payload(None))
+}

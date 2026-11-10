@@ -1,8 +1,10 @@
 import { useCallback, useRef, useState } from "react";
+import type { Agent } from "../../contracts/generated/Agent";
 import type { Priority } from "../../contracts/generated/Priority";
 import {
   createStory,
   listColumns,
+  listAgents,
   listEpics,
   listStories,
   newRequestId,
@@ -10,6 +12,7 @@ import {
 import { useIpcResource } from "../../shared/ipc/useIpcResource";
 import { useMutation } from "../../shared/ipc/useMutation";
 import { FieldError } from "../../shared/ui/FieldError";
+import { PixelAvatar } from "../team/PixelAvatar";
 import { PRIORITIES, PRIORITY_LABEL } from "./priorities";
 
 interface Props {
@@ -26,6 +29,7 @@ export function StoriesSection({ projectId, onOpenStory }: Props) {
   const loadColumns = useCallback(() => listColumns(projectId), [projectId]);
   const loadEpics = useCallback(() => listEpics(projectId), [projectId]);
   const epics = useIpcResource(loadEpics);
+  const agents = useIpcResource(listAgents);
   const stories = useIpcResource(loadStories);
   const columns = useIpcResource(loadColumns);
   const [title, setTitle] = useState("");
@@ -54,6 +58,10 @@ export function StoriesSection({ projectId, onOpenStory }: Props) {
   const epicNumber = (id: string | null) =>
     id && epics.state.status === "ready"
       ? epics.state.data.find((e) => e.id === id)?.number
+      : undefined;
+  const agentOf = (id: string | null) =>
+    id && agents.state.status === "ready"
+      ? agents.state.data.find((a) => a.id === id)
       : undefined;
   const storyNumber = (id: string | null) =>
     id ? all.find((s) => s.id === id)?.number : undefined;
@@ -169,6 +177,7 @@ export function StoriesSection({ projectId, onOpenStory }: Props) {
                     ` · subtarea de #${String(storyNumber(story.parentId))}`}
                   {story.archivedAt ? " · archivada" : ""}
                 </span>
+                <Assignee agent={agentOf(story.agentId)} />
                 {story.pendingPrerequisites > 0 && (
                   <span className="badge badge--warn">
                     Bloqueada por {story.pendingPrerequisites}{" "}
@@ -183,5 +192,15 @@ export function StoriesSection({ projectId, onOpenStory }: Props) {
         </ul>
       )}
     </section>
+  );
+}
+
+function Assignee({ agent }: { agent: Agent | undefined }) {
+  if (!agent) return null;
+  return (
+    <span className="assignee">
+      <PixelAvatar spec={agent.avatar} name={agent.name} size={32} decorative />
+      Asignada a {agent.name}
+    </span>
   );
 }

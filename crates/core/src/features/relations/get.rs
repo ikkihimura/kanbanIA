@@ -6,6 +6,7 @@ use super::graph::{
     RelationState, StoryRef, children, dependents, prerequisites, require, story_ref,
 };
 use crate::error::CoreError;
+use crate::features::team::{AvatarSpec, load_agent};
 use crate::platform::storage::Store;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -18,6 +19,19 @@ pub struct EpicRef {
     pub title: String,
 }
 
+/// Agente asignado (identidad, sin estado de actividad: asignar no implica trabajo en curso).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AgentRef {
+    pub id: String,
+    #[ts(type = "number")]
+    pub number: i64,
+    pub name: String,
+    pub role: String,
+    pub avatar: AvatarSpec,
+}
+
 /// Relaciones de una historia, para el panel del editor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +39,7 @@ pub struct EpicRef {
 pub struct StoryRelations {
     pub story_id: String,
     pub epic: Option<EpicRef>,
+    pub agent: Option<AgentRef>,
     pub parent: Option<StoryRef>,
     pub children: Vec<StoryRef>,
     /// De las que depende esta historia.
@@ -74,6 +89,22 @@ pub(super) async fn load_relations(
         None => None,
     };
 
+    let agent_id: Option<String> =
+        sqlx::query_scalar("SELECT agent_id FROM story_agents WHERE story_id = ?")
+            .bind(story_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let agent = match agent_id {
+        Some(id) => load_agent(conn, &id).await?.map(|a| AgentRef {
+            id: a.id,
+            number: a.number,
+            name: a.name,
+            role: a.role,
+            avatar: a.avatar,
+        }),
+        None => None,
+    };
+
     let prerequisites = prerequisites(conn, project_id, story_id).await?;
     let pending_prerequisites = i64::try_from(
         prerequisites
@@ -86,6 +117,7 @@ pub(super) async fn load_relations(
     Ok(StoryRelations {
         story_id: story_id.to_owned(),
         epic: epic.map(|(id, number, title)| EpicRef { id, number, title }),
+        agent,
         parent,
         children: children(conn, project_id, story_id).await?,
         prerequisites,

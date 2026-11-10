@@ -18,6 +18,8 @@ vi.mock("../../shared/ipc/commands", async (importOriginal) => ({
   addStoryDependency: vi.fn(),
   removeStoryDependency: vi.fn(),
   createEpic: vi.fn(),
+  listAgents: vi.fn(),
+  setStoryAgent: vi.fn(),
   updateEpic: vi.fn(),
 }));
 
@@ -27,6 +29,7 @@ function relations(overrides: Partial<StoryRelations> = {}): StoryRelations {
   return {
     storyId: "a",
     epic: null,
+    agent: null,
     parent: null,
     children: [],
     prerequisites: [],
@@ -49,6 +52,7 @@ function summary(id: string, number: number, title: string): StorySummary {
     acceptedAt: null,
     epicId: null,
     parentId: null,
+    agentId: null,
     pendingPrerequisites: 0,
     criteriaCount: 0,
     revision: 1,
@@ -81,6 +85,29 @@ function renderPanel(readOnly = false, onOpenStory = vi.fn()) {
 }
 
 beforeEach(() => {
+  mocked.listAgents.mockResolvedValue([
+    {
+      id: "g1",
+      number: 1,
+      name: "Robota",
+      role: "Backend",
+      provider: "",
+      model: "",
+      capabilities: [],
+      avatar: {
+        head: 2,
+        skin: 6,
+        eyes: 4,
+        mouth: 3,
+        hair: 6,
+        hairColor: 7,
+        accessory: 5,
+        background: 3,
+      },
+      assignedStories: 0,
+      revision: 1,
+    },
+  ]);
   mocked.getStoryRelations.mockResolvedValue(relations());
   mocked.listEpics.mockResolvedValue([epic()]);
   mocked.listStories.mockResolvedValue([
@@ -261,6 +288,47 @@ describe("RelationsPanel: confirmación y foco", () => {
     );
     // La relación no cambió: el selector vuelve a mostrar la vigente.
     expect(screen.getByLabelText("Subtarea de")).toHaveValue("");
+  });
+});
+
+describe("RelationsPanel: agente asignado", () => {
+  it("asigna un agente sin simular actividad", async () => {
+    const user = userEvent.setup();
+    mocked.setStoryAgent.mockResolvedValue(
+      relations({
+        agent: {
+          id: "g1",
+          number: 1,
+          name: "Robota",
+          role: "Backend",
+          avatar: {
+            head: 2,
+            skin: 6,
+            eyes: 4,
+            mouth: 3,
+            hair: 6,
+            hairColor: 7,
+            accessory: 5,
+            background: 3,
+          },
+        },
+      }),
+    );
+    renderPanel();
+
+    const select = await screen.findByLabelText("Agente asignado");
+    expect(select).toHaveAccessibleDescription(
+      "Asignar no inicia ninguna ejecución ni actividad.",
+    );
+    await user.selectOptions(select, "g1");
+
+    expect(await screen.findByText("✓ Agente asignado.")).toBeVisible();
+    expect(mocked.setStoryAgent).toHaveBeenCalledWith({
+      projectId: "p1",
+      storyId: "a",
+      agentId: "g1",
+    });
+    expect(screen.queryByText(/trabajando|en curso|activo/i)).toBeNull();
   });
 });
 

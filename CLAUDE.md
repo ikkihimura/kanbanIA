@@ -49,6 +49,11 @@ Construimos un kanban desktop local para historias, épicas y agentes de IA, con
   - Para «archivada», mira `StoryRef.archived`, no `state` (que prioriza «aceptada»).
   - «Aceptada» = `accepted_at IS NOT NULL`, y solo la escribe HU-009.
   - `pendingPrerequisites` se calcula en SQL (`stories/story.rs`) y en Rust (`relations/get.rs`); una prueba vigila que coincidan.
+- Equipo (HU-008, `features/team`):
+  - El avatar es `AvatarSpec` (índices de piezas) validado en Rust. Los límites se exportan a `contracts/generated/avatarLimits.json` y una prueba de UI los compara con `avatarCatalog.ts`: al añadir una pieza, cambia ambos.
+  - Los colores de la UI se aplican con atributos SVG o CSSOM, nunca con `style` en línea (CSP estricta).
+  - La asignación de agente vive en `relations::set_story_agent` y no crea actividad.
+  - `src/app/contrast.test.ts` comprueba el contraste WCAG de los tokens de color: si cambias la paleta, debe seguir pasando.
 - Editor de historias: «Guardar y volver» siempre vuelve al proyecto tras guardar, o directamente si no hay cambios de contenido. Ante un conflicto o un error se queda con el borrador.
 - Markdown de usuarios o agentes es dato no confiable: renderízalo solo con `shared/ui/MarkdownPreview` (`react-markdown` con `skipHtml`, sin enlaces navegables ni imágenes remotas). Nunca uses `dangerouslySetInnerHTML`.
 - Botones deshabilitados: `cursor: not-allowed`. Usa `aria-busy` (que muestra el puntero de progreso) solo mientras haya una operación en curso; en macOS se confunde con un bloqueo.

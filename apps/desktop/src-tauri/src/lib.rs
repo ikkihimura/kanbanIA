@@ -51,6 +51,12 @@ pub fn register_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
             commands::relations::set_story_parent,
             commands::relations::add_story_dependency,
             commands::relations::remove_story_dependency,
+            commands::relations::set_story_agent,
+            commands::team::get_user_profile,
+            commands::team::update_user_profile,
+            commands::team::list_agents,
+            commands::team::create_agent,
+            commands::team::update_agent,
         ])
 }
 

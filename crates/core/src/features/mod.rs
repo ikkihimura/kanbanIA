@@ -7,3 +7,4 @@ pub mod projects;
 pub mod relations;
 pub mod repositories;
 pub mod stories;
+pub mod team;
