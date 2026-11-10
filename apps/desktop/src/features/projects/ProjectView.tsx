@@ -5,12 +5,22 @@ import { useMutation } from "../../shared/ipc/useMutation";
 import { FieldError } from "../../shared/ui/FieldError";
 import { ColumnsSection } from "../columns/ColumnsSection";
 import { EpicsSection } from "../epics/EpicsSection";
+import { Board } from "../board/Board";
 import { AttentionSection } from "../review/AttentionSection";
 import { RepositoriesSection } from "../repositories/RepositoriesSection";
 import { StoriesSection } from "../stories/StoriesSection";
 
+export type ProjectTab = "board" | "settings";
+
+const TABS: { key: ProjectTab; label: string }[] = [
+  { key: "board", label: "Tablero" },
+  { key: "settings", label: "Configuración" },
+];
+
 interface Props {
   project: Project;
+  tab: ProjectTab;
+  onTabChange: (tab: ProjectTab) => void;
   onBack: () => void;
   onChanged: (project: Project) => void;
   onOpenStory: (storyId: string) => void;
@@ -20,6 +30,8 @@ interface Props {
 
 export function ProjectView({
   project,
+  tab,
+  onTabChange,
   onBack,
   onChanged,
   onOpenStory,
@@ -145,14 +157,68 @@ export function ProjectView({
         projectId={project.id}
         onOpenStory={onOpenStory}
       />
-      <StoriesSection
-        key={`stories-${project.id}`}
-        projectId={project.id}
-        onOpenStory={onOpenStory}
-      />
-      <EpicsSection key={`epics-${project.id}`} projectId={project.id} />
-      <ColumnsSection key={`columns-${project.id}`} projectId={project.id} />
-      <RepositoriesSection key={project.id} projectId={project.id} />
+      <div role="tablist" aria-label="Vista del proyecto" className="tabs">
+        {TABS.map((t, index) => (
+          <button
+            key={t.key}
+            type="button"
+            role="tab"
+            id={`tab-${t.key}`}
+            className="tabs__tab"
+            aria-selected={tab === t.key}
+            aria-controls={tab === t.key ? `tabpanel-${t.key}` : undefined}
+            tabIndex={tab === t.key ? 0 : -1}
+            onClick={() => {
+              onTabChange(t.key);
+            }}
+            onKeyDown={(event) => {
+              const targets: Record<string, number> = {
+                ArrowLeft: (index - 1 + TABS.length) % TABS.length,
+                ArrowRight: (index + 1) % TABS.length,
+                Home: 0,
+                End: TABS.length - 1,
+              };
+              const to = targets[event.key];
+              if (to === undefined) return;
+              event.preventDefault();
+              const next = TABS[to];
+              if (!next) return;
+              onTabChange(next.key);
+              document.getElementById(`tab-${next.key}`)?.focus();
+            }}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+      <div
+        role="tabpanel"
+        id={`tabpanel-${tab}`}
+        aria-labelledby={`tab-${tab}`}
+        className="view"
+      >
+        {tab === "board" ? (
+          <Board
+            key={`board-${project.id}`}
+            projectId={project.id}
+            onOpenStory={onOpenStory}
+          />
+        ) : (
+          <>
+            <StoriesSection
+              key={`stories-${project.id}`}
+              projectId={project.id}
+              onOpenStory={onOpenStory}
+            />
+            <EpicsSection key={`epics-${project.id}`} projectId={project.id} />
+            <ColumnsSection
+              key={`columns-${project.id}`}
+              projectId={project.id}
+            />
+            <RepositoriesSection key={project.id} projectId={project.id} />
+          </>
+        )}
+      </div>
     </main>
   );
 }

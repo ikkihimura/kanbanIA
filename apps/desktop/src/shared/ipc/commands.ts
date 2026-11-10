@@ -3,6 +3,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { AppInfo } from "../../contracts/generated/AppInfo";
+import type { MoveStoryInput } from "../../contracts/generated/MoveStoryInput";
 import type { AcceptStoryInput } from "../../contracts/generated/AcceptStoryInput";
 import type { AttentionItem } from "../../contracts/generated/AttentionItem";
 import type { Delivery } from "../../contracts/generated/Delivery";
@@ -165,6 +166,11 @@ export function getStory(projectId: string, id: string): Promise<StoryDetail> {
 
 export function createStory(input: CreateStoryInput): Promise<StorySummary> {
   return call("create_story", { input });
+}
+
+/** Mueve una tarjeta de forma atómica (WIP, conflictos y «hecho» se validan en el núcleo). */
+export function moveStory(input: MoveStoryInput): Promise<StorySummary> {
+  return call("move_story", { input });
 }
 
 export function updateStory(input: UpdateStoryInput): Promise<StoryDetail> {

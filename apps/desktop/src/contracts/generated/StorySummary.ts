@@ -18,6 +18,10 @@ acceptedAt: string | null, epicId: string | null, parentId: string | null,
  */
 agentId: string | null, 
 /**
+ * Motivo del bloqueo marcado (manual o reportado), si lo hay.
+ */
+blockerReason: string | null, 
+/**
  * Prerequisitos sin aceptar: bloqueada si > 0.
  */
 pendingPrerequisites: number, criteriaCount: number, revision: number, };

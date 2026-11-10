@@ -75,3 +75,16 @@ pub async fn restore_story(
         .await
         .map_err(|e| e.to_payload(None))
 }
+
+/// Mueve una tarjeta en el tablero (entre columnas o dentro de una) de forma atómica.
+/// Entrar en «hecho» devuelve `acceptance_required`: la UI abre entonces el flujo de aceptar.
+#[tauri::command]
+pub async fn move_story(
+    slot: State<'_, StorageSlot>,
+    input: kanbania_core::features::stories::MoveStoryInput,
+) -> Result<StorySummary, ErrorPayload> {
+    let store = slot.store().await?;
+    stories::move_story(&store, &input)
+        .await
+        .map_err(|e| e.to_payload(None))
+}

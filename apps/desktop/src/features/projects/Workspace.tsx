@@ -8,7 +8,7 @@ import {
 import { ProjectList } from "./ProjectList";
 import { StoryEditor } from "../stories/StoryEditor";
 import { TeamView } from "../team/TeamView";
-import { ProjectView } from "./ProjectView";
+import { ProjectView, type ProjectTab } from "./ProjectView";
 
 type View =
   | { kind: "starting" }
@@ -22,6 +22,8 @@ export function Workspace() {
   const [view, setView] = useState<View>({ kind: "starting" });
   // Solo cuenta la última apertura pedida: clics rápidos no se aplican fuera de orden.
   const latestOpen = useRef(0);
+  // La pestaña del proyecto se conserva al abrir una historia y volver.
+  const [tab, setTab] = useState<ProjectTab>("board");
 
   useEffect(() => {
     let cancelled = false;
@@ -128,6 +130,8 @@ export function Workspace() {
           <ProjectView
             project={view.project}
             notice={view.notice}
+            tab={tab}
+            onTabChange={setTab}
             onBack={backToList}
             onChanged={replaceProject}
             onOpenStory={(storyId) => {

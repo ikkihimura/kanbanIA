@@ -4,7 +4,10 @@
 #![allow(clippy::unwrap_used)]
 
 use kanbania_core::error::ErrorCode;
-use kanbania_core::features::columns::{Column, ColumnCategory, list_columns};
+use kanbania_core::features::columns::{
+    Column, ColumnCategory, CreateColumnInput, UpdateColumnInput, create_column, list_columns,
+    update_column,
+};
 use kanbania_core::features::projects::{CreateProjectInput, Project, create_project};
 use kanbania_core::features::relations::{DependencyInput, add_story_dependency};
 use kanbania_core::features::review::{
@@ -139,6 +142,8 @@ impl Env {
                 story_id: id.into(),
                 expected_revision: d.revision,
                 satisfied_criteria: d.criteria.iter().map(|c| c.id.clone()).collect(),
+                column_id: None,
+                to_index: None,
             },
         )
         .await
@@ -355,6 +360,8 @@ async fn acceptance_requires_all_criteria_and_at_least_one() {
             story_id: story.id.clone(),
             expected_revision: story.revision,
             satisfied_criteria: vec![story.criteria[0].id.clone()],
+            column_id: None,
+            to_index: None,
         },
     )
     .await
@@ -993,4 +1000,106 @@ async fn invisible_formatting_and_network_paths_are_rejected_and_agents_get_no_d
         review.deliveries[0].references[0].status,
         ReferenceStatus::Accessible
     );
+}
+
+/// Soltar en una segunda columna «hecho» acepta y coloca en una sola transacción, con el WIP
+/// de esa columna (no el de la primera).
+#[tokio::test]
+async fn accept_into_chosen_done_column_and_index_is_atomic() {
+    let env = Env::new().await;
+    let first_done = env.column(ColumnCategory::Done).await;
+    let archive = create_column(
+        &env.store,
+        "ui",
+        &CreateColumnInput {
+            request_id: rid(),
+            project_id: env.project.id.clone(),
+            name: "Archivo".into(),
+            category: ColumnCategory::Done,
+            wip_limit: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Llenar la primera «hecho» (WIP 1).
+    let a = env.story("A", &["ok"]).await;
+    env.accept_all(&Actor::Human, &a.id).await.unwrap();
+    update_column(
+        &env.store,
+        &UpdateColumnInput {
+            project_id: env.project.id.clone(),
+            id: first_done.id.clone(),
+            expected_revision: first_done.revision,
+            name: first_done.name.clone(),
+            category: ColumnCategory::Done,
+            wip_limit: Some(1),
+        },
+    )
+    .await
+    .unwrap();
+
+    let accept_into =
+        |story: StoryDetail, column_id: &str, to_index: Option<i64>| AcceptStoryInput {
+            project_id: env.project.id.clone(),
+            story_id: story.id.clone(),
+            expected_revision: story.revision,
+            satisfied_criteria: story.criteria.iter().map(|c| c.id.clone()).collect(),
+            column_id: Some(column_id.into()),
+            to_index,
+        };
+
+    // Por defecto iría a la primera (llena): WIP.
+    let b = env.story("B", &["ok"]).await;
+    let err = env.accept_all(&Actor::Human, &b.id).await.unwrap_err();
+    assert_eq!(err.code(), ErrorCode::WipLimitExceeded);
+    let b_now = env.summary(&b.id).await;
+    assert!(
+        b_now.accepted_at.is_none(),
+        "el fallo no deja nada a medias"
+    );
+
+    // A la segunda «hecho», al final.
+    let accepted = accept_story(
+        &env.store,
+        &Actor::Human,
+        &accept_into(env.detail(&b.id).await, &archive.id, None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(accepted.column_id, archive.id);
+    assert_eq!(accepted.position, Some(0));
+
+    // Otra, delante de B (índice 0); un índice enorme se acotaría al final.
+    let c = env.story("C", &["ok"]).await;
+    let accepted = accept_story(
+        &env.store,
+        &Actor::Human,
+        &accept_into(c, &archive.id, Some(0)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(accepted.position, Some(0));
+    assert_eq!(env.summary(&b.id).await.position, Some(1));
+
+    // Una columna que no es «hecho» se rechaza sin aceptar.
+    let d = env.story("D", &["ok"]).await;
+    let review = env.column(ColumnCategory::Review).await;
+    let err = accept_story(
+        &env.store,
+        &Actor::Human,
+        &accept_into(d.clone(), &review.id, None),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), ErrorCode::Validation);
+    let err = accept_story(
+        &env.store,
+        &Actor::Human,
+        &accept_into(d.clone(), &archive.id, Some(-1)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), ErrorCode::Validation);
+    assert!(env.summary(&d.id).await.accepted_at.is_none());
 }

@@ -53,6 +53,7 @@ function summary(id: string, number: number, title: string): StorySummary {
     epicId: null,
     parentId: null,
     agentId: null,
+    blockerReason: null,
     pendingPrerequisites: 0,
     criteriaCount: 0,
     revision: 1,

@@ -3,6 +3,7 @@ import type { Delivery } from "../../contracts/generated/Delivery";
 import type { ReferenceInput } from "../../contracts/generated/ReferenceInput";
 import type { ReferenceStatus } from "../../contracts/generated/ReferenceStatus";
 import type { StoryDetail } from "../../contracts/generated/StoryDetail";
+import type { StorySummary } from "../../contracts/generated/StorySummary";
 import {
   acceptStory,
   getStoryReview,
@@ -279,14 +280,18 @@ function BlockerControl({
   );
 }
 
-function AcceptForm({
+/** Lista de criterios a comprobar y botón «Aceptar historia» (también la usa el tablero). */
+export function AcceptForm({
   story,
   locked,
+  target,
   onAccepted,
 }: {
   story: StoryDetail;
   locked: boolean;
-  onAccepted: () => void;
+  /** Columna «hecho» y posición destino (tablero); sin ella, al final de la primera. */
+  target?: { columnId: string; toIndex: number };
+  onAccepted: (accepted: StorySummary) => void;
 }) {
   const hintId = useId();
   const [checked, setChecked] = useState<Set<string>>(new Set());
@@ -303,8 +308,9 @@ function AcceptForm({
       satisfiedCriteria: story.criteria
         .filter((c) => checked.has(c.id))
         .map((c) => c.id),
+      ...(target ?? {}),
     });
-    if (result.ok) onAccepted();
+    if (result.ok) onAccepted(result.value);
   }
 
   return (

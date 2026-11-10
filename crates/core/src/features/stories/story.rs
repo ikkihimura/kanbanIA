@@ -67,6 +67,8 @@ pub struct StorySummary {
     pub parent_id: Option<String>,
     /// Agente asignado (solo asignación; no implica actividad).
     pub agent_id: Option<String>,
+    /// Motivo del bloqueo marcado (manual o reportado), si lo hay.
+    pub blocker_reason: Option<String>,
     /// Prerequisitos sin aceptar: bloqueada si > 0.
     #[ts(type = "number")]
     pub pending_prerequisites: i64,
@@ -127,6 +129,7 @@ struct StoryRow {
     epic_id: Option<String>,
     parent_id: Option<String>,
     agent_id: Option<String>,
+    blocker_reason: Option<String>,
     pending_prerequisites: i64,
     criteria_count: i64,
     revision: i64,
@@ -145,6 +148,7 @@ macro_rules! select_story {
              (SELECT epic_id FROM story_epics se WHERE se.story_id = s.id) AS epic_id, \
              (SELECT parent_id FROM story_parents sp WHERE sp.story_id = s.id) AS parent_id, \
              (SELECT agent_id FROM story_agents sg WHERE sg.story_id = s.id) AS agent_id, \
+             (SELECT reason FROM story_blockers sb WHERE sb.story_id = s.id) AS blocker_reason, \
              (SELECT COUNT(*) FROM story_dependencies d JOIN stories p ON p.id = d.depends_on_id \
               WHERE d.story_id = s.id AND p.accepted_at IS NULL) AS pending_prerequisites \
              FROM stories s ",
@@ -168,6 +172,7 @@ impl StoryRow {
             epic_id: self.epic_id,
             parent_id: self.parent_id,
             agent_id: self.agent_id,
+            blocker_reason: self.blocker_reason,
             pending_prerequisites: self.pending_prerequisites,
             criteria_count: self.criteria_count,
             revision: self.revision,

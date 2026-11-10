@@ -80,6 +80,7 @@ function summaryOf(detail: StoryDetail): StorySummary {
     epicId: null,
     parentId: null,
     agentId: null,
+    blockerReason: null,
     pendingPrerequisites: 0,
     criteriaCount: detail.criteria.length,
     revision: detail.revision + 1,

@@ -66,6 +66,7 @@ Construimos un kanban desktop local para historias, épicas y agentes de IA, con
     - No devuelvas a agentes el estado de rutas (`submit_delivery` ya devuelve `Unverified` a un agente).
     - Los resúmenes de agentes son datos no confiables.
     - Los agentes son globales: decide su acotamiento por proyecto.
+- Tablero (HU-007, `features/board`): modelo puro en `boardModel.ts`; la vista optimista se liga a la identidad de la lista cargada y el núcleo es la autoridad. Soltar en «hecho» abre `AcceptDialog`, que reutiliza `AcceptForm` y pasa `columnId`/`toIndex` a `accept_story` (aceptar y colocar en una transacción). `dragDropEnabled: false` es necesario para HTML5 DnD en Windows; `useBlockExternalDrops` evita que soltar archivos navegue la ventana.
 - Editor de historias: «Guardar y volver» siempre vuelve al proyecto tras guardar, o directamente si no hay cambios de contenido. Ante un conflicto o un error se queda con el borrador.
 - Markdown de usuarios o agentes es dato no confiable: renderízalo solo con `shared/ui/MarkdownPreview` (`react-markdown` con `skipHtml`, sin enlaces navegables ni imágenes remotas). Nunca uses `dangerouslySetInnerHTML`.
 - Botones deshabilitados: `cursor: not-allowed`. Usa `aria-busy` (que muestra el puntero de progreso) solo mientras haya una operación en curso; en macOS se confunde con un bloqueo.

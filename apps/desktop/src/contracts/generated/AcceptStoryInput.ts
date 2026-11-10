@@ -4,4 +4,12 @@ export type AcceptStoryInput = { projectId: string, storyId: string, expectedRev
 /**
  * Ids de los criterios que la persona marcó como satisfechos: deben ser todos.
  */
-satisfiedCriteria: Array<string>, };
+satisfiedCriteria: Array<string>, 
+/**
+ * Columna «hecho» destino (p. ej. donde se soltó en el tablero); por defecto la primera.
+ */
+columnId?: string, 
+/**
+ * Posición en esa columna; por defecto, al final. Se acota al final si es mayor.
+ */
+toIndex?: number, };

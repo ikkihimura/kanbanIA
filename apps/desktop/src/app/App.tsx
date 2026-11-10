@@ -4,8 +4,10 @@ import { Workspace } from "../features/projects/Workspace";
 import { StoragePanel } from "../features/storage-status/StoragePanel";
 import { getStorageStatus } from "../shared/ipc/commands";
 import { useIpcResource } from "../shared/ipc/useIpcResource";
+import { useBlockExternalDrops } from "../shared/ui/useBlockExternalDrops";
 
 export function App() {
+  useBlockExternalDrops();
   const storage = useIpcResource(getStorageStatus);
   const ready =
     storage.state.status === "ready" && storage.state.data.status === "ready";

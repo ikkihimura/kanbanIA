@@ -6,7 +6,9 @@ use ts_rs::TS;
 use super::first_column_of;
 use crate::error::CoreError;
 use crate::features::columns::{ColumnCategory, columns_of_project, ensure_capacity, load_column};
-use crate::features::stories::{StorySummary, append_to_column, load_detail, load_story};
+use crate::features::stories::{
+    StorySummary, append_to_column, load_detail, load_story, place_at_index,
+};
 use crate::platform::actor::Actor;
 use crate::platform::storage::Store;
 
@@ -20,6 +22,12 @@ pub struct AcceptStoryInput {
     pub expected_revision: i64,
     /// Ids de los criterios que la persona marcó como satisfechos: deben ser todos.
     pub satisfied_criteria: Vec<String>,
+    /// Columna «hecho» destino (p. ej. donde se soltó en el tablero); por defecto la primera.
+    #[ts(optional)]
+    pub column_id: Option<String>,
+    /// Posición en esa columna; por defecto, al final. Se acota al final si es mayor.
+    #[ts(optional, type = "number")]
+    pub to_index: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, TS)]
@@ -47,7 +55,8 @@ pub struct SatisfiedCriterion {
 }
 
 /// Acepta la historia. Solo una persona; exige al menos un criterio y que todos estén
-/// marcados como satisfechos. La mueve al final de la primera columna «hecho», marca como
+/// marcados como satisfechos. La mueve a la columna «hecho» indicada (por defecto, al final de
+/// la primera), con su límite WIP, en la misma transacción. Marca como
 /// aceptadas sus entregas pendientes y registra el evento con los criterios en el historial.
 pub async fn accept_story(
     store: &Store,
@@ -55,6 +64,12 @@ pub async fn accept_story(
     input: &AcceptStoryInput,
 ) -> Result<StorySummary, CoreError> {
     actor.require_human("aceptar una historia")?;
+    if input.to_index.is_some_and(|i| i < 0) {
+        return Err(invalid(
+            "toIndex",
+            "La posición no puede ser negativa.".into(),
+        ));
+    }
     let input = input.clone();
 
     store
@@ -115,22 +130,39 @@ pub async fn accept_story(
                     ));
                 }
 
-                let done = first_column_of(conn, &input.project_id, ColumnCategory::Done)
-                    .await?
-                    .ok_or_else(|| {
-                        invalid(
-                            "storyId",
-                            "El proyecto no tiene ninguna columna de tipo «hecho»: crea una para \
-                             poder aceptar."
-                                .into(),
-                        )
-                    })?;
+                let done = match &input.column_id {
+                    Some(id) => {
+                        let column = load_column(conn, &input.project_id, id)
+                            .await?
+                            .ok_or(CoreError::NotFound { entity: "Columna" })?;
+                        if column.category != ColumnCategory::Done {
+                            return Err(invalid(
+                                "columnId",
+                                "Al aceptar, la historia entra en una columna «hecho».".into(),
+                            ));
+                        }
+                        column
+                    }
+                    None => first_column_of(conn, &input.project_id, ColumnCategory::Done)
+                        .await?
+                        .ok_or_else(|| {
+                            invalid(
+                                "storyId",
+                                "El proyecto no tiene ninguna columna de tipo «hecho»: crea una \
+                                 para poder aceptar."
+                                    .into(),
+                            )
+                        })?,
+                };
                 ensure_capacity(conn, &done, 1).await?;
 
                 let summary = load_story(conn, &input.project_id, &input.story_id)
                     .await?
                     .ok_or(CoreError::NotFound { entity: "Historia" })?;
                 append_to_column(conn, &summary, &done.id).await?;
+                if let Some(index) = input.to_index {
+                    place_at_index(conn, &story.id, &done.id, index).await?;
+                }
                 sqlx::query(
                     "UPDATE stories SET accepted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), \
                      revision = revision + 1 WHERE id = ?",

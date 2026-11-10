@@ -37,3 +37,33 @@ pub(crate) async fn append_to_column(
     .await?;
     Ok(())
 }
+
+/// Recoloca una historia que está al final de `column_id` en `index` (acotado al final),
+/// desplazando las siguientes. Mantiene las posiciones densas.
+pub(crate) async fn place_at_index(
+    conn: &mut SqliteConnection,
+    story_id: &str,
+    column_id: &str,
+    index: i64,
+) -> Result<(), CoreError> {
+    let last = count_in_column(conn, column_id).await? - 1;
+    let index = index.clamp(0, last.max(0));
+    if index >= last {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE stories SET position = position + 1 \
+         WHERE column_id = ? AND position >= ? AND id <> ?",
+    )
+    .bind(column_id)
+    .bind(index)
+    .bind(story_id)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query("UPDATE stories SET position = ? WHERE id = ?")
+        .bind(index)
+        .bind(story_id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}

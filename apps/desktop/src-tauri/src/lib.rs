@@ -43,6 +43,7 @@ pub fn register_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
             commands::stories::update_story,
             commands::stories::archive_story,
             commands::stories::restore_story,
+            commands::stories::move_story,
             commands::epics::list_epics,
             commands::epics::create_epic,
             commands::epics::update_epic,

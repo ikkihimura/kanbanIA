@@ -137,10 +137,19 @@ Cada historia tiene un número por proyecto (`#N`) que no se reutiliza, título 
 ## Entregas, aceptación y atención
 
 - **Entregas**: resumen y referencias. Las referencias son URL http(s), que la app **nunca visita** y muestra como «no verificada», o rutas locales, cuyo acceso se comprueba al mostrarlas: accesible / no encontrada / sin acceso. Una entrega es *manual* si la registra la persona y *reportada* si la envía un agente (M2). «Enviar a revisión» mueve la tarjeta a la columna de revisión **sin marcarla como hecha**. Una entrega pendiente se puede devolver con un motivo.
-- **Aceptar** solo lo hace una persona: los agentes reciben `forbidden`. Exige al menos un criterio y que todos se marquen como cumplidos, y queda registrado en el historial junto con los criterios. La tarjeta pasa a la primera columna «hecho». Sin columna «hecho» no se puede aceptar.
+- **Aceptar** solo lo hace una persona: los agentes reciben `forbidden`. Exige al menos un criterio y que todos se marquen como cumplidos, y queda registrado en el historial junto con los criterios. La tarjeta pasa a la primera columna «hecho», o a la columna «hecho» y la posición donde se soltó en el tablero, en la misma operación y con el límite WIP de esa columna. Sin columna «hecho» no se puede aceptar.
 - **Reabrir** pide un motivo y devuelve la tarjeta a revisión, o a la columna elegida. El historial se conserva. Una tarjeta aceptada solo sale de «hecho» reabriéndola.
 - **Bloqueo**: es un motivo marcado en la historia, no una columna.
 - **Atención (N)**, en cada proyecto: una fila por historia con todos sus motivos: bloqueo, entregas pendientes y prerequisitos sin aceptar. Los prerequisitos solo cuentan en las columnas listo, en curso y revisión.
+
+## Tablero
+
+- Pestañas **Tablero** y **Configuración** en cada proyecto (Atención queda encima de ambas). Las tarjetas muestran número, título, prioridad en texto, épica, motivo de bloqueo o prerequisitos pendientes, agente asignado y «Aceptada».
+- **Filtros** por texto (título o `#número`) y épica. **Carriles** por épica o agente: solo agrupan, y mover cambia la columna, nunca la épica ni el agente.
+- **Mover**: arrastrar y soltar, o con el foco en una tarjeta **Alt + flechas** (←/→ columna contigua, ↑/↓ junto a la vecina visible). El movimiento se ve al instante y vuelve atrás si el núcleo lo rechaza (WIP, conflicto…); ante un conflicto el tablero se recarga.
+- Soltar en una columna «hecho» abre la **aceptación**: la tarjeta no se mueve hasta aceptarla; cancelar la deja donde estaba. Una aceptada solo sale de «hecho» reabriéndola.
+- Soltar archivos o enlaces externos en la ventana no hace nada (evita perder borradores navegando fuera de la app).
+- Medición (macOS arm64, sin SLA): núcleo con 300 tarjetas, crear 123 ms, listar 3,4 ms, 50 movimientos 54 ms (`crates/core/tests/board_load.rs`); render de 300 tarjetas en jsdom ≈ 400 ms.
 
 ## Notas
 
