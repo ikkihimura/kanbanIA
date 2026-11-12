@@ -1,0 +1,29 @@
+//! Protocolo compartido por servidor y cliente. Sin dependencias del núcleo: el cliente (y el
+//! adaptador MCP que lo use) no enlaza el código que abre SQLite.
+
+use sha2::{Digest, Sha256};
+
+use crate::descriptor::{Secret, hex};
+
+/// Versión de la API (prefijo de rutas `/v1`). Un cambio incompatible en las rutas o en los
+/// tipos que sirven (también en `StoryDetail` o `SessionInfo`) exige subirla.
+pub const API_VERSION: u32 = 1;
+/// Cabecera con el token de sesión del descriptor.
+pub const SESSION_HEADER: &str = "x-kanbania-session";
+/// Cabecera del saludo: reto del cliente para que el servidor demuestre conocer el token.
+pub const NONCE_HEADER: &str = "x-kanbania-nonce";
+/// Cuerpo máximo de una petición. Las rutas actuales no tienen cuerpo; las de M2 serán JSON
+/// pequeños (entregas, bloqueos).
+pub const MAX_BODY_BYTES: usize = 64 * 1024;
+const PROOF_DOMAIN: &str = "kanbania-service-proof/v1";
+
+/// Respuesta al reto del saludo: `sha256(dominio ‖ token de sesión ‖ reto)`.
+pub fn proof(session_token: &Secret, nonce: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(PROOF_DOMAIN.as_bytes());
+    hasher.update([0]);
+    hasher.update(session_token.expose().as_bytes());
+    hasher.update([0]);
+    hasher.update(nonce.as_bytes());
+    hex(&hasher.finalize())
+}

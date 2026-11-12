@@ -15,6 +15,7 @@ tauri-build = { workspace = true }
 
 [dependencies]
 kanbania-core = { workspace = true }
+kanbania-local-service = { workspace = true }
 tauri = { workspace = true }
 tauri-plugin-dialog = { workspace = true }
 

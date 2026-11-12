@@ -2,7 +2,12 @@
 // los nombres de comando deben coincidir con `register_commands` en src-tauri/src/lib.rs.
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { AgentCredential } from "../../contracts/generated/AgentCredential";
 import type { AppInfo } from "../../contracts/generated/AppInfo";
+import type { CreateAgentCredentialInput } from "../../contracts/generated/CreateAgentCredentialInput";
+import type { CreatedAgentCredential } from "../../contracts/generated/CreatedAgentCredential";
+import type { LocalServiceStatus } from "../../contracts/generated/LocalServiceStatus";
+import type { RevokeAgentCredentialInput } from "../../contracts/generated/RevokeAgentCredentialInput";
 import type { BackupInfo } from "../../contracts/generated/BackupInfo";
 import type { RestoreOutcome } from "../../contracts/generated/RestoreOutcome";
 import type { RestoreSource } from "../../contracts/generated/RestoreSource";
@@ -359,6 +364,30 @@ export function saveBackupToFolder(args: {
 /** Sustituye todos los datos: el host cierra el almacén, restaura y lo reabre. */
 export function restoreBackup(source: RestoreSource): Promise<RestoreOutcome> {
   return call("restore_backup", { source });
+}
+
+// --- acceso de agentes y servicio local (HU-012) ---
+
+export function listAgentCredentials(
+  projectId: string,
+): Promise<AgentCredential[]> {
+  return call("list_agent_credentials", { projectId });
+}
+
+export function createAgentCredential(
+  input: CreateAgentCredentialInput,
+): Promise<CreatedAgentCredential> {
+  return call("create_agent_credential", { input });
+}
+
+export function revokeAgentCredential(
+  input: RevokeAgentCredentialInput,
+): Promise<AgentCredential> {
+  return call("revoke_agent_credential", { input });
+}
+
+export function getLocalServiceStatus(): Promise<LocalServiceStatus> {
+  return call("get_local_service_status");
 }
 
 // --- errores ---

@@ -6,6 +6,7 @@ import { FieldError } from "../../shared/ui/FieldError";
 import { ColumnsSection } from "../columns/ColumnsSection";
 import { EpicsSection } from "../epics/EpicsSection";
 import { Board } from "../board/Board";
+import { AgentAccessSection } from "../access/AgentAccessSection";
 import { ExportSection } from "../portability/ExportSection";
 import { AttentionSection } from "../review/AttentionSection";
 import { RepositoriesSection } from "../repositories/RepositoriesSection";
@@ -219,6 +220,10 @@ export function ProjectView({
             <RepositoriesSection key={project.id} projectId={project.id} />
             <ExportSection
               key={`export-${project.id}`}
+              projectId={project.id}
+            />
+            <AgentAccessSection
+              key={`access-${project.id}`}
               projectId={project.id}
             />
           </>

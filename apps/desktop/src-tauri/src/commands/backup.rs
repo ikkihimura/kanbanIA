@@ -7,8 +7,9 @@ use kanbania_core::error::{CoreError, ErrorPayload};
 use kanbania_core::platform::storage::{
     self, BackupInfo, BackupKind, RestoreOutcome, RestoreSource, backup_path, save_backup_copy,
 };
-use tauri::State;
+use tauri::{AppHandle, Runtime, State};
 
+use crate::service::start_local_service;
 use crate::storage::StorageSlot;
 
 /// Operaciones de disco fuera del hilo asíncrono.
@@ -49,7 +50,8 @@ pub async fn save_backup_to_folder(
 }
 
 #[tauri::command]
-pub async fn restore_backup(
+pub async fn restore_backup<R: Runtime>(
+    handle: AppHandle<R>,
     slot: State<'_, StorageSlot>,
     source: RestoreSource,
 ) -> Result<RestoreOutcome, ErrorPayload> {
@@ -69,5 +71,8 @@ pub async fn restore_backup(
             path
         }
     };
-    slot.restore(&path).await
+    let outcome = slot.restore(&path).await;
+    // Restaurar sin almacenamiento previo puede dejarlo disponible por primera vez.
+    start_local_service(&handle).await;
+    outcome
 }

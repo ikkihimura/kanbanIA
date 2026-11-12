@@ -1,0 +1,90 @@
+//! Servicio local (HU-012) mantenido por el host. Solo arranca si esta instancia posee el
+//! almacén (el bloqueo del directorio de datos): una segunda instancia nunca publica otro
+//! servicio ni pisa el descriptor. Cada petición pide el almacén al `StorageSlot`, así que
+//! respeta restauraciones y cierres igual que la UI.
+
+use std::sync::Arc;
+
+use kanbania_core::error::{CoreError, ErrorPayload};
+use kanbania_core::features::access::LocalServiceStatus;
+use kanbania_core::platform::storage::Store;
+use kanbania_local_service::{LocalService, StoreSource};
+use tauri::async_runtime::Mutex;
+use tauri::{AppHandle, Manager, Runtime};
+
+use crate::storage::StorageSlot;
+
+#[derive(Default)]
+pub struct ServiceSlot {
+    running: Mutex<Option<LocalService>>,
+    /// Tras salir no se vuelve a arrancar (un reintento o una restauración tardíos dejarían
+    /// un descriptor huérfano).
+    stopped: Mutex<bool>,
+}
+
+impl ServiceSlot {
+    /// Arranca el servicio si aún no lo está y el almacén está listo. Idempotente.
+    pub async fn ensure_started<R: Runtime>(&self, handle: &AppHandle<R>) {
+        let mut running = self.running.lock().await;
+        if running.is_some() || *self.stopped.lock().await {
+            return;
+        }
+        let Some(slot) = handle.try_state::<StorageSlot>() else {
+            return;
+        };
+        if !slot.is_ready().await {
+            return;
+        }
+        let source: Arc<dyn StoreSource> = Arc::new(HostStore(handle.clone()));
+        match LocalService::start(slot.data_dir(), source).await {
+            Ok(service) => {
+                // El puerto no es secreto; el token de sesión nunca se registra.
+                eprintln!("[local-service] escuchando en 127.0.0.1:{}", service.port());
+                *running = Some(service);
+            }
+            Err(error) => eprintln!("[local-service] no se pudo arrancar: {error}"),
+        }
+    }
+
+    /// Activo solo si escucha y además el almacén está disponible (si no, toda petición
+    /// recibiría «no disponible»).
+    pub async fn status(&self, storage: &StorageSlot) -> LocalServiceStatus {
+        let port = self.running.lock().await.as_ref().map(LocalService::port);
+        let port = if storage.is_ready().await { port } else { None };
+        LocalServiceStatus {
+            running: port.is_some(),
+            port,
+        }
+    }
+
+    /// Para el servicio y borra su descriptor (al salir).
+    pub async fn stop(&self) {
+        let mut running = self.running.lock().await;
+        *self.stopped.lock().await = true;
+        if let Some(service) = running.take() {
+            service.stop().await;
+        }
+    }
+}
+
+struct HostStore<R: Runtime>(AppHandle<R>);
+
+impl<R: Runtime> StoreSource for HostStore<R> {
+    fn store(
+        &self,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<Store, ErrorPayload>> + Send + '_>> {
+        Box::pin(async move {
+            match self.0.try_state::<StorageSlot>() {
+                Some(slot) => slot.store().await,
+                None => Err(CoreError::StorageLocked.to_payload(None)),
+            }
+        })
+    }
+}
+
+/// Arranca el servicio local si procede (tras abrir, reintentar o restaurar el almacén).
+pub async fn start_local_service<R: Runtime>(handle: &AppHandle<R>) {
+    if let Some(service) = handle.try_state::<ServiceSlot>() {
+        service.ensure_started(handle).await;
+    }
+}

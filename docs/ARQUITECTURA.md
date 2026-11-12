@@ -6,7 +6,7 @@ apps/desktop/             # React/Vite y host Tauri
 crates/core/              # Casos de uso y reglas, sin depender de Tauri
   src/features/          # stories/create, stories/move, runs/submit_result...
   src/platform/          # SQLite, reloj, IDs, eventos, archivos
-crates/local-service/     # Propietario único de escrituras y API local para M2
+crates/local-service/     # API local autenticada (M2); el propietario de los datos es el host
 crates/mcp/               # Adaptador stdio hacia servicio local, M2
 crates/runner/            # Supervisión e integraciones, M3
 docs/stories/
@@ -15,7 +15,7 @@ No crear crates vacíos de hitos futuros solo para cumplir el árbol. Cada slice
 
 ## Decisiones técnicas
 - Rust estable, Tokio cuando se necesite asincronía; SQLite con SQLx y migraciones explícitas como opción inicial. Verificar compatibilidad al implementar HU-001.
-- Tauri IPC para UI. En M2, host desktop mantiene el servicio local que invoca los mismos casos de uso; MCP no abre una segunda conexión con autoridad independiente.
+- Tauri IPC para UI. En M2, host desktop mantiene el servicio local que invoca los mismos casos de uso; MCP no abre una segunda conexión con autoridad independiente. El propietario único de los datos es el host (su `StorageSlot` y el bloqueo del directorio); `local-service` es un transporte HTTP que pide prestado el almacén en cada petición (HU-012).
 - MVP MCP requiere aplicación abierta. El proceso MCP usa stdio y conecta a una API loopback autenticada del host. Axum es la opción propuesta para esa API. No hay servidor en red ni daemon automático.
 - Puerto dinámico y descriptor local protegido por permisos del usuario; token local fuera de Git y logs. Enlazar solo loopback; autenticar cada petición, validar Host/Origin cuando corresponda, limitar payloads. No habilitar CORS global.
 - Un solo host por perfil de datos; segunda ventana/instancia se conecta o falla claramente. Prueba de competencia entre dos arranques.

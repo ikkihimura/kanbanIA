@@ -14,6 +14,10 @@ pub enum CoreError {
     #[error("{reason}")]
     Cycle { field: &'static str, reason: String },
 
+    /// Credencial ausente, mal formada, desconocida o revocada (servicio local).
+    #[error("credencial no válida")]
+    Unauthorized,
+
     /// La identidad no puede realizar esta acción (p. ej. un agente aceptando trabajo).
     #[error("{reason}")]
     Forbidden { reason: String },
@@ -76,6 +80,7 @@ pub enum ErrorCode {
     NotFound,
     AlreadyExists,
     Cycle,
+    Unauthorized,
     Forbidden,
     Conflict,
     IdempotencyConflict,
@@ -117,6 +122,7 @@ impl CoreError {
             Self::NotFound { .. } => ErrorCode::NotFound,
             Self::AlreadyExists { .. } => ErrorCode::AlreadyExists,
             Self::Cycle { .. } => ErrorCode::Cycle,
+            Self::Unauthorized => ErrorCode::Unauthorized,
             Self::Forbidden { .. } => ErrorCode::Forbidden,
             Self::Conflict { .. } => ErrorCode::Conflict,
             Self::IdempotencyConflict => ErrorCode::IdempotencyConflict,
@@ -143,6 +149,10 @@ impl CoreError {
                 "Otra edición cambió estos datos. Revisa el estado actual y vuelve a intentarlo."
                     .into(),
                 true,
+            ),
+            Self::Unauthorized => (
+                "Credencial no válida o revocada. Crea una nueva en Kanban IA.".into(),
+                false,
             ),
             Self::Forbidden { reason } => (reason.clone(), false),
             Self::IdempotencyConflict => (

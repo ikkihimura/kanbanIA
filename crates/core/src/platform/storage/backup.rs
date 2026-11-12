@@ -26,6 +26,7 @@ use ts_rs::TS;
 use super::lock::DataDirLock;
 use super::{BACKUP_DIR, DATABASE_FILE, MIGRATOR, Store};
 use crate::error::CoreError;
+use crate::features::access::{current_revocations, reconcile_restored};
 
 const FORMAT: &str = "kanbania-backup";
 const VERSION: u32 = 1;
@@ -660,6 +661,18 @@ async fn restore_locked(
                 Err(other) => return Err(other),
             };
             verify_schema(&mut conn, work, version).await?;
+            // Una copia antigua no reactiva credenciales revocadas después (ver `access`).
+            let current = data_dir.join(DATABASE_FILE);
+            let mut current_conn = if current.exists() {
+                connect(&current).await.ok()
+            } else {
+                None
+            };
+            let revocations = current_revocations(current_conn.as_mut()).await;
+            if let Some(c) = current_conn {
+                c.close().await.ok();
+            }
+            reconcile_restored(&mut conn, &revocations).await?;
             vacuum_into(&mut conn, &staging).await?;
             Ok(version)
         }

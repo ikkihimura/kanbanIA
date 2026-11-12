@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 dunce = { workspace = true }
+getrandom = { workspace = true }
 same-file = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -59,13 +59,14 @@ apps/desktop/                 React 19 + Vite 8 + TypeScript 6 (estricto)
   src-tauri/                  host Tauri 2: adapta casos de uso del núcleo a comandos IPC
 crates/core/                  casos de uso y reglas, sin dependencia de Tauri
   src/features/<slice>/       vertical slices con entrada pública
+crates/local-service/         API local autenticada (solo 127.0.0.1) y su cliente
 ```
 
 Contrato de frontera: los tipos se definen en Rust con `#[derive(TS)] #[ts(export)]` y se generan en `apps/desktop/src/contracts/generated/` al ejecutar `cargo test` (ruta configurada en `.cargo/config.toml`). Se versionan en Git y CI falla si están desactualizados. Los nombres de comando se registran en `apps/desktop/src-tauri/src/lib.rs` (`register_commands`).
 
 ## Versiones principales
 
-Tauri 2.12.5 (CLI/API 2.12.4), React 19.3.1, Vite 8.3.7, TypeScript 6.0.3, ts-rs 12.0.1, ESLint 10.14.0. Versiones exactas en `package.json` y lockfiles (`package-lock.json`, `Cargo.lock`). Se eligió TypeScript 6.0 (como la plantilla oficial de Tauri) porque typescript-eslint 8.72 soporta `<6.1`.
+Tauri 2.12.5 (CLI/API 2.12.4), React 19.3.1, Vite 8.3.7, TypeScript 6.0.3, ts-rs 12.0.1, axum 0.8.9 + hyper 1.12 (servicio local), ESLint 10.14.0. Versiones exactas en `package.json` y lockfiles (`package-lock.json`, `Cargo.lock`). Se eligió TypeScript 6.0 (como la plantilla oficial de Tauri) porque typescript-eslint 8.72 soporta `<6.1`.
 
 ## CI
 
@@ -84,6 +85,7 @@ Para usar otro perfil (pruebas, depuración): `KANBANIA_DATA_DIR=/ruta npm run d
 |---|---|
 | `kanbania.sqlite3` (+ `-wal`, `-shm`) | Base de datos en modo WAL. No copies solo el `.sqlite3` con la app abierta |
 | `kanbania.lock` | Bloqueo exclusivo: un solo proceso escritor por directorio. El sistema lo libera si la app termina |
+| `service.json` | Mientras la app está abierta: puerto del servicio local y token de sesión (solo legible por el usuario; se borra al salir) |
 | `backups/<fecha>-<tipo>/` | Copias de seguridad: `kanbania.sqlite3` + `manifest.json`. Manuales, antes de migrar y antes de restaurar (ver «Copias de seguridad») |
 
 Si otra instancia ya usa los datos, la nueva ventana muestra el error `storage_locked` con opción de reintentar. Una migración fallida se revierte por completo y la app muestra `storage_migration_failed` sin modificar los datos. Una base creada por una versión más reciente muestra `storage_newer_schema` y no se toca. La base debe estar en disco local: no se admite una carpeta de red.
@@ -167,6 +169,14 @@ Cada historia tiene un número por proyecto (`#N`) que no se reutiliza, título 
 - Cada copia es una carpeta con la base completa, coherente aunque haya escrituras en curso (`VACUUM INTO`), y un `manifest.json` con la versión de esquema, sha256 y lo que **no** incluye: el contenido de los repositorios (solo sus rutas), los registros de ejecución de agentes (llegarán en M3) y las exportaciones Markdown (que no son una copia de seguridad).
 - Restaurar verifica la copia (hashes, integridad, claves foráneas, esquema idéntico al de esta versión o anterior; una copia antigua se migra al abrir), guarda antes una copia automática del estado actual para deshacer y sustituye la base sin que nada escriba mientras tanto. Si la base restaurada no abre, se vuelve sola al estado anterior.
 - Se conservan las 10 copias manuales y las 10 automáticas más recientes en `backups/`.
+
+## Servicio local y acceso de agentes
+
+- Con la app abierta, el host escucha solo en `127.0.0.1` con un puerto dinámico. Nada fuera de este equipo puede conectarse; no hay CORS y se rechazan peticiones de navegadores (`Origin`) y hosts inesperados.
+- Para que un agente (la integración MCP llega en HU-013) use un proyecto: en la configuración del proyecto, «Acceso de agentes» → elige el agente → **Crear credencial**. El token se muestra **una sola vez**; guárdalo solo en la configuración de la integración. Revocar corta el acceso en la siguiente petición.
+- Cada petición necesita el token de sesión de `service.json` y la credencial; el agente y el proyecto salen de la credencial. Restaurar una copia no reactiva credenciales revocadas (en otro perfil, las de la copia llegan revocadas).
+- Con la app cerrada, las integraciones fallan con «Kanban IA no está abierto» y nunca abren la base. Una segunda instancia no arranca otro servicio.
+- Limitación: en Windows `service.json` hereda los permisos del directorio de datos; no uses `KANBANIA_DATA_DIR` en una carpeta compartida con otros usuarios.
 
 ## Notas
 

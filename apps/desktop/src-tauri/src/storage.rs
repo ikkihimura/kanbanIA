@@ -79,6 +79,11 @@ impl StorageSlot {
         Self::describe(&state).await
     }
 
+    /// `true` si esta instancia posee el almacén abierto.
+    pub async fn is_ready(&self) -> bool {
+        matches!(&*self.state.lock().await, SlotState::Ready(_))
+    }
+
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
     }

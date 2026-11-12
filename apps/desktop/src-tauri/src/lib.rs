@@ -5,11 +5,13 @@ mod commands;
 mod exit_guard;
 #[cfg(target_os = "macos")]
 mod menu;
+mod service;
 mod storage;
 
 use std::path::PathBuf;
 
 pub use exit_guard::{CONFIRM_CLOSE_EVENT, ExitGuard};
+pub use service::{ServiceSlot, start_local_service};
 pub use storage::StorageSlot;
 use tauri::{App, AppHandle, Builder, Emitter, Manager, RunEvent, Runtime, WindowEvent};
 
@@ -17,6 +19,7 @@ use tauri::{App, AppHandle, Builder, Emitter, Manager, RunEvent, Runtime, Window
 pub fn register_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
     builder
         .manage(ExitGuard::default())
+        .manage(ServiceSlot::default())
         .invoke_handler(tauri::generate_handler![
             commands::exit::set_unsaved_changes,
             commands::exit::discard_and_close,
@@ -72,6 +75,10 @@ pub fn register_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
             commands::backup::create_backup,
             commands::backup::save_backup_to_folder,
             commands::backup::restore_backup,
+            commands::access::list_agent_credentials,
+            commands::access::create_agent_credential,
+            commands::access::revoke_agent_credential,
+            commands::access::get_local_service_status,
         ])
 }
 
@@ -111,6 +118,8 @@ pub fn run() {
             let data_dir = resolve_data_dir(app)?;
             let slot = tauri::async_runtime::block_on(StorageSlot::open(data_dir));
             app.manage(slot);
+            // Solo si esta instancia posee el almacén (una segunda instancia no lo arranca).
+            tauri::async_runtime::block_on(start_local_service(app.handle()));
             Ok(())
         })
         .build(tauri::generate_context!());
@@ -142,6 +151,9 @@ pub fn run() {
             }
         }
         RunEvent::Exit => {
+            if let Some(service) = handle.try_state::<ServiceSlot>() {
+                tauri::async_runtime::block_on(service.stop());
+            }
             if let Some(slot) = handle.try_state::<StorageSlot>() {
                 tauri::async_runtime::block_on(slot.close());
             }
