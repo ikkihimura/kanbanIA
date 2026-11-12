@@ -68,6 +68,10 @@ pub fn register_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
             commands::portability::export_project,
             commands::portability::preview_import,
             commands::portability::apply_import,
+            commands::backup::list_backups,
+            commands::backup::create_backup,
+            commands::backup::save_backup_to_folder,
+            commands::backup::restore_backup,
         ])
 }
 

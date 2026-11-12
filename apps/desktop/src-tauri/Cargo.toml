@@ -20,6 +20,7 @@ tauri-plugin-dialog = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+sqlx = { workspace = true }
 tauri = { workspace = true, features = ["test"] }
 tempfile = { workspace = true }
 

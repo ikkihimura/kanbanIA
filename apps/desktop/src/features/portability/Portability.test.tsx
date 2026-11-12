@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ImportPreview } from "../../contracts/generated/ImportPreview";
 import * as commands from "../../shared/ipc/commands";
-import { chooseFolder } from "./chooseFolder";
+import { chooseFolder } from "../../shared/ui/chooseFolder";
 import { ExportSection } from "./ExportSection";
 import { ImportSection } from "./ImportSection";
 
@@ -13,7 +13,7 @@ vi.mock("../../shared/ipc/commands", async (importOriginal) => ({
   previewImport: vi.fn(),
   applyImport: vi.fn(),
 }));
-vi.mock("./chooseFolder", () => ({ chooseFolder: vi.fn() }));
+vi.mock("../../shared/ui/chooseFolder", () => ({ chooseFolder: vi.fn() }));
 
 const mocked = vi.mocked(commands);
 const choose = vi.mocked(chooseFolder);

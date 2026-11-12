@@ -3,6 +3,9 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { AppInfo } from "../../contracts/generated/AppInfo";
+import type { BackupInfo } from "../../contracts/generated/BackupInfo";
+import type { RestoreOutcome } from "../../contracts/generated/RestoreOutcome";
+import type { RestoreSource } from "../../contracts/generated/RestoreSource";
 import type { ApplyImportInput } from "../../contracts/generated/ApplyImportInput";
 import type { ExportProjectInput } from "../../contracts/generated/ExportProjectInput";
 import type { ExportResult } from "../../contracts/generated/ExportResult";
@@ -334,6 +337,28 @@ export function previewImport(path: string): Promise<ImportPreview> {
 
 export function applyImport(input: ApplyImportInput): Promise<ImportResult> {
   return call("apply_import", { input });
+}
+
+// --- copias de seguridad (HU-011) ---
+
+export function listBackups(): Promise<BackupInfo[]> {
+  return call("list_backups");
+}
+
+export function createBackup(): Promise<BackupInfo> {
+  return call("create_backup");
+}
+
+export function saveBackupToFolder(args: {
+  id: string;
+  destination: string;
+}): Promise<string> {
+  return call("save_backup_to_folder", args);
+}
+
+/** Sustituye todos los datos: el host cierra el almacén, restaura y lo reabre. */
+export function restoreBackup(source: RestoreSource): Promise<RestoreOutcome> {
+  return call("restore_backup", { source });
 }
 
 // --- errores ---

@@ -1853,6 +1853,7 @@ version = "0.1.0"
 dependencies = [
  "kanbania-core",
  "serde_json",
+ "sqlx",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

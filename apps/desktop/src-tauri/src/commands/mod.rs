@@ -1,4 +1,5 @@
 pub mod app_info;
+pub mod backup;
 pub mod columns;
 pub mod epics;
 pub mod exit;

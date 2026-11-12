@@ -5,7 +5,7 @@ import type { ImportPreview } from "../../contracts/generated/ImportPreview";
 import type { ResolutionChoice } from "../../contracts/generated/ResolutionChoice";
 import { applyImport, previewImport } from "../../shared/ipc/commands";
 import { useMutation } from "../../shared/ipc/useMutation";
-import { chooseFolder } from "./chooseFolder";
+import { chooseFolder } from "../../shared/ui/chooseFolder";
 
 const ACTION_LABEL: Record<ImportAction, string> = {
   create: "Se crea",

@@ -5,7 +5,11 @@
 use std::path::{Path, PathBuf};
 
 use kanbania_core::error::{CoreError, ErrorPayload};
-use kanbania_core::platform::storage::{StorageStatus, Store};
+use std::time::Duration;
+
+use kanbania_core::platform::storage::{
+    BACKUP_DIR, RestoreOutcome, StorageStatus, Store, restore_backup_waiting,
+};
 use tauri::async_runtime::Mutex;
 
 /// Permite usar otro directorio de datos (perfiles de prueba, depuración).
@@ -75,6 +79,67 @@ impl StorageSlot {
         Self::describe(&state).await
     }
 
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    /// Restaura una copia (HU-011). Mientras dura, el estado queda bloqueado: los comandos que
+    /// piden el almacén esperan y las conexiones antiguas se cierran, así que nadie escribe
+    /// durante la sustitución. Si la base restaurada no abre (p. ej. falla su migración), se
+    /// vuelve a la copia previa automáticamente y se dice. Ante cualquier error, se reabre lo
+    /// que hubiera.
+    pub async fn restore(&self, source: &Path) -> Result<RestoreOutcome, ErrorPayload> {
+        let mut state = self.state.lock().await;
+        if let SlotState::Closed = &*state {
+            return Err(CoreError::StorageLocked.to_payload(None));
+        }
+        if let SlotState::Ready(store) = &*state {
+            store.close().await;
+        }
+        *state = SlotState::Unavailable(StorageStatus::from_error(&CoreError::StorageLocked));
+
+        // Un comando en curso aún puede tener su copia del almacén (y del bloqueo): con el pool
+        // cerrado termina enseguida. Se espera un plazo corto antes de dar por bloqueado.
+        let outcome = match restore_waiting(&self.data_dir, source).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                *state = Self::try_open(&self.data_dir).await;
+                return Err(error.to_payload(None));
+            }
+        };
+        *state = Self::try_open(&self.data_dir).await;
+        if let SlotState::Unavailable(StorageStatus::Unavailable { error }) = &*state {
+            let reason = error.message.clone();
+            let Some(safety) = &outcome.safety_backup else {
+                return Err(error.clone());
+            };
+            let undo = self.data_dir.join(BACKUP_DIR).join(&safety.id);
+            let undone = restore_waiting(&self.data_dir, &undo).await.is_ok();
+            if undone {
+                *state = Self::try_open(&self.data_dir).await;
+            }
+            let message = if undone && matches!(&*state, SlotState::Ready(_)) {
+                format!(
+                    "La copia se restauró pero no se pudo abrir ({reason}). Se volvió \
+                     automáticamente al estado anterior; no se perdió nada."
+                )
+            } else {
+                format!(
+                    "La copia se restauró pero no se pudo abrir ({reason}) y no se pudo volver \
+                     al estado anterior. Tus datos anteriores están en la copia «{}»: \
+                     restáurala desde la lista.",
+                    safety.id
+                )
+            };
+            return Err(CoreError::Validation {
+                field: "backup",
+                reason: message,
+            }
+            .to_payload(None));
+        }
+        Ok(outcome)
+    }
+
     /// Cierra las conexiones (checkpoint del WAL) y libera el bloqueo.
     pub async fn close(&self) {
         let mut state = self.state.lock().await;
@@ -94,4 +159,11 @@ fn log_open_error(error: &CoreError) {
         source = cause.source();
     }
     eprintln!("{message}");
+}
+
+/// Plazo para que un comando en curso suelte su manejador del almacén antes de restaurar.
+const LOCK_WAIT: Duration = Duration::from_secs(3);
+
+async fn restore_waiting(data_dir: &Path, source: &Path) -> Result<RestoreOutcome, CoreError> {
+    restore_backup_waiting(data_dir, source, LOCK_WAIT).await
 }

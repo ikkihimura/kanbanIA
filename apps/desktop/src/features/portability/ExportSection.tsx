@@ -2,7 +2,7 @@ import { useId, useState } from "react";
 import type { ExportResult } from "../../contracts/generated/ExportResult";
 import { exportProject } from "../../shared/ipc/commands";
 import { useMutation } from "../../shared/ipc/useMutation";
-import { chooseFolder } from "./chooseFolder";
+import { chooseFolder } from "../../shared/ui/chooseFolder";
 
 interface Props {
   projectId: string;

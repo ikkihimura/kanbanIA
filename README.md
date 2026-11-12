@@ -84,7 +84,7 @@ Para usar otro perfil (pruebas, depuración): `KANBANIA_DATA_DIR=/ruta npm run d
 |---|---|
 | `kanbania.sqlite3` (+ `-wal`, `-shm`) | Base de datos en modo WAL. No copies solo el `.sqlite3` con la app abierta |
 | `kanbania.lock` | Bloqueo exclusivo: un solo proceso escritor por directorio. El sistema lo libera si la app termina |
-| `backups/pre-migration-vN.sqlite3` | Copia consistente previa a aplicar migraciones sobre una base existente |
+| `backups/<fecha>-<tipo>/` | Copias de seguridad: `kanbania.sqlite3` + `manifest.json`. Manuales, antes de migrar y antes de restaurar (ver «Copias de seguridad») |
 
 Si otra instancia ya usa los datos, la nueva ventana muestra el error `storage_locked` con opción de reintentar. Una migración fallida se revierte por completo y la app muestra `storage_migration_failed` sin modificar los datos. Una base creada por una versión más reciente muestra `storage_newer_schema` y no se toca. La base debe estar en disco local: no se admite una carpeta de red.
 
@@ -160,6 +160,13 @@ Cada historia tiene un número por proyecto (`#N`) que no se reutiliza, título 
   - El límite WIP se respeta; al restaurar un proyecto nuevo cuyo tablero ya lo superaba, se sube lo justo y se avisa.
   - Se rechazan rutas fuera de la carpeta, enlaces simbólicos, ids duplicados o de otro proyecto, ciclos y formatos de otra versión. Un paquete inválido no cambia nada.
 - No hay sincronización automática (ni con Git): exportar e importar son acciones explícitas.
+
+## Copias de seguridad
+
+- En «Sistema» → «Copias de seguridad»: **Crear copia ahora**, **Restaurar…** (con confirmación) y **Guardar en carpeta…** (p. ej. un disco externo); también **Restaurar desde una carpeta…**. El panel aparece aunque la base no se pueda abrir, para recuperarla.
+- Cada copia es una carpeta con la base completa, coherente aunque haya escrituras en curso (`VACUUM INTO`), y un `manifest.json` con la versión de esquema, sha256 y lo que **no** incluye: el contenido de los repositorios (solo sus rutas), los registros de ejecución de agentes (llegarán en M3) y las exportaciones Markdown (que no son una copia de seguridad).
+- Restaurar verifica la copia (hashes, integridad, claves foráneas, esquema idéntico al de esta versión o anterior; una copia antigua se migra al abrir), guarda antes una copia automática del estado actual para deshacer y sustituye la base sin que nada escriba mientras tanto. Si la base restaurada no abre, se vuelve sola al estado anterior.
+- Se conservan las 10 copias manuales y las 10 automáticas más recientes en `backups/`.
 
 ## Notas
 

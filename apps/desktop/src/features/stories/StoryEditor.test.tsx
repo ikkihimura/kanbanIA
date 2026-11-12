@@ -214,7 +214,10 @@ describe("StoryEditor", () => {
     await waitFor(() => {
       expect(onBack).toHaveBeenCalled();
     });
-    expect(mocked.setUnsavedChanges).toHaveBeenLastCalledWith(false);
+    // El aviso al host llega en un efecto: puede ir justo después de `onBack`.
+    await waitFor(() => {
+      expect(mocked.setUnsavedChanges).toHaveBeenLastCalledWith(false);
+    });
 
     // Salir del editor deja de bloquear el cierre.
     unmount();

@@ -29,7 +29,8 @@ Construimos un kanban desktop local para historias, épicas y agentes de IA, con
   - Usa `sqlx::query`/`query_as` en tiempo de ejecución, no las macros `query!` (requieren base en compilación).
   - Pruebas: SQLite temporal real (`tempfile`), nunca mocks de la base.
   - Si falla una migración sobre una base existente, `Store::open` restaura la copia previa: la base queda exactamente como estaba.
-  - Deuda conocida: `mutation_receipts` y `backups/` no tienen retención. Las migraciones corren en el arranque, antes de mostrar la ventana.
+  - Deuda conocida: `mutation_receipts` no tiene retención. Las migraciones corren en el arranque, antes de mostrar la ventana.
+  - Copias (HU-011, `platform/storage/backup.rs`): carpeta `backups/<id>/` con base + `manifest.json` (sha256, versión de esquema, exclusiones), creada con `VACUUM INTO`. Restaurar exige el almacén cerrado (`StorageSlot::restore` lo cierra, espera a que se suelten los manejadores, sustituye y reabre; si no abre, deshace). Verifica hashes, integridad, claves foráneas y que el esquema sea idéntico al de las migraciones. Retención: 10 manuales y 10 automáticas. Restaurar revierte también `mutation_receipts`. En M2, nunca expongas copias ni restauración a agentes (rutas arbitrarias, sustituyen la base).
   - En M2, no expongas `databasePath` ni rutas locales por MCP o el servicio local: los agentes son lectores no confiables.
 - Patrón de slice (HU-003, ver `features/projects` y `features/repositories`):
   - Un archivo por caso de uso. Los tipos de entrada son `#[derive(Deserialize, TS)]` con `requestId` (creaciones) o `expectedRevision` (ediciones). Las validaciones de disco van antes de abrir la transacción.

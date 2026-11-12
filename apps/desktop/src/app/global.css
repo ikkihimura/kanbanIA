@@ -1051,6 +1051,15 @@ textarea {
   padding: 4px 0;
 }
 
+/* ---------- copias ---------- */
+
+.backup-item {
+  display: grid;
+  gap: 4px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .shell__cursor {
     animation: none;

@@ -3,10 +3,11 @@
 //! - `Store::open` toma el bloqueo exclusivo *antes* de tocar la base, configura WAL,
 //!   claves foráneas y busy timeout, y aplica migraciones (cada una en su transacción).
 //! - Si hay migraciones pendientes sobre una base existente, primero guarda una copia
-//!   consistente (`VACUUM INTO`, incluye el WAL) en `backups/`.
+//!   consistente (`VACUUM INTO`, incluye el WAL) en `backups/` (formato de `backup.rs`).
 //! - Las mutaciones usan `write`/`write_idempotent` (`BEGIN IMMEDIATE`). Las lecturas
 //!   pueden usar `reader()` directamente.
 
+mod backup;
 mod lock;
 mod status;
 
@@ -22,6 +23,10 @@ use sqlx::sqlite::{
 };
 use sqlx::{Sqlite, SqliteConnection, Transaction};
 
+pub use backup::{
+    BackupInfo, BackupKind, MAX_KEPT, RestoreOutcome, RestoreSource, backup_path, list_backups,
+    restore_backup, restore_backup_waiting, save_backup_copy,
+};
 pub use status::StorageStatus;
 
 use crate::error::CoreError;
@@ -68,7 +73,9 @@ impl Store {
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Full)
             .foreign_keys(true)
-            .busy_timeout(BUSY_TIMEOUT);
+            .busy_timeout(BUSY_TIMEOUT)
+            // Defensa: el esquema no puede invocar funciones con efectos (triggers/vistas).
+            .pragma("trusted_schema", "OFF");
         let pool = SqlitePoolOptions::new()
             .max_connections(MAX_CONNECTIONS)
             .connect_with(options)
@@ -89,7 +96,7 @@ impl Store {
             // Con varias migraciones pendientes, sqlx confirma cada una por separado: si una
             // posterior falla, se restaura la copia previa para dejar la base exactamente igual.
             if let (CoreError::MigrationFailed(_), Some(backup)) = (&error, &backup) {
-                restore_backup(backup, &store.database_path).map_err(CoreError::StorageIo)?;
+                restore_previous(backup, &store.database_path).map_err(CoreError::StorageIo)?;
             }
             return Err(error);
         }
@@ -122,8 +129,7 @@ impl Store {
             .iter()
             .any(|migration| !applied.contains(&migration.version));
         if pending && existed {
-            let from = applied.iter().max().copied().unwrap_or(0);
-            *backup = Some(self.backup_before_migration(data_dir, from).await?);
+            *backup = Some(backup::pre_migration_backup(self, data_dir).await?);
         }
 
         migrator.run(&self.pool).await.map_err(|error| match error {
@@ -147,32 +153,6 @@ impl Store {
             .fetch_all(&self.pool)
             .await?;
         Ok(versions)
-    }
-
-    async fn backup_before_migration(
-        &self,
-        data_dir: &Path,
-        from: i64,
-    ) -> Result<PathBuf, CoreError> {
-        let backup_dir = data_dir.join(BACKUP_DIR);
-        std::fs::create_dir_all(&backup_dir).map_err(CoreError::StorageIo)?;
-        let backup_path = backup_dir.join(format!("pre-migration-v{from}.sqlite3"));
-        if backup_path.exists() {
-            std::fs::remove_file(&backup_path).map_err(CoreError::StorageIo)?;
-        }
-
-        let target = backup_path.to_str().ok_or_else(|| {
-            CoreError::StorageIo(std::io::Error::other("ruta de copia no es UTF-8"))
-        })?;
-        sqlx::query("VACUUM INTO ?")
-            .bind(target)
-            .execute(&self.pool)
-            .await?;
-        // VACUUM INTO no sincroniza su salida: asegurar que la copia está en disco antes de migrar.
-        std::fs::File::open(&backup_path)
-            .and_then(|file| file.sync_all())
-            .map_err(CoreError::StorageIo)?;
-        Ok(backup_path)
     }
 
     pub fn database_path(&self) -> &Path {
@@ -218,7 +198,7 @@ impl Store {
 
 /// Sustituye la base por la copia previa. Requiere el pool cerrado y el bloqueo tomado.
 /// Elimina WAL/SHM (pertenecen al estado fallido) y reemplaza el archivo de forma atómica.
-fn restore_backup(backup: &Path, database: &Path) -> std::io::Result<()> {
+fn restore_previous(backup: &Path, database: &Path) -> std::io::Result<()> {
     for suffix in ["-wal", "-shm"] {
         let mut sidecar = database.as_os_str().to_owned();
         sidecar.push(suffix);
@@ -315,12 +295,10 @@ mod tests {
         assert!(error.to_payload(None).recoverable);
 
         // Copia previa consistente creada antes de migrar.
-        assert!(
-            data.path()
-                .join(BACKUP_DIR)
-                .join(format!("pre-migration-v{}.sqlite3", latest()))
-                .exists()
-        );
+        let backups = list_backups(data.path()).unwrap();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(backups[0].kind, BackupKind::PreMigration);
+        assert_eq!(backups[0].schema_version, Some(latest()));
 
         // El bloqueo se liberó y la versión actual abre la base intacta.
         let store = Store::open(data.path()).await.unwrap();
