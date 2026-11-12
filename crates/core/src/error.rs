@@ -28,7 +28,7 @@ pub enum CoreError {
         field: &'static str,
     },
 
-    #[error("{entity} no encontrado")]
+    #[error("No se encontró: {entity}.")]
     NotFound { entity: &'static str },
 
     /// La revisión esperada no coincide; incluye el estado vigente para que el cliente decida.

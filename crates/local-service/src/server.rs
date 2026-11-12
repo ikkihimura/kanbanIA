@@ -16,7 +16,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{DefaultBodyLimit, Path as UrlPath, Request, State};
+use axum::extract::rejection::QueryRejection;
+use axum::extract::{DefaultBodyLimit, Path as UrlPath, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
@@ -24,7 +25,9 @@ use axum::routing::get;
 use axum::{Extension, Json, Router};
 use kanbania_core::error::{CoreError, ErrorCode, ErrorPayload};
 use kanbania_core::features::access::{AgentSession, authenticate_agent, describe_session};
-use kanbania_core::features::stories;
+use kanbania_core::features::agent_work::{
+    ReadyQuery, StoryKey, get_story_context, list_ready_stories,
+};
 use kanbania_core::platform::storage::Store;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -126,7 +129,12 @@ impl LocalService {
 fn router(shared: Arc<Shared>) -> Router {
     let authenticated = Router::new()
         .route("/v1/session", get(session))
-        .route("/v1/stories/{id}", get(story))
+        .route("/v1/stories/ready", get(ready_stories))
+        .route("/v1/stories/{id}/context", get(context_by_id))
+        .route(
+            "/v1/stories/by-number/{number}/context",
+            get(context_by_number),
+        )
         .route_layer(from_fn_with_state(shared.clone(), authenticate));
     Router::new()
         .route("/v1/handshake", get(handshake))
@@ -238,14 +246,52 @@ async fn session(Extension(authed): Extension<Authed>) -> Response {
     }
 }
 
-/// Una historia del proyecto de la sesión. Otro proyecto → «no encontrada» (no se revela).
-async fn story(Extension(authed): Extension<Authed>, UrlPath(id): UrlPath<String>) -> Response {
-    let not_found = CoreError::NotFound { entity: "Historia" };
-    if id.is_empty() || id.len() > MAX_ID_LEN {
-        return core_error(&not_found);
+/// Trabajo listo del proyecto de la sesión (`?cursor=&limit=`). Parámetros desconocidos —p. ej.
+/// un `projectId`— se rechazan: el proyecto sale siempre de la sesión.
+async fn ready_stories(
+    Extension(authed): Extension<Authed>,
+    query: Result<Query<ReadyQuery>, QueryRejection>,
+) -> Response {
+    let Ok(Query(query)) = query else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            CoreError::Validation {
+                field: "query",
+                reason: "Parámetros no válidos: solo se admiten cursor y limit (1-50).".into(),
+            }
+            .to_payload(None),
+        );
+    };
+    match list_ready_stories(&authed.store, &authed.session, &query).await {
+        Ok(page) => Json(page).into_response(),
+        Err(error) => core_error(&error),
     }
-    match stories::get_story(&authed.store, authed.session.project_id(), &id).await {
-        Ok(detail) => Json(detail).into_response(),
+}
+
+/// Contexto de una historia del proyecto de la sesión. Otro proyecto → «no encontrada».
+async fn context_by_id(
+    Extension(authed): Extension<Authed>,
+    UrlPath(id): UrlPath<String>,
+) -> Response {
+    if id.is_empty() || id.len() > MAX_ID_LEN {
+        return core_error(&CoreError::NotFound { entity: "Historia" });
+    }
+    story_context(&authed, StoryKey::Id(id)).await
+}
+
+async fn context_by_number(
+    Extension(authed): Extension<Authed>,
+    UrlPath(number): UrlPath<String>,
+) -> Response {
+    match number.parse::<i64>() {
+        Ok(n) if n >= 1 => story_context(&authed, StoryKey::Number(n)).await,
+        _ => core_error(&CoreError::NotFound { entity: "Historia" }),
+    }
+}
+
+async fn story_context(authed: &Authed, key: StoryKey) -> Response {
+    match get_story_context(&authed.store, &authed.session, &key).await {
+        Ok(context) => Json(context).into_response(),
         Err(error) => core_error(&error),
     }
 }

@@ -5,8 +5,10 @@ use sha2::{Digest, Sha256};
 
 use crate::descriptor::{Secret, hex};
 
-/// Versión de la API (prefijo de rutas `/v1`). Un cambio incompatible en las rutas o en los
-/// tipos que sirven (también en `StoryDetail` o `SessionInfo`) exige subirla.
+/// Versión de la API (prefijo de rutas `/v1`). Tipos servidos: `SessionInfo`, `ReadyPage` y
+/// `StoryContext`. v1 no se congela hasta publicar M2: hasta entonces, un cambio incompatible
+/// se hace en el mismo commit en servidor, cliente y `kanbania-mcp`. Después, retirar o
+/// renombrar una ruta o un campo exige subirla.
 pub const API_VERSION: u32 = 1;
 /// Cabecera con el token de sesión del descriptor.
 pub const SESSION_HEADER: &str = "x-kanbania-session";

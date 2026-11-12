@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use kanbania_core::error::{CoreError, ErrorPayload};
+use kanbania_core::error::{CoreError, ErrorCode, ErrorPayload};
 use kanbania_core::features::access::LocalServiceStatus;
 use kanbania_core::platform::storage::Store;
 use kanbania_local_service::{LocalService, StoreSource};
@@ -75,10 +75,26 @@ impl<R: Runtime> StoreSource for HostStore<R> {
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<Store, ErrorPayload>> + Send + '_>> {
         Box::pin(async move {
             match self.0.try_state::<StorageSlot>() {
-                Some(slot) => slot.store().await,
-                None => Err(CoreError::StorageLocked.to_payload(None)),
+                Some(slot) => slot.store().await.map_err(for_agents),
+                None => Err(for_agents(CoreError::StorageLocked.to_payload(None))),
             }
         })
+    }
+}
+
+/// Dentro del host, «bloqueado» significa que el almacén se está restaurando o cerrando, no
+/// que haya otra instancia: el mensaje de la UI («ciérrala») confundiría al agente.
+fn for_agents(payload: ErrorPayload) -> ErrorPayload {
+    if payload.code != ErrorCode::StorageLocked {
+        return payload;
+    }
+    ErrorPayload {
+        code: ErrorCode::StorageUnavailable,
+        message: "El almacenamiento de Kanban IA no está disponible ahora mismo (restauración o \
+                  cierre). Vuelve a intentarlo en unos segundos."
+            .into(),
+        recoverable: true,
+        ..payload
     }
 }
 
@@ -86,5 +102,20 @@ impl<R: Runtime> StoreSource for HostStore<R> {
 pub async fn start_local_service<R: Runtime>(handle: &AppHandle<R>) {
     if let Some(service) = handle.try_state::<ServiceSlot>() {
         service.ensure_started(handle).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_busy_store_is_reported_to_agents_as_temporarily_unavailable() {
+        let busy = for_agents(CoreError::StorageLocked.to_payload(None));
+        assert_eq!(busy.code, ErrorCode::StorageUnavailable);
+        assert!(busy.recoverable);
+        assert!(!busy.message.contains("Ciérralo"));
+        let newer = CoreError::NewerSchema(99).to_payload(None);
+        assert_eq!(for_agents(newer.clone()), newer);
     }
 }

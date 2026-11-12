@@ -40,6 +40,8 @@ pub enum ClientError {
         status: u16,
         code: String,
         message: String,
+        /// Reintentar (o que la persona actúe) puede resolverlo.
+        recoverable: bool,
     },
 }
 
@@ -179,6 +181,10 @@ impl ServiceClient {
             status,
             code: text("code"),
             message: text("message"),
+            recoverable: body
+                .get("recoverable")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         })
     }
 }

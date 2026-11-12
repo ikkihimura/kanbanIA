@@ -130,7 +130,7 @@ describe("StoryEditor", () => {
   it("muestra el error de carga con opción de reintentar", async () => {
     mocked.getStory.mockRejectedValueOnce({
       code: "not_found",
-      message: "Historia no encontrado",
+      message: "No se encontró: Historia.",
       recoverable: true,
     } satisfies ErrorPayload);
     renderEditor();

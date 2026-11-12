@@ -1,0 +1,30 @@
+[package]
+name = "kanbania-mcp"
+description = "Servidor MCP (stdio) de Kanban IA: adaptador hacia el servicio local de la app abierta"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "kanbania-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# Solo el cliente: sin núcleo ni SQLite, este proceso no puede abrir la base.
+kanbania-local-service = { workspace = true, default-features = false }
+rmcp = { workspace = true, features = ["server", "macros", "schemars", "transport-io"] }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["io-std", "macros", "rt-multi-thread"] }
+
+[dev-dependencies]
+kanbania-core = { workspace = true }
+kanbania-local-service = { workspace = true }
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+tempfile = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

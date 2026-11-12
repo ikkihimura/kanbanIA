@@ -18,7 +18,8 @@
     "format": "prettier --write . && cargo fmt --all",
     "format:check": "prettier --check . && cargo fmt --all --check",
     "lint:rust": "cargo clippy --workspace --all-targets --locked -- -D warnings",
-    "test:rust": "cargo test --workspace --locked",
+    "test:rust": "cargo test --workspace --locked && npm run check:mcp-deps",
+    "check:mcp-deps": "node scripts/check-mcp-deps.mjs",
     "check": "npm run contracts && npm run format:check && npm run lint && npm run build:web && npm run test:web && npm run lint:rust && npm run test:rust",
     "test:web": "npm run test -w apps/desktop",
     "contracts": "cargo test -p kanbania-core --lib --locked --quiet"

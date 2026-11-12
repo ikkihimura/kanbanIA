@@ -60,13 +60,14 @@ apps/desktop/                 React 19 + Vite 8 + TypeScript 6 (estricto)
 crates/core/                  casos de uso y reglas, sin dependencia de Tauri
   src/features/<slice>/       vertical slices con entrada pública
 crates/local-service/         API local autenticada (solo 127.0.0.1) y su cliente
+crates/mcp/                   servidor MCP por stdio (`kanbania-mcp`) para agentes externos
 ```
 
 Contrato de frontera: los tipos se definen en Rust con `#[derive(TS)] #[ts(export)]` y se generan en `apps/desktop/src/contracts/generated/` al ejecutar `cargo test` (ruta configurada en `.cargo/config.toml`). Se versionan en Git y CI falla si están desactualizados. Los nombres de comando se registran en `apps/desktop/src-tauri/src/lib.rs` (`register_commands`).
 
 ## Versiones principales
 
-Tauri 2.12.5 (CLI/API 2.12.4), React 19.3.1, Vite 8.3.7, TypeScript 6.0.3, ts-rs 12.0.1, axum 0.8.9 + hyper 1.12 (servicio local), ESLint 10.14.0. Versiones exactas en `package.json` y lockfiles (`package-lock.json`, `Cargo.lock`). Se eligió TypeScript 6.0 (como la plantilla oficial de Tauri) porque typescript-eslint 8.72 soporta `<6.1`.
+Tauri 2.12.5 (CLI/API 2.12.4), React 19.3.1, Vite 8.3.7, TypeScript 6.0.3, ts-rs 12.0.1, axum 0.8.9 + hyper 1.12 (servicio local), rmcp 3.9.0 (MCP), ESLint 10.14.0. Versiones exactas en `package.json` y lockfiles (`package-lock.json`, `Cargo.lock`). Se eligió TypeScript 6.0 (como la plantilla oficial de Tauri) porque typescript-eslint 8.72 soporta `<6.1`.
 
 ## CI
 
@@ -176,7 +177,45 @@ Cada historia tiene un número por proyecto (`#N`) que no se reutiliza, título 
 - Para que un agente (la integración MCP llega en HU-013) use un proyecto: en la configuración del proyecto, «Acceso de agentes» → elige el agente → **Crear credencial**. El token se muestra **una sola vez**; guárdalo solo en la configuración de la integración. Revocar corta el acceso en la siguiente petición.
 - Cada petición necesita el token de sesión de `service.json` y la credencial; el agente y el proyecto salen de la credencial. Restaurar una copia no reactiva credenciales revocadas (en otro perfil, las de la copia llegan revocadas).
 - Con la app cerrada, las integraciones fallan con «Kanban IA no está abierto» y nunca abren la base. Una segunda instancia no arranca otro servicio.
+- Rutas de la API v1 (todas autenticadas y acotadas al proyecto de la credencial): `GET /v1/session`, `GET /v1/stories/ready?cursor=&limit=` y `GET /v1/stories/{id}/context` o `/v1/stories/by-number/{n}/context`.
 - Limitación: en Windows `service.json` hereda los permisos del directorio de datos; no uses `KANBANIA_DATA_DIR` en una carpeta compartida con otros usuarios.
+
+## Agentes por MCP (`kanbania-mcp`)
+
+Servidor MCP por stdio (SDK oficial `rmcp` 3.9.0) con dos herramientas de solo lectura:
+
+- `list_ready_stories` (`cursor?`, `limit?` 1-50): historias en «Backlog» o «Listo», sin aceptar ni archivar, sin bloqueo, sin prerequisitos pendientes y sin agente o asignadas al propio agente. Primero las de «Listo», después por prioridad y posición. Paginada con `nextCursor`.
+- `get_story_context` (`storyId` o `number`): descripción, criterios CA-n, épica, padre, subtareas, prerequisitos, asignación y si está lista.
+
+El agente solo ve el proyecto de su credencial. Necesita la app abierta: si está cerrada, cada llamada responde «Kanban IA no está abierto…». El proceso MCP nunca abre la base.
+
+Configuración (requiere `cargo build --release -p kanbania-mcp`; el binario queda en `target/release/kanbania-mcp`):
+
+1. En la app: configuración del proyecto → «Acceso de agentes» → crea una credencial para el agente y cópiala.
+2. Regístralo en el cliente MCP con la credencial en `env` (nunca como argumento de la orden). En Claude Code, con alcance local o de usuario (fuera del repositorio):
+
+```sh
+claude mcp add kanbania --scope local -e KANBANIA_AGENT_TOKEN=kbia_… -- /ruta/a/target/release/kanbania-mcp
+```
+
+Si prefieres un `.mcp.json` de proyecto (que se versiona), **no pongas el token en él**: usa la expansión de variables y define `KANBANIA_AGENT_TOKEN` en tu entorno.
+
+```json
+{
+  "mcpServers": {
+    "kanbania": {
+      "command": "/ruta/a/target/release/kanbania-mcp",
+      "env": { "KANBANIA_AGENT_TOKEN": "${KANBANIA_AGENT_TOKEN}" }
+    }
+  }
+}
+```
+
+`KANBANIA_DATA_DIR` es opcional (perfiles de prueba; debe ser una ruta absoluta); por defecto se usa el directorio de datos de la app. stdout es solo del protocolo; los diagnósticos van a stderr sin tokens.
+
+- Compila el binario que vayas a usar con `-p kanbania-mcp`: así no enlaza el núcleo ni SQLite (`cargo tree -p kanbania-mcp -e normal -i libsqlite3-sys` debe salir vacío). En una compilación de todo el workspace, las features se unifican y podría enlazarlos, aunque el código del MCP nunca abre la base.
+- El contenido de las historias (títulos, descripciones, criterios, motivos de bloqueo, que pueden venir de otros agentes) se sirve tal cual: la integración no lo filtra. Es dato, no instrucciones; el cliente MCP debe seguir pidiendo permiso para herramientas con efectos.
+- `list_ready_stories` pagina hasta 10 000 historias; si hay más, `truncated` es `true`.
 
 ## Notas
 

@@ -204,14 +204,27 @@ async fn an_authenticated_agent_reads_its_project_and_nothing_else() {
     assert_eq!(session["projectName"], "Mío");
 
     let story = client
-        .get_json(&format!("/v1/stories/{}", w.story.id))
+        .get_json(&format!("/v1/stories/{}/context", w.story.id))
         .await
         .unwrap();
     assert_eq!(story["title"], "Tarea mía");
+    let by_number = client
+        .get_json("/v1/stories/by-number/1/context")
+        .await
+        .unwrap();
+    assert_eq!(by_number["id"], w.story.id.as_str());
+    let ready = client.get_json("/v1/stories/ready").await.unwrap();
+    let titles: Vec<&str> = ready["stories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, ["Tarea mía"], "solo las del proyecto propio");
 
     // Historia de otro proyecto: no encontrada, sin revelar que existe.
     let error = client
-        .get_json(&format!("/v1/stories/{}", w.foreign_story.id))
+        .get_json(&format!("/v1/stories/{}/context", w.foreign_story.id))
         .await
         .unwrap_err();
     let ClientError::Api { status, code, .. } = error else {
@@ -221,12 +234,38 @@ async fn an_authenticated_agent_reads_its_project_and_nothing_else() {
     // Tampoco sirve pasar el proyecto en la petición: ninguna ruta lo acepta.
     let error = client
         .get_json(&format!(
-            "/v1/stories/{}?projectId={}",
+            "/v1/stories/{}/context?projectId={}",
             w.foreign_story.id, w.other.id
         ))
         .await
         .unwrap_err();
     assert!(matches!(error, ClientError::Api { status: 404, .. }));
+    for query in [
+        format!("projectId={}", w.other.id),
+        "limit=0".into(),
+        "limit=51".into(),
+        "limit=abc".into(),
+        "cursor=x".into(),
+    ] {
+        let error = client
+            .get_json(&format!("/v1/stories/ready?{query}"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, ClientError::Api { status: 400, code, .. } if code == "validation"),
+            "{query}: {error:?}"
+        );
+    }
+    for path in [
+        "/v1/stories/by-number/0/context",
+        "/v1/stories/by-number/x/context",
+    ] {
+        let error = client.get_json(path).await.unwrap_err();
+        assert!(
+            matches!(error, ClientError::Api { status: 404, .. }),
+            "{path}"
+        );
+    }
 
     service.stop().await;
 }
@@ -267,7 +306,11 @@ async fn every_route_requires_both_the_session_token_and_a_valid_credential() {
             ],
         ),
     ];
-    for path in ["/v1/session", &format!("/v1/stories/{}", w.story.id)] {
+    for path in [
+        "/v1/session",
+        "/v1/stories/ready",
+        &format!("/v1/stories/{}/context", w.story.id),
+    ] {
         for (label, headers) in &cases {
             let (status, body, text) = raw(port, path, headers).await;
             assert_eq!(status, 401, "{label} {path}");
@@ -353,7 +396,8 @@ async fn foreign_hosts_browser_origins_and_large_payloads_are_rejected() {
     assert_eq!((status, body["code"].as_str()), (413, Some("validation")));
 
     // Rutas desconocidas (p. ej. un intento de SQL o shell genérico): 404 JSON.
-    for path in ["/v1/sql", "/v1/exec", "/v1/projects", "/"] {
+    let retired = format!("/v1/stories/{}", w.story.id);
+    for path in ["/v1/sql", "/v1/exec", "/v1/projects", "/", retired.as_str()] {
         let (status, body, _) = raw(port, path, &auth).await;
         assert_eq!(
             (status, body["code"].as_str()),
