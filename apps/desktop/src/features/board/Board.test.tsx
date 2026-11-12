@@ -1,4 +1,5 @@
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -6,7 +7,8 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { StoryClaim } from "../../contracts/generated/StoryClaim";
 import type { StoryDetail } from "../../contracts/generated/StoryDetail";
 import type { StorySummary } from "../../contracts/generated/StorySummary";
 import * as commands from "../../shared/ipc/commands";
@@ -23,6 +25,7 @@ vi.mock("../../shared/ipc/commands", async (importOriginal) => ({
   moveStory: vi.fn(),
   getStory: vi.fn(),
   acceptStory: vi.fn(),
+  listActiveClaims: vi.fn(),
 }));
 
 const mocked = vi.mocked(commands);
@@ -55,6 +58,18 @@ function queryCardIn(columnName: string, number: number) {
   );
 }
 
+function claimOf(storyId: string, expiresAt: string): StoryClaim {
+  return {
+    claimId: `c-${storyId}`,
+    storyId,
+    storyNumber: Number(storyId.replace(/\D/g, "")),
+    owner: { agentId: "a1", agentNumber: 1, agentName: "Jean Claude" },
+    claimedAt: "2026-11-12T10:00:00Z",
+    expiresAt,
+    renewedAt: null,
+  };
+}
+
 function renderBoard() {
   const onOpenStory = vi.fn();
   render(<Board projectId="p1" onOpenStory={onOpenStory} />);
@@ -80,6 +95,7 @@ beforeEach(() => {
   ];
   mocked.listColumns.mockResolvedValue(columns);
   mocked.listStories.mockImplementation(() => Promise.resolve(server));
+  mocked.listActiveClaims.mockResolvedValue([]);
   mocked.listEpics.mockResolvedValue([
     {
       id: "e1",
@@ -100,6 +116,10 @@ beforeEach(() => {
   ]);
 });
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("Board", () => {
   it("muestra columnas, WIP y la información de cada tarjeta", async () => {
     renderBoard();
@@ -113,6 +133,99 @@ describe("Board", () => {
     expect(screen.getByText("✓ Aceptada")).toBeInTheDocument();
     expect(screen.getByText("1 / 2 WIP")).toBeInTheDocument();
     expect(screen.queryByText(/Archivada/)).not.toBeInTheDocument();
+  });
+
+  it("muestra en la tarjeta quién la reclamó y cuándo vence", async () => {
+    const expiresAt = "2099-11-12T10:30:00Z";
+    mocked.listActiveClaims.mockResolvedValue([claimOf("s1", expiresAt)]);
+    renderBoard();
+
+    const login = await screen.findByRole("button", { name: /^#1 Login/ });
+    const hour = new Date(expiresAt).toLocaleTimeString("es", {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    const text = `Reclamada por Jean Claude · vence ${hour}`;
+    const item = login.closest("li");
+    if (!item) throw new Error("sin tarjeta");
+    expect(await within(item).findByText(text)).toBeInTheDocument();
+    // Se anuncia al enfocar la tarjeta, no solo se ve.
+    expect(login).toHaveAccessibleDescription(new RegExp(`^${text}`));
+    expect(mocked.listActiveClaims).toHaveBeenCalledWith("p1");
+
+    const api = screen.getByRole("button", { name: /^#2 API/ }).closest("li");
+    if (!api) throw new Error("sin tarjeta");
+    expect(api).not.toHaveTextContent(/Reclamada/);
+    expect(screen.getAllByText(/Reclamada por/)).toHaveLength(1);
+  });
+
+  it("la etiqueta del reclamo desaparece al vencer, sin recargar", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-11-12T10:20:00Z"));
+    mocked.listActiveClaims.mockResolvedValue([
+      claimOf("s1", "2026-11-12T10:30:00Z"),
+      claimOf("s2", "2026-11-12T10:40:00Z"),
+    ]);
+    renderBoard();
+
+    expect(await screen.findAllByText(/Reclamada por/)).toHaveLength(2);
+    // Los efectos (que programan el temporizador) se ejecutan antes de avanzar el reloj.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 10);
+    });
+    const login = screen.getByRole("button", { name: /^#1 Login/ });
+    expect(login.closest("li")).not.toHaveTextContent(/Reclamada/);
+    expect(login).not.toHaveAccessibleDescription(/Reclamada/);
+    expect(screen.getAllByText(/Reclamada por/)).toHaveLength(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+    });
+    expect(screen.queryByText(/Reclamada por/)).not.toBeInTheDocument();
+    expect(mocked.listActiveClaims).toHaveBeenCalledTimes(1);
+  });
+
+  it("si no cargan los reclamos, el tablero sigue funcionando", async () => {
+    mocked.listActiveClaims.mockRejectedValue({
+      code: "internal",
+      message: "Error interno.",
+      recoverable: true,
+    });
+    renderBoard();
+
+    expect(
+      await screen.findByRole("button", { name: /^#1 Login/ }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(/No se pudieron cargar los reclamos/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Reclamada por/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toHaveTextContent("");
+  });
+
+  it("recarga los reclamos al recargar las historias tras mover", async () => {
+    mocked.moveStory.mockImplementation((input) => {
+      server = applyMove(server, input.id, input.toColumnId, input.toIndex);
+      return Promise.resolve(onServer(input.id));
+    });
+    renderBoard();
+    const api = await screen.findByRole("button", { name: /^#2 API/ });
+    await waitFor(() => {
+      expect(mocked.listActiveClaims).toHaveBeenCalledTimes(1);
+    });
+    mocked.listActiveClaims.mockResolvedValue([
+      claimOf("s2", "2099-11-12T10:30:00Z"),
+    ]);
+
+    fireEvent.keyDown(api, { key: "ArrowUp", altKey: true });
+
+    expect(
+      await screen.findByText(/Reclamada por Jean Claude/),
+    ).toBeInTheDocument();
+    expect(mocked.listActiveClaims).toHaveBeenCalledTimes(2);
   });
 
   it("filtra por texto y por épica, y agrupa en carriles", async () => {

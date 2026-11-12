@@ -5,8 +5,8 @@ use sha2::{Digest, Sha256};
 
 use crate::descriptor::{Secret, hex};
 
-/// Versión de la API (prefijo de rutas `/v1`). Tipos servidos: `SessionInfo`, `ReadyPage` y
-/// `StoryContext`. v1 no se congela hasta publicar M2: hasta entonces, un cambio incompatible
+/// Versión de la API (prefijo de rutas `/v1`). Tipos servidos: `SessionInfo`, `ReadyPage`,
+/// `StoryContext` y `StoryClaim`; cuerpos: `ClaimStoryInput` y `{requestId}` al renovar. v1 no se congela hasta publicar M2: hasta entonces, un cambio incompatible
 /// se hace en el mismo commit en servidor, cliente y `kanbania-mcp`. Después, retirar o
 /// renombrar una ruta o un campo exige subirla.
 pub const API_VERSION: u32 = 1;
@@ -14,8 +14,8 @@ pub const API_VERSION: u32 = 1;
 pub const SESSION_HEADER: &str = "x-kanbania-session";
 /// Cabecera del saludo: reto del cliente para que el servidor demuestre conocer el token.
 pub const NONCE_HEADER: &str = "x-kanbania-nonce";
-/// Cuerpo máximo de una petición. Las rutas actuales no tienen cuerpo; las de M2 serán JSON
-/// pequeños (entregas, bloqueos).
+/// Cuerpo máximo de una petición. Los cuerpos son JSON pequeños (reclamos; en M2, entregas y
+/// bloqueos).
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 const PROOF_DOMAIN: &str = "kanbania-service-proof/v1";
 

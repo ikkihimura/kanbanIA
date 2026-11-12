@@ -13,6 +13,7 @@ use kanbania_core::features::access::{
     CreateAgentCredentialInput, RevokeAgentCredentialInput, create_agent_credential,
     revoke_agent_credential,
 };
+use kanbania_core::features::claims::{ReleaseClaimInput, release_claim};
 use kanbania_core::features::projects::{CreateProjectInput, Project, create_project};
 use kanbania_core::features::stories::{CreateStoryInput, StorySummary, create_story};
 use kanbania_core::features::team::{
@@ -599,4 +600,197 @@ async fn a_host_with_another_api_version_is_reported_clearly() {
         !seen.await.unwrap().contains(&w.token),
         "no envía la credencial"
     );
+}
+
+// ---------- HU-014: reclamar y renovar por HTTP ----------
+
+async fn second_agent_client(w: &World) -> ServiceClient {
+    let other = create_agent(
+        &w.store,
+        UI,
+        &CreateAgentInput {
+            request_id: rid(),
+            fields: AgentFields {
+                name: "Robo dos".into(),
+                role: String::new(),
+                provider: String::new(),
+                model: String::new(),
+                capabilities: vec![],
+                avatar: AvatarSpec::DEFAULT_AGENT,
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let created = create_agent_credential(
+        &w.store,
+        &Actor::Human,
+        &CreateAgentCredentialInput {
+            project_id: w.mine.id.clone(),
+            agent_id: other.id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    ServiceClient::new(w.data.path(), created.token)
+}
+
+fn api_code(error: &ClientError) -> (u16, &str) {
+    match error {
+        ClientError::Api { status, code, .. } => (*status, code.as_str()),
+        // No es un error de la API: la comparación de la prueba fallará mostrando esto.
+        _ => (0, "no_es_error_de_api"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_clients_claiming_the_same_story_get_exactly_one_success() {
+    let w = world().await;
+    let service = start(&w).await;
+    let first = ServiceClient::new(w.data.path(), w.token.clone());
+    let second = second_agent_client(&w).await;
+
+    for round in 0..5 {
+        let s = story(&w.store, &w.mine, &format!("Carrera {round}")).await;
+        let a = serde_json::json!({ "requestId": rid(), "storyId": s.id });
+        let b = serde_json::json!({ "requestId": rid(), "storyId": s.id });
+        let (ra, rb) = tokio::join!(
+            first.post_json("/v1/claims", &a),
+            second.post_json("/v1/claims", &b)
+        );
+        let results = [ra, rb];
+        assert_eq!(
+            results.iter().filter(|r| r.is_ok()).count(),
+            1,
+            "ronda {round}: {results:?}"
+        );
+        let loser = results.iter().find_map(|r| r.as_ref().err()).unwrap();
+        assert_eq!(api_code(loser), (409, "claimed"), "ronda {round}");
+        // Libera (como la persona en la app) para que el tope por agente no intervenga.
+        let winner = results.iter().find_map(|r| r.as_ref().ok()).unwrap();
+        release_claim(
+            &w.store,
+            &Actor::Human,
+            &ReleaseClaimInput {
+                project_id: w.mine.id.clone(),
+                claim_id: winner["claimId"].as_str().unwrap().to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    service.stop().await;
+}
+
+#[tokio::test]
+async fn an_agent_claims_and_renews_only_within_its_session() {
+    let w = world().await;
+    let service = start(&w).await;
+    let client = ServiceClient::new(w.data.path(), w.token.clone());
+
+    let request_id = rid();
+    let body = serde_json::json!({ "requestId": request_id, "storyId": w.story.id });
+    let claim = client.post_json("/v1/claims", &body).await.unwrap();
+    assert_eq!(claim["storyId"], w.story.id.as_str());
+    assert_eq!(claim["owner"]["agentId"], w.agent.id.as_str());
+    assert!(claim["claimId"].is_string() && claim["expiresAt"].is_string());
+    // Reintento idéntico → mismo reclamo; mismo requestId con otra historia → conflicto.
+    assert_eq!(client.post_json("/v1/claims", &body).await.unwrap(), claim);
+    let other = story(&w.store, &w.mine, "Otra").await;
+    let reused = serde_json::json!({ "requestId": request_id, "storyId": other.id });
+    let error = client.post_json("/v1/claims", &reused).await.unwrap_err();
+    assert_eq!(api_code(&error), (409, "idempotency_conflict"));
+
+    // El proyecto y el agente salen de la sesión: campos así se rechazan, no se usan.
+    for extra in [
+        serde_json::json!({ "requestId": rid(), "storyId": other.id, "agentId": "x" }),
+        serde_json::json!({ "requestId": rid(), "storyId": other.id, "projectId": w.other.id }),
+        serde_json::json!({ "requestId": rid(), "number": "uno" }),
+    ] {
+        let error = client.post_json("/v1/claims", &extra).await.unwrap_err();
+        assert_eq!(api_code(&error), (400, "validation"), "{extra}");
+    }
+    // Historia de otro proyecto → 404, también por número.
+    let foreign = serde_json::json!({ "requestId": rid(), "storyId": w.foreign_story.id });
+    let error = client.post_json("/v1/claims", &foreign).await.unwrap_err();
+    assert_eq!(api_code(&error), (404, "not_found"));
+    // Un número que solo existe en el otro proyecto: se resuelve en el de la sesión → 404.
+    let mut foreign_only = story(&w.store, &w.other, "Solo ajena").await;
+    while foreign_only.number <= other.number {
+        foreign_only = story(&w.store, &w.other, "Solo ajena").await;
+    }
+    let by_number = serde_json::json!({ "requestId": rid(), "number": foreign_only.number });
+    let error = client
+        .post_json("/v1/claims", &by_number)
+        .await
+        .unwrap_err();
+    assert_eq!(api_code(&error), (404, "not_found"));
+
+    let claim_id = claim["claimId"].as_str().unwrap();
+    let renewed = client
+        .post_json(
+            &format!("/v1/claims/{claim_id}/renew"),
+            &serde_json::json!({ "requestId": rid() }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(renewed["claimId"], claim_id);
+    assert!(renewed["renewedAt"].is_string());
+    let error = client
+        .post_json(
+            "/v1/claims/no-existe/renew",
+            &serde_json::json!({ "requestId": rid() }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(api_code(&error), (404, "not_found"));
+    // Otro agente del mismo proyecto no renueva un reclamo ajeno.
+    let second = second_agent_client(&w).await;
+    let error = second
+        .post_json(
+            &format!("/v1/claims/{claim_id}/renew"),
+            &serde_json::json!({ "requestId": rid() }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(api_code(&error), (404, "not_found"));
+
+    // Sin credencial válida no se reclama nada.
+    let anonymous = ServiceClient::new(w.data.path(), format!("kbia_{}", "0".repeat(64)));
+    let error = anonymous
+        .post_json(
+            "/v1/claims",
+            &serde_json::json!({ "requestId": rid(), "storyId": other.id }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(api_code(&error), (401, "unauthorized"));
+    // Credencial revocada: ni reclamar ni renovar.
+    revoke_agent_credential(
+        &w.store,
+        &Actor::Human,
+        &RevokeAgentCredentialInput {
+            project_id: w.mine.id.clone(),
+            id: w.credential_id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let error = client
+        .post_json(
+            "/v1/claims",
+            &serde_json::json!({ "requestId": rid(), "storyId": other.id }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(api_code(&error), (401, "unauthorized"));
+    let error = client
+        .post_json(
+            &format!("/v1/claims/{claim_id}/renew"),
+            &serde_json::json!({ "requestId": rid() }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(api_code(&error), (401, "unauthorized"));
+    service.stop().await;
 }

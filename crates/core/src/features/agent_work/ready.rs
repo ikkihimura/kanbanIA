@@ -106,6 +106,8 @@ pub async fn list_ready_stories(
     ))
     .bind(session.project_id())
     .bind(session.agent_id())
+    .bind(store.now_ms())
+    .bind(session.agent_id())
     .bind(i64::from(limit) + 1)
     .bind(i64::from(offset))
     .fetch_all(store.reader())

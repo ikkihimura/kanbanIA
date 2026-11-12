@@ -1,6 +1,7 @@
 pub mod access;
 pub mod app_info;
 pub mod backup;
+pub mod claims;
 pub mod columns;
 pub mod epics;
 pub mod exit;

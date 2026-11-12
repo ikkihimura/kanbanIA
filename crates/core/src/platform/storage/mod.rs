@@ -30,6 +30,7 @@ pub use backup::{
 pub use status::StorageStatus;
 
 use crate::error::CoreError;
+use crate::platform::clock::{Clock, SystemClock};
 use lock::DataDirLock;
 
 pub const DATABASE_FILE: &str = "kanbania.sqlite3";
@@ -55,6 +56,7 @@ pub struct Store {
     pool: SqlitePool,
     database_path: PathBuf,
     _lock: Arc<DataDirLock>,
+    clock: Arc<dyn Clock>,
 }
 
 impl Store {
@@ -85,6 +87,7 @@ impl Store {
             pool,
             database_path,
             _lock: Arc::new(lock),
+            clock: Arc::new(SystemClock),
         };
 
         let mut backup = None;
@@ -153,6 +156,19 @@ impl Store {
             .fetch_all(&self.pool)
             .await?;
         Ok(versions)
+    }
+
+    /// Sustituye el reloj (pruebas con tiempo controlado). Afecta a esta copia del almacén y a
+    /// las que se clonen de ella.
+    #[must_use]
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// Hora del reloj del almacén, en milisegundos Unix.
+    pub fn now_ms(&self) -> i64 {
+        self.clock.now_ms()
     }
 
     pub fn database_path(&self) -> &Path {

@@ -989,6 +989,12 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+/* Reclamo de un agente (HU-014): texto normal, no solo color. */
+.card__claim {
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
 .card__moves {
   display: none;
   gap: 4px;

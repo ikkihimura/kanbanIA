@@ -14,6 +14,8 @@
 //! Se conservan las `MAX_KEPT` copias más recientes. Solo se borran carpetas con un manifiesto
 //! válido de este formato; nunca otra cosa.
 
+use crate::features::claims::close_restored_claims;
+use crate::platform::clock::{Clock, SystemClock};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -673,6 +675,8 @@ async fn restore_locked(
                 c.close().await.ok();
             }
             reconcile_restored(&mut conn, &revocations).await?;
+            // Ningún reclamo de la copia revive (ver `claims`).
+            close_restored_claims(&mut conn, SystemClock.now_ms()).await?;
             vacuum_into(&mut conn, &staging).await?;
             Ok(version)
         }

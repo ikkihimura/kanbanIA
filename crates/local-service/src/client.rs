@@ -1,4 +1,4 @@
-//! Cliente del servicio local (lo usará el adaptador MCP en HU-013).
+//! Cliente del servicio local (lo usa el adaptador MCP, `crates/mcp`).
 //!
 //! Nunca abre SQLite: si la app no está abierta, falla con [`ClientError::NotRunning`] en vez
 //! de convertirse en otro propietario de los datos. Antes de enviar la credencial del agente,
@@ -9,9 +9,9 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use http_body_util::{BodyExt, Empty, Limited};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Bytes;
-use hyper::{Request, header};
+use hyper::{Method, Request, header};
 use hyper_util::rt::TokioIo;
 use serde_json::Value;
 use tokio::net::TcpStream;
@@ -98,12 +98,34 @@ impl ServiceClient {
     /// `GET` autenticado a una ruta de la API (`/v1/...`). Lee el descriptor en cada llamada:
     /// si la app se reinició, usa el puerto y el token nuevos.
     pub async fn get_json(&self, path: &str) -> Result<Value, ClientError> {
-        tokio::time::timeout(REQUEST_TIMEOUT, self.get_inner(path))
+        self.call(Method::GET, path, None).await
+    }
+
+    /// `POST` autenticado con cuerpo JSON. Si la conexión se corta tras enviarlo, el resultado
+    /// es incierto: las rutas con efectos llevan `requestId` para que reintentar sea seguro.
+    pub async fn post_json(&self, path: &str, body: &Value) -> Result<Value, ClientError> {
+        let bytes = serde_json::to_vec(body).map_err(|e| ClientError::Protocol(e.to_string()))?;
+        self.call(Method::POST, path, Some(Bytes::from(bytes)))
+            .await
+    }
+
+    async fn call(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Bytes>,
+    ) -> Result<Value, ClientError> {
+        tokio::time::timeout(REQUEST_TIMEOUT, self.call_inner(method, path, body))
             .await
             .map_err(|_| ClientError::Protocol("tiempo de espera agotado".into()))?
     }
 
-    async fn get_inner(&self, path: &str) -> Result<Value, ClientError> {
+    async fn call_inner(
+        &self,
+        method: Method,
+        path: &str,
+        payload: Option<Bytes>,
+    ) -> Result<Value, ClientError> {
         if !path.starts_with("/v1/") {
             return Err(ClientError::Protocol("ruta fuera de la API".into()));
         }
@@ -142,7 +164,7 @@ impl ServiceClient {
         let request = Request::get("/v1/handshake")
             .header(header::HOST, &host)
             .header(NONCE_HEADER, &nonce)
-            .body(Empty::<Bytes>::new())
+            .body(Full::new(Bytes::new()))
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
         let (status, body) = send(&mut sender, request).await?;
         let expected = proof(&descriptor.session_token, &nonce);
@@ -158,14 +180,20 @@ impl ServiceClient {
         }
 
         // 2. Petición con las credenciales.
-        let request = Request::get(path)
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
             .header(header::HOST, &host)
             .header(SESSION_HEADER, descriptor.session_token.expose())
             .header(
                 header::AUTHORIZATION,
                 format!("Bearer {}", self.agent_token.expose()),
-            )
-            .body(Empty::<Bytes>::new())
+            );
+        if payload.is_some() {
+            request = request.header(header::CONTENT_TYPE, "application/json");
+        }
+        let request = request
+            .body(Full::new(payload.unwrap_or_default()))
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
         let (status, body) = send(&mut sender, request).await?;
         if (200..300).contains(&status) {
@@ -190,8 +218,8 @@ impl ServiceClient {
 }
 
 async fn send(
-    sender: &mut hyper::client::conn::http1::SendRequest<Empty<Bytes>>,
-    request: Request<Empty<Bytes>>,
+    sender: &mut hyper::client::conn::http1::SendRequest<Full<Bytes>>,
+    request: Request<Full<Bytes>>,
 ) -> Result<(u16, Value), ClientError> {
     let response = sender
         .send_request(request)

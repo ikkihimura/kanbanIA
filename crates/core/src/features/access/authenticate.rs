@@ -1,6 +1,7 @@
 use super::token;
 use crate::error::CoreError;
 use crate::platform::actor::Actor;
+use crate::platform::idempotency::MutationKey;
 use crate::platform::storage::Store;
 
 /// Sesión autenticada de un agente. Las operaciones del servicio local toman de aquí la
@@ -24,6 +25,21 @@ impl AgentSession {
 
     pub fn agent_id(&self) -> &str {
         &self.agent_id
+    }
+
+    /// Clave de recibos de idempotencia para las mutaciones de esta sesión: por credencial
+    /// (que liga agente y proyecto), para no mezclar recibos de un agente entre proyectos.
+    /// Toda mutación de agentes la usa en vez de `Actor::receipt_key`.
+    pub fn receipt_key(
+        &self,
+        operation: &'static str,
+        request_id: &str,
+    ) -> Result<MutationKey, CoreError> {
+        MutationKey::new(
+            format!("credential:{}", self.credential_id),
+            operation,
+            request_id,
+        )
     }
 
     pub fn actor(&self) -> Actor {

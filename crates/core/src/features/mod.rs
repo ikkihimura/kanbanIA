@@ -3,6 +3,7 @@
 pub mod access;
 pub mod agent_work;
 pub mod app_info;
+pub mod claims;
 pub mod columns;
 pub mod epics;
 pub mod portability;

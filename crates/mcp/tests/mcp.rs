@@ -180,7 +180,15 @@ async fn discovery_and_calls_through_a_real_mcp_client() {
     let tools = client.list_all_tools().await.unwrap();
     let mut names: Vec<_> = tools.iter().map(|t| t.name.to_string()).collect();
     names.sort();
-    assert_eq!(names, ["get_story_context", "list_ready_stories"]);
+    assert_eq!(
+        names,
+        [
+            "claim_story",
+            "get_story_context",
+            "list_ready_stories",
+            "renew_claim"
+        ]
+    );
     for tool in &tools {
         let schema = serde_json::to_value(tool).unwrap();
         assert!(schema["outputSchema"].is_object(), "{}", tool.name);
@@ -190,6 +198,27 @@ async fn discovery_and_calls_through_a_real_mcp_client() {
             tool.name
         );
     }
+    // Las cifras de las descripciones son las del núcleo (el MCP no lo enlaza: van escritas).
+    let described = |name: &str| {
+        tools
+            .iter()
+            .find(|t| t.name == name)
+            .and_then(|t| t.description.clone())
+            .unwrap()
+            .to_string()
+    };
+    let minutes = format!(
+        "{} minutos",
+        kanbania_core::features::claims::CLAIM_DURATION_MINUTES
+    );
+    assert!(described("claim_story").contains(&minutes));
+    assert!(described("renew_claim").contains(&minutes));
+    assert!(info["instructions"].as_str().unwrap().contains(&minutes));
+    let limit = format!(
+        "ya tienes {} reclamadas",
+        kanbania_core::features::claims::MAX_OPEN_CLAIMS
+    );
+    assert!(described("claim_story").contains(&limit));
     let list_schema =
         serde_json::to_value(tools.iter().find(|t| t.name == "list_ready_stories")).unwrap();
     assert_eq!(
@@ -273,6 +302,61 @@ async fn discovery_and_calls_through_a_real_mcp_client() {
     let message = rejected["content"][0]["text"].as_str().unwrap();
     assert!(message.contains("unknown field `projectId`"), "{message}");
 
+    // Reclamar y renovar (HU-014).
+    let request_id = rid();
+    let (error, claim) = call(
+        &client,
+        "claim_story",
+        json!({ "requestId": request_id, "number": w.mine.number }),
+    )
+    .await;
+    assert!(!error, "{claim}");
+    assert_eq!(claim["storyId"], w.mine.id.as_str());
+    assert_eq!(claim["owner"]["agentName"], "Robo");
+    let (_, context) = call(
+        &client,
+        "get_story_context",
+        json!({ "storyId": w.mine.id }),
+    )
+    .await;
+    assert_eq!(context["yourClaim"]["claimId"], claim["claimId"]);
+    let (error, renewed) = call(
+        &client,
+        "renew_claim",
+        json!({ "claimId": claim["claimId"], "requestId": rid() }),
+    )
+    .await;
+    assert!(!error, "{renewed}");
+    assert!(renewed["renewedAt"].is_string());
+    // Mismo requestId para otra historia: conflicto, explicado al agente.
+    let (error, text) = call(
+        &client,
+        "claim_story",
+        json!({ "requestId": request_id, "storyId": w.foreign.id }),
+    )
+    .await;
+    assert!(error);
+    assert!(
+        text.as_str().unwrap().starts_with("[idempotency_conflict]"),
+        "{text}"
+    );
+    for args in [
+        json!({ "storyId": w.mine.id }),
+        json!({ "requestId": "con espacio", "storyId": w.mine.id }),
+        json!({ "requestId": rid(), "storyId": "../session" }),
+        json!({ "requestId": rid(), "storyId": w.mine.id, "agentId": "otro" }),
+    ] {
+        let (error, _) = call(&client, "claim_story", args.clone()).await;
+        assert!(error, "{args}");
+    }
+    let (error, _) = call(
+        &client,
+        "renew_claim",
+        json!({ "claimId": "../../v1/session", "requestId": rid() }),
+    )
+    .await;
+    assert!(error);
+
     // Con la app cerrada: error claro en la herramienta; el proceso MCP sigue vivo.
     service.stop().await;
     let (error, text) = call(&client, "list_ready_stories", json!({})).await;
@@ -296,8 +380,13 @@ async fn it_starts_with_the_app_closed_and_follows_app_restarts() {
     let logs = tempfile::tempdir().unwrap();
     // Sin app: el servidor MCP arranca y se descubre igual; las llamadas lo explican.
     let client = connect(w.data.path(), &w.token, &logs.path().join("e.log")).await;
-    assert_eq!(client.list_all_tools().await.unwrap().len(), 2);
+    assert_eq!(client.list_all_tools().await.unwrap().len(), 4);
     let (error, text) = call(&client, "list_ready_stories", json!({})).await;
+    assert!(error);
+    assert!(text.as_str().unwrap().starts_with("[app_closed]"), "{text}");
+    // Un reclamo con la app cerrada falla sin efecto; el agente lo reintenta con el mismo id.
+    let claim_args = json!({ "requestId": rid(), "storyId": w.mine.id });
+    let (error, text) = call(&client, "claim_story", claim_args.clone()).await;
     assert!(error);
     assert!(text.as_str().unwrap().starts_with("[app_closed]"), "{text}");
 
@@ -307,6 +396,8 @@ async fn it_starts_with_the_app_closed_and_follows_app_restarts() {
         .unwrap();
     let (error, page) = call(&client, "list_ready_stories", json!({})).await;
     assert!(!error, "{page}");
+    let (error, claim) = call(&client, "claim_story", claim_args.clone()).await;
+    assert!(!error, "{claim}");
 
     // Reinicio de la app (puerto y token de sesión nuevos): sigue funcionando.
     first.stop().await;
@@ -321,6 +412,10 @@ async fn it_starts_with_the_app_closed_and_follows_app_restarts() {
     .await;
     assert!(!error, "{context}");
     assert_eq!(context["title"], "Tarea mía");
+    // Reintento tras el reinicio con el mismo requestId: el mismo reclamo, no uno nuevo.
+    let (error, again) = call(&client, "claim_story", claim_args).await;
+    assert!(!error, "{again}");
+    assert_eq!(again["claimId"], claim["claimId"]);
     second.stop().await;
     client.cancel().await.unwrap();
 }

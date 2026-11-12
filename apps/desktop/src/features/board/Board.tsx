@@ -9,8 +9,10 @@ import {
 import type { Agent } from "../../contracts/generated/Agent";
 import type { Column } from "../../contracts/generated/Column";
 import type { Epic } from "../../contracts/generated/Epic";
+import type { StoryClaim } from "../../contracts/generated/StoryClaim";
 import type { StorySummary } from "../../contracts/generated/StorySummary";
 import {
+  listActiveClaims,
   listAgents,
   listColumns,
   listEpics,
@@ -19,6 +21,8 @@ import {
   toUiError,
 } from "../../shared/ipc/commands";
 import { useIpcResource } from "../../shared/ipc/useIpcResource";
+import { formatTime } from "../../shared/ui/format";
+import { useUnexpiredClaims } from "../claims/useUnexpiredClaims";
 import { PRIORITY_LABEL } from "../stories/priorities";
 import { PixelAvatar } from "../team/PixelAvatar";
 import { AcceptDialog } from "./AcceptDialog";
@@ -36,6 +40,7 @@ import {
 } from "./boardModel";
 
 const NO_CARDS: StorySummary[] = [];
+const NO_CLAIMS: StoryClaim[] = [];
 
 const KEY_MOVES: Record<string, KeyMove> = {
   ArrowLeft: "left",
@@ -87,10 +92,16 @@ export function Board({ projectId, onOpenStory }: Props) {
     [projectId],
   );
   const loadEpics = useCallback(() => listEpics(projectId), [projectId]);
+  const loadClaims = useCallback(
+    () => listActiveClaims(projectId),
+    [projectId],
+  );
   const columns = useIpcResource(loadColumns);
   const stories = useIpcResource(loadStories);
   const epics = useIpcResource(loadEpics);
   const agents = useIpcResource(listAgents);
+  // Los reclamos son informativos: si no cargan, el tablero funciona igual.
+  const claims = useIpcResource(loadClaims);
 
   const [filter, setFilter] = useState<BoardFilter>({ text: "", epicId: "" });
   const [laneMode, setLaneMode] = useState<LaneMode>("none");
@@ -124,6 +135,11 @@ export function Board({ projectId, onOpenStory }: Props) {
   );
   const epicList = epics.state.status === "ready" ? epics.state.data : [];
   const agentList = agents.state.status === "ready" ? agents.state.data : [];
+  // Un reclamo vencido deja de mostrarse al vencer, sin esperar a recargar.
+  const activeClaims = useUnexpiredClaims(
+    claims.state.status === "ready" ? claims.state.data : NO_CLAIMS,
+  );
+  const claimByStory = new Map(activeClaims.map((c) => [c.storyId, c]));
   const byColumn = useMemo(
     () => cardsByColumn(columnList, cards),
     [columnList, cards],
@@ -141,10 +157,16 @@ export function Board({ projectId, onOpenStory }: Props) {
     }
   }, [cards, base, accepting]);
 
-  const reload = useCallback(() => {
+  // Recarga las historias y, con ellas, los reclamos vigentes.
+  const reloadStories = useCallback(() => {
     stories.run(loadStories, { keepData: true });
+    claims.run(loadClaims, { keepData: true });
+  }, [stories, claims, loadStories, loadClaims]);
+
+  const reload = useCallback(() => {
+    reloadStories();
     columns.run(loadColumns, { keepData: true });
-  }, [stories, columns, loadStories, loadColumns]);
+  }, [reloadStories, columns, loadColumns]);
 
   if (columns.state.status === "error" || stories.state.status === "error") {
     const text =
@@ -220,7 +242,7 @@ export function Board({ projectId, onOpenStory }: Props) {
         error: false,
       });
       // La vista optimista se mantiene hasta que llega la lista guardada.
-      stories.run(loadStories, { keepData: true });
+      reloadStories();
     } catch (raw) {
       const error = toUiError(raw);
       // Vuelve al estado anterior: la tarjeta sigue donde estaba.
@@ -407,6 +429,12 @@ export function Board({ projectId, onOpenStory }: Props) {
           muestran sin ellos.
         </p>
       )}
+      {claims.state.status === "error" && (
+        <p className="field__hint">
+          No se pudieron cargar los reclamos de agentes: las tarjetas se
+          muestran sin ellos.
+        </p>
+      )}
 
       {columnList.length === 0 ? (
         <p className="panel__muted">
@@ -484,6 +512,7 @@ export function Board({ projectId, onOpenStory }: Props) {
                             agent={agentList.find(
                               (a) => a.id === story.agentId,
                             )}
+                            claim={claimByStory.get(story.id)}
                             helpId={`${id}-help`}
                             disabled={busy}
                             dragging={dragId === story.id}
@@ -578,6 +607,7 @@ interface CardProps {
   story: StorySummary;
   epic: Epic | undefined;
   agent: Agent | undefined;
+  claim: StoryClaim | undefined;
   helpId: string;
   disabled: boolean;
   dragging: boolean;
@@ -596,6 +626,7 @@ function BoardCard({
   story,
   epic,
   agent,
+  claim,
   helpId,
   disabled,
   dragging,
@@ -609,6 +640,7 @@ function BoardCard({
   onDragOver,
   onDrop,
 }: CardProps) {
+  const claimId = useId();
   const blocked =
     story.blockerReason !== null || story.pendingPrerequisites > 0;
   const classes = [
@@ -651,7 +683,8 @@ function BoardCard({
         type="button"
         className="card__open"
         ref={buttonRef}
-        aria-describedby={helpId}
+        // El reclamo se anuncia al enfocar la tarjeta, antes de la ayuda de teclado.
+        aria-describedby={claim ? `${claimId} ${helpId}` : helpId}
         aria-keyshortcuts="Alt+ArrowLeft Alt+ArrowRight Alt+ArrowUp Alt+ArrowDown"
         onClick={onOpen}
       >
@@ -672,6 +705,12 @@ function BoardCard({
           Espera {story.pendingPrerequisites}{" "}
           {story.pendingPrerequisites === 1 ? "prerequisito" : "prerequisitos"}
         </span>
+      )}
+      {claim && (
+        <p className="card__meta card__claim" id={claimId}>
+          Reclamada por {claim.owner.agentName} · vence{" "}
+          {formatTime(claim.expiresAt)}
+        </p>
       )}
       {agent && (
         <span className="assignee card__agent">

@@ -29,6 +29,8 @@ interface Props {
   /** Archivada: solo lectura (salvo quitar dependencias, que desbloquea a otras). */
   readOnly: boolean;
   onOpenStory: (storyId: string) => void;
+  /** Cambió el agente asignado: el núcleo cierra el reclamo vigente de otro agente (HU-014). */
+  onAgentChanged?: () => void;
 }
 
 /**
@@ -40,6 +42,7 @@ export function RelationsPanel({
   storyId,
   readOnly,
   onOpenStory,
+  onAgentChanged,
 }: Props) {
   const id = useId();
   const loadRelations = useCallback(
@@ -162,7 +165,9 @@ export function RelationsPanel({
                 void apply(
                   () => setStoryAgent({ projectId, storyId, agentId }),
                   agentId ? "Agente asignado." : "Sin agente asignado.",
-                );
+                ).then((saved) => {
+                  if (saved) onAgentChanged?.();
+                });
               }}
             >
               <option value="">Sin agente</option>

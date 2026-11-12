@@ -1,10 +1,11 @@
 use serde::Serialize;
 use sqlx::SqliteConnection;
 
-use super::rule::ready_for_agent;
+use super::rule::{claimed_by_other, ready_for_agent};
 use crate::error::CoreError;
 use crate::features::access::AgentSession;
 use crate::features::stories::{AcceptanceCriterion, Priority};
+use crate::platform::clock::iso_from_ms;
 use crate::platform::storage::Store;
 
 const ENTITY: &str = "Historia";
@@ -44,6 +45,14 @@ pub struct ContextRef {
     pub archived: bool,
 }
 
+/// Reclamo vigente de quien pregunta sobre la historia (para renovarlo con `renew_claim`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct YourClaim {
+    pub claim_id: String,
+    pub expires_at: String,
+}
+
 /// Contexto de una historia para un agente. Todo el texto es dato no confiable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,6 +71,10 @@ pub struct StoryContext {
     pub assignment: String,
     /// La historia aparecería en `list_ready_stories` para este agente.
     pub ready: bool,
+    /// Tu reclamo vigente sobre la historia, si lo tienes.
+    pub your_claim: Option<YourClaim>,
+    /// Otro agente tiene un reclamo vigente (no se dice cuál).
+    pub claimed_by_other: bool,
     pub criteria: Vec<AcceptanceCriterion>,
     pub epic: Option<ContextEpic>,
     pub parent: Option<ContextRef>,
@@ -91,6 +104,7 @@ struct Row {
     epic_title: Option<String>,
     epic_description: Option<String>,
     ready: bool,
+    claimed_by_other: bool,
     revision: i64,
     updated_at: String,
 }
@@ -104,7 +118,9 @@ macro_rules! select_context {
              e.number AS epic_number, e.title AS epic_title, \
              e.description AS epic_description, ",
             ready_for_agent!(),
-            " AS ready, s.revision, s.updated_at \
+            " AS ready, ",
+            claimed_by_other!(),
+            " AS claimed_by_other, s.revision, s.updated_at \
              FROM stories s \
              JOIN columns c ON c.id = s.column_id \
              LEFT JOIN story_blockers b ON b.story_id = s.id \
@@ -135,8 +151,9 @@ pub async fn get_story_context(
     session: &AgentSession,
     key: &StoryKey,
 ) -> Result<StoryContext, CoreError> {
+    let now = store.now_ms();
     let mut tx = store.reader().begin().await?;
-    let context = load(&mut tx, session, key).await;
+    let context = load(&mut tx, session, key, now).await;
     tx.rollback().await.ok();
     context
 }
@@ -145,11 +162,16 @@ async fn load(
     conn: &mut SqliteConnection,
     session: &AgentSession,
     key: &StoryKey,
+    now: i64,
 ) -> Result<StoryContext, CoreError> {
     let project = session.project_id();
     let row: Option<Row> = match key {
         StoryKey::Id(id) => {
             sqlx::query_as(select_context!("AND s.id = ?"))
+                .bind(session.agent_id())
+                .bind(now)
+                .bind(session.agent_id())
+                .bind(now)
                 .bind(session.agent_id())
                 .bind(project)
                 .bind(id)
@@ -158,6 +180,10 @@ async fn load(
         }
         StoryKey::Number(number) => {
             sqlx::query_as(select_context!("AND s.number = ?"))
+                .bind(session.agent_id())
+                .bind(now)
+                .bind(session.agent_id())
+                .bind(now)
                 .bind(session.agent_id())
                 .bind(project)
                 .bind(number)
@@ -199,6 +225,18 @@ async fn load(
     .fetch_all(&mut *conn)
     .await?;
 
+    let your_claim: Option<YourClaim> = sqlx::query_as(concat!(
+        "SELECT id AS claim_id, ",
+        iso_from_ms!("expires_at_ms"),
+        " AS expires_at FROM story_claims \
+         WHERE story_id = ? AND agent_id = ? AND ended_at_ms IS NULL AND expires_at_ms > ?"
+    ))
+    .bind(&row.id)
+    .bind(session.agent_id())
+    .bind(now)
+    .fetch_optional(&mut *conn)
+    .await?;
+
     let assignment = match row.agent_id.as_deref() {
         None => "none",
         Some(agent) if agent == session.agent_id() => "you",
@@ -221,6 +259,8 @@ async fn load(
         assignment: assignment.into(),
         // Misma regla SQL que `list_ready_stories` (`rule.rs`).
         ready: row.ready,
+        your_claim,
+        claimed_by_other: row.claimed_by_other,
         criteria: criteria
             .into_iter()
             .map(|(id, number, text)| AcceptanceCriterion { id, number, text })

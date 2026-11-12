@@ -211,3 +211,81 @@ fn the_service_survives_a_restore_and_revocations_survive_it_too() {
     assert!(!descriptor::path(data.path()).exists());
     block_on(app.state::<StorageSlot>().close());
 }
+
+#[test]
+fn the_app_sees_agent_claims_and_a_person_releases_them() {
+    let data = tempfile::tempdir().unwrap();
+    let app = launch(data.path());
+    let (project, created) = project_with_credential(&app, "Uno");
+    let story = invoke(
+        &app,
+        "create_story",
+        json!({ "input": { "requestId": "s-1", "projectId": project["id"], "title": "Login" } }),
+    )
+    .unwrap();
+    let client = ServiceClient::new(data.path(), created["token"].as_str().unwrap().to_owned());
+
+    // Un agente reclama por el servicio local; la app lo ve con su dueño y la asignación.
+    let claim = block_on(client.post_json(
+        "/v1/claims",
+        &json!({ "requestId": "c-1", "storyId": story["id"] }),
+    ))
+    .unwrap();
+    let active = invoke(
+        &app,
+        "list_active_claims",
+        json!({ "projectId": project["id"] }),
+    )
+    .unwrap();
+    assert_eq!(active.as_array().unwrap().len(), 1);
+    assert_eq!(active[0]["claimId"], claim["claimId"]);
+    assert_eq!(active[0]["owner"]["agentName"], "Robo Uno");
+    let stories = invoke(
+        &app,
+        "list_stories",
+        json!({ "projectId": project["id"], "includeArchived": false }),
+    )
+    .unwrap();
+    assert_eq!(stories[0]["agentId"], claim["owner"]["agentId"]);
+
+    // La persona lo libera: desaparece de la app, se quita la asignación y el agente ya no
+    // puede renovarlo.
+    invoke(
+        &app,
+        "release_claim",
+        json!({ "input": { "projectId": project["id"], "claimId": claim["claimId"] } }),
+    )
+    .unwrap();
+    let active = invoke(
+        &app,
+        "list_active_claims",
+        json!({ "projectId": project["id"] }),
+    )
+    .unwrap();
+    assert_eq!(active, json!([]));
+    let stories = invoke(
+        &app,
+        "list_stories",
+        json!({ "projectId": project["id"], "includeArchived": false }),
+    )
+    .unwrap();
+    assert_eq!(stories[0]["agentId"], Value::Null);
+    let error = block_on(client.post_json(
+        &format!("/v1/claims/{}/renew", claim["claimId"].as_str().unwrap()),
+        &json!({ "requestId": "r-1" }),
+    ))
+    .unwrap_err();
+    assert!(
+        matches!(&error, ClientError::Api { status: 409, code, .. } if code == "claim_ended"),
+        "{error:?}"
+    );
+    // Reclamo de otro proyecto o inexistente → not_found.
+    let error = invoke(
+        &app,
+        "release_claim",
+        json!({ "input": { "projectId": project["id"], "claimId": "no-existe" } }),
+    )
+    .unwrap_err();
+    assert_eq!(error["code"], "not_found");
+    shut_down(&app);
+}

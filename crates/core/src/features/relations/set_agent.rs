@@ -4,6 +4,7 @@ use ts_rs::TS;
 use super::get::{StoryRelations, load_relations};
 use super::graph::{require, require_not_archived};
 use crate::error::CoreError;
+use crate::features::claims::end_open_claims;
 use crate::features::team::load_agent;
 use crate::platform::storage::Store;
 
@@ -20,17 +21,27 @@ pub struct SetStoryAgentInput {
 /// Asigna un agente a la historia (o lo quita). Idempotente.
 ///
 /// Asignar solo registra quién debería encargarse: no crea ejecuciones, no cambia la columna
-/// ni la revisión de la historia y no implica actividad del agente.
+/// ni la revisión de la historia y no implica actividad del agente. Sí cierra el reclamo
+/// vigente de un agente distinto del nuevo (o de cualquiera, al quitar la asignación).
 pub async fn set_story_agent(
     store: &Store,
     input: &SetStoryAgentInput,
 ) -> Result<StoryRelations, CoreError> {
-    let input = input.clone();
+    let (input, clock) = (input.clone(), store.clone());
     store
         .write(move |conn| {
             Box::pin(async move {
                 let story = require(conn, &input.project_id, &input.story_id).await?;
                 require_not_archived(&story, "storyId")?;
+                // Quitar o cambiar el agente quita también el reclamo vigente de otro agente
+                // (HU-014): si no, podría renovarlo indefinidamente y bloquear al nuevo.
+                end_open_claims(
+                    conn,
+                    &input.story_id,
+                    input.agent_id.as_deref(),
+                    clock.now_ms(),
+                )
+                .await?;
 
                 match &input.agent_id {
                     Some(agent_id) => {

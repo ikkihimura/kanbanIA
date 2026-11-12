@@ -53,6 +53,33 @@ pub enum CoreError {
     #[error("Para mover una tarjeta a «{column}» hace falta aceptarla explícitamente.")]
     AcceptanceRequired { column: String },
 
+    /// Otro agente tiene un reclamo vigente sobre la historia (HU-014).
+    #[error("Otro agente ya reclamó esta historia.")]
+    Claimed,
+
+    /// La historia no cumple la regla de «lista» para este agente.
+    #[error(
+        "La historia no está lista para reclamarse (columna, bloqueo, prerequisitos, \
+         aceptación o asignación)."
+    )]
+    NotReady,
+
+    /// El agente ya tiene el máximo de reclamos vigentes en el proyecto.
+    #[error(
+        "Ya tienes {limit} historias reclamadas en este proyecto. Deja de renovar alguna y \
+         espera a que venza antes de reclamar otra."
+    )]
+    ClaimLimit { limit: i64 },
+
+    /// El reclamo ya no está vigente: venció o lo liberó una persona.
+    #[error("{}", if *.expired {
+        "El reclamo venció. Si la historia sigue lista, reclámala de nuevo."
+    } else {
+        "El reclamo ya no está vigente: una persona lo liberó o reasignó la historia, o la \
+         historia se archivó o aceptó. Deja de trabajar en ella."
+    })]
+    ClaimEnded { expired: bool },
+
     #[error("los datos están abiertos por otra instancia")]
     StorageLocked,
 
@@ -86,6 +113,10 @@ pub enum ErrorCode {
     IdempotencyConflict,
     WipLimitExceeded,
     AcceptanceRequired,
+    Claimed,
+    NotReady,
+    ClaimLimit,
+    ClaimEnded,
     StorageLocked,
     StorageNewerSchema,
     StorageMigrationFailed,
@@ -128,6 +159,10 @@ impl CoreError {
             Self::IdempotencyConflict => ErrorCode::IdempotencyConflict,
             Self::WipLimitExceeded { .. } => ErrorCode::WipLimitExceeded,
             Self::AcceptanceRequired { .. } => ErrorCode::AcceptanceRequired,
+            Self::Claimed => ErrorCode::Claimed,
+            Self::NotReady => ErrorCode::NotReady,
+            Self::ClaimLimit { .. } => ErrorCode::ClaimLimit,
+            Self::ClaimEnded { .. } => ErrorCode::ClaimEnded,
             Self::StorageLocked => ErrorCode::StorageLocked,
             Self::NewerSchema(_) => ErrorCode::StorageNewerSchema,
             Self::MigrationFailed(_) => ErrorCode::StorageMigrationFailed,
@@ -145,6 +180,10 @@ impl CoreError {
             | Self::Cycle { .. }
             | Self::WipLimitExceeded { .. }
             | Self::AcceptanceRequired { .. } => (self.to_string(), true),
+            // Reintentar lo mismo no sirve: el agente debe cambiar de historia o reclamar.
+            Self::Claimed | Self::NotReady | Self::ClaimLimit { .. } | Self::ClaimEnded { .. } => {
+                (self.to_string(), false)
+            }
             Self::Conflict { .. } => (
                 "Otra edición cambió estos datos. Revisa el estado actual y vuelve a intentarlo."
                     .into(),

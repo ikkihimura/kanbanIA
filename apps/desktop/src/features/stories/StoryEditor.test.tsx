@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ErrorPayload } from "../../contracts/generated/ErrorPayload";
 import type { Column } from "../../contracts/generated/Column";
+import type { StoryClaim } from "../../contracts/generated/StoryClaim";
 import type { StoryDetail } from "../../contracts/generated/StoryDetail";
 import type { StorySummary } from "../../contracts/generated/StorySummary";
 import * as commands from "../../shared/ipc/commands";
@@ -22,8 +23,12 @@ vi.mock("../../shared/ipc/commands", async (importOriginal) => {
     listStories: vi.fn(),
     createStory: vi.fn(),
     setUnsavedChanges: vi.fn(),
+    releaseClaim: vi.fn(),
+    setStoryAgent: vi.fn(),
+    listAgents: vi.fn(),
     getStoryRelations: vi.fn(),
     listEpics: vi.fn(),
+    listActiveClaims: vi.fn(),
   };
 });
 
@@ -96,6 +101,27 @@ function conflictWith(current: StoryDetail): ErrorPayload {
   };
 }
 
+const noRelations = {
+  storyId: "s1",
+  epic: null,
+  agent: null,
+  parent: null,
+  children: [],
+  prerequisites: [],
+  dependents: [],
+  pendingPrerequisites: 0,
+};
+
+const roboClaim: StoryClaim = {
+  claimId: "c1",
+  storyId: "s1",
+  storyNumber: 7,
+  owner: { agentId: "a1", agentNumber: 2, agentName: "Robo" },
+  claimedAt: "2026-11-12T10:00:00Z",
+  expiresAt: "2099-11-12T10:30:00Z",
+  renewedAt: null,
+};
+
 function renderEditor(onBack = vi.fn()) {
   const view = render(
     <StoryEditor
@@ -124,6 +150,8 @@ beforeEach(() => {
   mocked.listStories.mockResolvedValue([]);
   mocked.getStory.mockResolvedValue(story());
   mocked.listColumns.mockResolvedValue([]);
+  mocked.listActiveClaims.mockResolvedValue([]);
+  mocked.listAgents.mockResolvedValue([]);
 });
 
 describe("StoryEditor", () => {
@@ -140,6 +168,102 @@ describe("StoryEditor", () => {
     ).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Reintentar" }));
     expect(await screen.findByDisplayValue("Exportar CSV")).toBeInTheDocument();
+  });
+
+  it("muestra el reclamo vigente de la historia", async () => {
+    mocked.listActiveClaims.mockResolvedValue([
+      {
+        claimId: "c1",
+        storyId: "s1",
+        storyNumber: 7,
+        owner: { agentId: "a1", agentNumber: 2, agentName: "Robo" },
+        claimedAt: "2026-11-12T10:00:00Z",
+        expiresAt: "2099-11-12T10:30:00Z",
+        renewedAt: null,
+      },
+    ]);
+    renderEditor();
+
+    expect(
+      await screen.findByRole("heading", { name: "Reclamo" }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText("A-2 Robo", { selector: "strong" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Liberar reclamo…" }),
+    ).toBeInTheDocument();
+  });
+
+  it("liberar el reclamo recarga la asignación en «Relaciones»", async () => {
+    const user = userEvent.setup();
+    const robo = {
+      id: "a1",
+      number: 2,
+      name: "Robo",
+      avatar: { base: 0, hair: 0, eyes: 0, accessory: 0, palette: 0 },
+    } as never;
+    mocked.listAgents.mockResolvedValue([robo]);
+    mocked.getStoryRelations
+      .mockResolvedValueOnce({ ...noRelations, agent: robo })
+      .mockResolvedValue(noRelations);
+    mocked.listActiveClaims
+      .mockResolvedValueOnce([roboClaim])
+      .mockResolvedValue([]);
+    mocked.releaseClaim.mockResolvedValue(undefined);
+    renderEditor();
+
+    const select = await screen.findByLabelText("Agente asignado");
+    await waitFor(() => {
+      expect(select).toHaveValue("a1");
+    });
+    await user.click(
+      await screen.findByRole("button", { name: "Liberar reclamo…" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Liberar" }));
+
+    expect(mocked.releaseClaim).toHaveBeenCalledWith({
+      projectId: "p1",
+      claimId: "c1",
+    });
+    await waitFor(() => {
+      expect(screen.getByLabelText("Agente asignado")).toHaveValue("");
+    });
+    expect(mocked.getStoryRelations).toHaveBeenCalledTimes(2);
+  });
+
+  it("quitar el agente en «Relaciones» vuelve a consultar el reclamo", async () => {
+    const user = userEvent.setup();
+    const robo = {
+      id: "a1",
+      number: 2,
+      name: "Robo",
+      avatar: { base: 0, hair: 0, eyes: 0, accessory: 0, palette: 0 },
+    } as never;
+    mocked.listAgents.mockResolvedValue([robo]);
+    mocked.getStoryRelations.mockResolvedValue({ ...noRelations, agent: robo });
+    mocked.setStoryAgent.mockResolvedValue(noRelations);
+    mocked.listActiveClaims
+      .mockResolvedValueOnce([roboClaim])
+      .mockResolvedValue([]);
+    renderEditor();
+
+    expect(
+      await screen.findByText("A-2 Robo", { selector: "strong" }),
+    ).toBeInTheDocument();
+    const select = await screen.findByLabelText("Agente asignado");
+    await waitFor(() => {
+      expect(select).toHaveValue("a1");
+    });
+    await user.selectOptions(select, "");
+
+    expect(mocked.setStoryAgent).toHaveBeenCalledWith({
+      projectId: "p1",
+      storyId: "s1",
+      agentId: null,
+    });
+    expect(await screen.findByText("Sin reclamo.")).toBeInTheDocument();
+    expect(mocked.listActiveClaims).toHaveBeenCalledTimes(2);
   });
 
   it("indica cambios sin guardar, guarda y vuelve al proyecto con aviso", async () => {

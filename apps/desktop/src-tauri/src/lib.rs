@@ -79,6 +79,8 @@ pub fn register_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
             commands::access::create_agent_credential,
             commands::access::revoke_agent_credential,
             commands::access::get_local_service_status,
+            commands::claims::list_active_claims,
+            commands::claims::release_claim,
         ])
 }
 

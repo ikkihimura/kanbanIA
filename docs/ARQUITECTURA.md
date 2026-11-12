@@ -31,7 +31,7 @@ Done requiere aceptación humana explícita en MVP; mover a una columna done inv
 
 ## Concurrencia y protocolo de errores
 Mutaciones reciben expected_revision cuando editan entidad y request_id en operaciones reintentables. Una revisión obsoleta devuelve conflict y estado vigente; no sobrescribe silenciosamente. request_id se vincula a identidad+operación+hash de payload: mismo payload devuelve resultado original, payload distinto devuelve conflicto. Error estructurado con code, mensaje seguro y request_id; no stack traces al usuario.
-Claim atómico y exclusivo por historia, con propietario y expiración. Renovación explícita; al expirar queda disponible de nuevo. Entrega desde claim vencido requiere reconciliación, no cambia estado automáticamente. Probar dos reclamaciones simultáneas con reloj controlable.
+Claim atómico y exclusivo por historia, con propietario y expiración. Renovación explícita; al expirar queda disponible de nuevo. (HU-014, decisión del propietario: reclamar asigna la historia; al expirar queda disponible para el mismo agente y para otros cuando una persona quita la asignación; liberar desde la app quita también la asignación.) Entrega desde claim vencido requiere reconciliación, no cambia estado automáticamente. Probar dos reclamaciones simultáneas con reloj controlable.
 
 ## Ejecución y observación
 Estados Run: queued, preparing, running, waiting_approval, completed, failed, cancelled, interrupted. Recuperar ejecuciones no verificables como interrupted/unknown; nunca reiniciarlas sin política explícita. Persistir snapshot de historia y referencia a versión/commit del contexto antes de ejecutar.

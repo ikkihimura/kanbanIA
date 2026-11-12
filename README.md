@@ -126,7 +126,7 @@ Cada historia tiene un número por proyecto (`#N`) que no se reutiliza, título 
 
 - **Épicas** (`E-n`): agrupan historias. Su **avance** es aceptadas ÷ historias no archivadas de la épica. Sin historias se muestra «Sin historias», nunca 0 % ni 100 %. Las historias se aceptan desde el panel «Revisión» del editor.
 - **Subtareas**: una historia puede colgar de otra del mismo proyecto.
-- **Dependencias**: «A depende de B». Los prerequisitos sin aceptar, incluidos los archivados, se muestran como bloqueo. Por ahora no impiden mover la tarjeta; el bloqueo de ejecución llega con las reclamaciones de agentes (HU-014).
+- **Dependencias**: «A depende de B». Los prerequisitos sin aceptar, incluidos los archivados, se muestran como bloqueo. Por ahora no impiden mover la tarjeta; un agente no puede reclamar una historia con prerequisitos pendientes (HU-014).
 - Se rechazan los **ciclos** directos e indirectos (subtareas y dependencias) y las relaciones entre proyectos distintos.
 - Las relaciones se guardan al momento desde el editor, sin interferir con el borrador del texto. «Guardar y volver» guarda el contenido y vuelve al proyecto.
 
@@ -182,10 +182,16 @@ Cada historia tiene un número por proyecto (`#N`) que no se reutiliza, título 
 
 ## Agentes por MCP (`kanbania-mcp`)
 
-Servidor MCP por stdio (SDK oficial `rmcp` 3.9.0) con dos herramientas de solo lectura:
+Servidor MCP por stdio (SDK oficial `rmcp` 3.9.0) con cuatro herramientas:
 
-- `list_ready_stories` (`cursor?`, `limit?` 1-50): historias en «Backlog» o «Listo», sin aceptar ni archivar, sin bloqueo, sin prerequisitos pendientes y sin agente o asignadas al propio agente. Primero las de «Listo», después por prioridad y posición. Paginada con `nextCursor`.
-- `get_story_context` (`storyId` o `number`): descripción, criterios CA-n, épica, padre, subtareas, prerequisitos, asignación y si está lista.
+- `list_ready_stories` (`cursor?`, `limit?` 1-50): historias en «Backlog» o «Listo», sin aceptar ni archivar, sin bloqueo, sin prerequisitos pendientes, sin agente o asignadas al propio agente, y sin reclamo vigente de otro agente. Primero las de «Listo», después por prioridad y posición. Paginada con `nextCursor`.
+- `get_story_context` (`storyId` o `number`): descripción, criterios CA-n, épica, padre, subtareas, prerequisitos, asignación, si está lista y el reclamo vigente del agente (`yourClaim`) o si la tiene otro (`claimedByOther`).
+- `claim_story` (`requestId`, `storyId` o `number`): reclama una historia lista para que ningún otro agente la tome. Dura 30 minutos y la asigna al agente si no tenía a nadie. Como mucho 5 reclamos vigentes por agente y proyecto. Errores: `[claimed]` (la tiene otro), `[not_ready]` y `[claim_limit]`.
+- `renew_claim` (`claimId`, `requestId`): extiende el reclamo 30 minutos desde ahora. `[claim_ended]` si venció, una persona lo liberó o reasignó la historia, o la historia se archivó o aceptó.
+
+`requestId` lo elige el agente (p. ej. un UUID). Reintentar con el mismo devuelve el resultado original sin repetir el efecto, y con otros datos responde `[idempotency_conflict]`.
+
+En la app, la tarjeta muestra «Reclamada por…» y el editor de la historia permite liberar el reclamo; liberar quita también la asignación y la historia queda libre para cualquier agente (para impedir que la retomen, bloquéala o muévela fuera de Backlog/Listo). Quitar o cambiar la asignación también cierra el reclamo vigente. Si el reclamo vence sin más, la asignación se queda: solo ese agente puede volver a reclamarla. Restaurar una copia cierra los reclamos que contenga.
 
 El agente solo ve el proyecto de su credencial. Necesita la app abierta: si está cerrada, cada llamada responde «Kanban IA no está abierto…». El proceso MCP nunca abre la base.
 

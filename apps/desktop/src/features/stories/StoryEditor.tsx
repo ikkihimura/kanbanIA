@@ -11,6 +11,7 @@ import { useMutation } from "../../shared/ipc/useMutation";
 import { formatDateTime } from "../../shared/ui/format";
 import { MarkdownPreview } from "../../shared/ui/MarkdownPreview";
 import { useUnsavedChangesGuard } from "../../shared/ui/useUnsavedChangesGuard";
+import { ClaimPanel } from "../claims/ClaimPanel";
 import { RelationsPanel } from "../relations/RelationsPanel";
 import { ReviewPanel } from "../review/ReviewPanel";
 import { PRIORITY_LABEL } from "./priorities";
@@ -43,6 +44,10 @@ export function StoryEditor({
   // Versión conocida más reciente (tras guardar), para encabezado y archivo.
   const [latest, setLatest] = useState<StoryDetail | null>(null);
   const archive = useMutation(archiveStory);
+  // Reclamo y asignación se afectan entre sí (liberar quita la asignación; cambiarla cierra el
+  // reclamo): cada contador vuelve a montar el panel contrario para que no muestre datos viejos.
+  const [claimEpoch, setClaimEpoch] = useState(0);
+  const [relationsEpoch, setRelationsEpoch] = useState(0);
   // Cerrar la ventana o salir con cambios sin guardar pide confirmación (ver exit_guard.rs).
   useUnsavedChangesGuard(dirty);
 
@@ -205,7 +210,7 @@ export function StoryEditor({
           )}
 
           <RelationsPanel
-            key={`relations-${story.id}-${story.archivedAt ?? "active"}`}
+            key={`relations-${story.id}-${story.archivedAt ?? "active"}-${String(relationsEpoch)}`}
             projectId={projectId}
             storyId={story.id}
             readOnly={story.archivedAt !== null}
@@ -213,6 +218,18 @@ export function StoryEditor({
               leave(() => {
                 onOpenStory(id);
               });
+            }}
+            onAgentChanged={() => {
+              setClaimEpoch((n) => n + 1);
+            }}
+          />
+
+          <ClaimPanel
+            key={`claim-${story.id}-${String(claimEpoch)}`}
+            projectId={projectId}
+            storyId={story.id}
+            onReleased={() => {
+              setRelationsEpoch((n) => n + 1);
             }}
           />
 

@@ -8,6 +8,8 @@ import type { CreateAgentCredentialInput } from "../../contracts/generated/Creat
 import type { CreatedAgentCredential } from "../../contracts/generated/CreatedAgentCredential";
 import type { LocalServiceStatus } from "../../contracts/generated/LocalServiceStatus";
 import type { RevokeAgentCredentialInput } from "../../contracts/generated/RevokeAgentCredentialInput";
+import type { ReleaseClaimInput } from "../../contracts/generated/ReleaseClaimInput";
+import type { StoryClaim } from "../../contracts/generated/StoryClaim";
 import type { BackupInfo } from "../../contracts/generated/BackupInfo";
 import type { RestoreOutcome } from "../../contracts/generated/RestoreOutcome";
 import type { RestoreSource } from "../../contracts/generated/RestoreSource";
@@ -388,6 +390,18 @@ export function revokeAgentCredential(
 
 export function getLocalServiceStatus(): Promise<LocalServiceStatus> {
   return call("get_local_service_status");
+}
+
+// --- reclamos de historias (HU-014) ---
+
+/** Reclamos vigentes del proyecto, ordenados por número de historia. */
+export function listActiveClaims(projectId: string): Promise<StoryClaim[]> {
+  return call("list_active_claims", { projectId });
+}
+
+/** Libera un reclamo (solo personas). Idempotente: liberar uno ya cerrado no falla. */
+export function releaseClaim(input: ReleaseClaimInput): Promise<void> {
+  return call("release_claim", { input });
 }
 
 // --- errores ---

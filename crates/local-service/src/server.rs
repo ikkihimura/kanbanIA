@@ -16,18 +16,19 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::rejection::QueryRejection;
+use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, Path as UrlPath, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use kanbania_core::error::{CoreError, ErrorCode, ErrorPayload};
 use kanbania_core::features::access::{AgentSession, authenticate_agent, describe_session};
 use kanbania_core::features::agent_work::{
     ReadyQuery, StoryKey, get_story_context, list_ready_stories,
 };
+use kanbania_core::features::claims::{ClaimStoryInput, RenewClaimInput, claim_story, renew_claim};
 use kanbania_core::platform::storage::Store;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -135,6 +136,8 @@ fn router(shared: Arc<Shared>) -> Router {
             "/v1/stories/by-number/{number}/context",
             get(context_by_number),
         )
+        .route("/v1/claims", post(claim))
+        .route("/v1/claims/{id}/renew", post(renew))
         .route_layer(from_fn_with_state(shared.clone(), authenticate));
     Router::new()
         .route("/v1/handshake", get(handshake))
@@ -296,6 +299,76 @@ async fn story_context(authed: &Authed, key: StoryKey) -> Response {
     }
 }
 
+/// Reclama una historia del proyecto de la sesión (`{requestId, storyId | number}`).
+async fn claim(
+    Extension(authed): Extension<Authed>,
+    body: Result<Json<ClaimStoryInput>, JsonRejection>,
+) -> Response {
+    let input = match body {
+        Ok(Json(input)) => input,
+        Err(rejection) => return json_rejection(&rejection),
+    };
+    match claim_story(&authed.store, &authed.session, &input).await {
+        Ok(claim) => Json(claim).into_response(),
+        Err(error) => core_error_for(&error, Some(&input.request_id)),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RenewBody {
+    request_id: String,
+}
+
+/// Renueva un reclamo propio (`{requestId}`).
+async fn renew(
+    Extension(authed): Extension<Authed>,
+    UrlPath(id): UrlPath<String>,
+    body: Result<Json<RenewBody>, JsonRejection>,
+) -> Response {
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => return json_rejection(&rejection),
+    };
+    if id.is_empty() || id.len() > MAX_ID_LEN {
+        return core_error(&CoreError::NotFound { entity: "Reclamo" });
+    }
+    let input = RenewClaimInput {
+        request_id: body.request_id,
+        claim_id: id,
+    };
+    match renew_claim(&authed.store, &authed.session, &input).await {
+        Ok(claim) => Json(claim).into_response(),
+        Err(error) => core_error_for(&error, Some(&input.request_id)),
+    }
+}
+
+/// Cuerpo JSON rechazado: demasiado grande → 413; mal formado o con campos desconocidos
+/// (p. ej. `agentId` o `projectId`) → 400.
+fn json_rejection(rejection: &JsonRejection) -> Response {
+    let too_large = rejection.status() == StatusCode::PAYLOAD_TOO_LARGE;
+    let status = if too_large {
+        StatusCode::PAYLOAD_TOO_LARGE
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    error_response(
+        status,
+        CoreError::Validation {
+            field: "body",
+            reason: if too_large {
+                format!(
+                    "La petición supera el tamaño máximo ({} KB).",
+                    MAX_BODY_BYTES / 1024
+                )
+            } else {
+                "Cuerpo JSON no válido: revisa los campos admitidos.".into()
+            },
+        }
+        .to_payload(None),
+    )
+}
+
 async fn not_found() -> Response {
     core_error(&CoreError::NotFound { entity: "Ruta" })
 }
@@ -309,6 +382,11 @@ fn forbidden(reason: &str) -> Response {
 }
 
 fn core_error(error: &CoreError) -> Response {
+    core_error_for(error, None)
+}
+
+/// Como `core_error`, con el `requestId` de la petición en el error (rutas con efectos).
+fn core_error_for(error: &CoreError, request_id: Option<&str>) -> Response {
     if matches!(
         error,
         CoreError::Database(_) | CoreError::StorageIo(_) | CoreError::Serialization(_)
@@ -316,7 +394,7 @@ fn core_error(error: &CoreError) -> Response {
         // Diagnóstico local; el cliente solo recibe el mensaje seguro.
         eprintln!("[local-service] {error}");
     }
-    payload_response(error.to_payload(None))
+    payload_response(error.to_payload(request_id))
 }
 
 fn payload_response(payload: ErrorPayload) -> Response {
@@ -337,7 +415,11 @@ fn status_for(code: ErrorCode) -> StatusCode {
         | ErrorCode::Conflict
         | ErrorCode::IdempotencyConflict
         | ErrorCode::WipLimitExceeded
-        | ErrorCode::AcceptanceRequired => StatusCode::CONFLICT,
+        | ErrorCode::AcceptanceRequired
+        | ErrorCode::Claimed
+        | ErrorCode::NotReady
+        | ErrorCode::ClaimLimit
+        | ErrorCode::ClaimEnded => StatusCode::CONFLICT,
         ErrorCode::StorageLocked
         | ErrorCode::StorageNewerSchema
         | ErrorCode::StorageMigrationFailed
