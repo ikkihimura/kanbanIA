@@ -101,7 +101,9 @@ describe("AgentAccessSection", () => {
     mocked.getLocalServiceStatus.mockResolvedValue({ running: false });
     render(<AgentAccessSection projectId="p1" />);
     expect(
-      await screen.findByText(/Servicio local: no disponible/),
+      await screen.findByText(
+        "Servicio local: no disponible. Los agentes no pueden conectarse ahora; cierra Kanban IA y vuelve a abrirlo.",
+      ),
     ).toBeInTheDocument();
   });
 
@@ -270,7 +272,7 @@ describe("AgentAccessSection", () => {
     );
     expect(
       await screen.findByText(
-        "Servicio local: no se pudo consultar su estado.",
+        "Servicio local: no se pudo consultar su estado. Cierra Kanban IA y vuelve a abrirlo.",
       ),
     ).toBeInTheDocument();
   });

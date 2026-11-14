@@ -1,0 +1,118 @@
+{
+  "format": "kanbania-package",
+  "version": 1,
+  "exportedAt": "2026-11-14T19:57:49.591Z",
+  "appVersion": "0.1.0",
+  "project": {
+    "id": "01a1dba3-3888-71e1-be23-8a09fa8993e8",
+    "name": "Demo · Recetario",
+    "revision": 1
+  },
+  "columns": [
+    {
+      "id": "01a1dba3-3889-7127-9356-6e57616052fb",
+      "name": "Backlog",
+      "category": "backlog",
+      "position": 0,
+      "wipLimit": null
+    },
+    {
+      "id": "01a1dba3-3889-7127-9356-6e58bddbfdd8",
+      "name": "Listo",
+      "category": "ready",
+      "position": 1,
+      "wipLimit": null
+    },
+    {
+      "id": "01a1dba3-3889-7127-9356-6e59f4e1e79e",
+      "name": "En curso",
+      "category": "active",
+      "position": 2,
+      "wipLimit": null
+    },
+    {
+      "id": "01a1dba3-3889-7127-9356-6e5a53ea773a",
+      "name": "Revisión",
+      "category": "review",
+      "position": 3,
+      "wipLimit": null
+    },
+    {
+      "id": "01a1dba3-3889-7127-9356-6e5b892319d5",
+      "name": "Hecho",
+      "category": "done",
+      "position": 4,
+      "wipLimit": null
+    }
+  ],
+  "epics": [
+    {
+      "id": "01a1dba3-388a-7472-a9e6-5ea61fb4800e",
+      "file": "epics/E-1-recetas.md",
+      "revision": 1,
+      "contentHash": "1facd4584626b87b3e3abf3fc44143dd7796aaefb8ae47af35fdbf5d75700fe0"
+    },
+    {
+      "id": "01a1dba3-388a-7472-a9e6-5ea8b62db801",
+      "file": "epics/E-2-lista-de-la-compra.md",
+      "revision": 1,
+      "contentHash": "232708b3128db85a6a912848622f96207a1eb8117093ca348f3c710a88b9fc43"
+    }
+  ],
+  "stories": [
+    {
+      "id": "01a1dba3-388b-727d-b795-3c488dfccb16",
+      "file": "stories/0001-crear-una-receta-con-ingredientes-y-paso.md",
+      "revision": 2,
+      "contentHash": "7978747f5bfd212009ef4ea25fbb361f1ccaff41ec3bc221efd8fc8bdbcecdff"
+    },
+    {
+      "id": "01a1dba3-388c-768a-a9ae-1ff47da002aa",
+      "file": "stories/0002-buscar-recetas-por-ingrediente.md",
+      "revision": 2,
+      "contentHash": "72415b90f422a5146e32dbc9c7564f683cc4cd0feb8dabfcedc4bed0674449bd"
+    },
+    {
+      "id": "01a1dba3-388e-7130-a9a4-47b77f699460",
+      "file": "stories/0003-escalar-las-raciones-de-una-receta.md",
+      "revision": 2,
+      "contentHash": "c47947e0c7ef79caf5847e84dc6214f76d23bae971e01a0e91194180ffa27baf"
+    },
+    {
+      "id": "01a1dba3-388f-7754-9b39-9049c8103c2e",
+      "file": "stories/0004-etiquetar-recetas-vegetariana-r-pida-sin.md",
+      "revision": 2,
+      "contentHash": "dcf5f2c0b8e38bde34af0ba4073efa1cb326757ec4c50d6a7d71f15acbea7f3f"
+    },
+    {
+      "id": "01a1dba3-3890-7452-bbd8-e5758bd46b24",
+      "file": "stories/0005-planificar-el-men-semanal.md",
+      "revision": 2,
+      "contentHash": "8c9c545b091c5aa6336303541be3a0341ece97e61b092ca7e9fd7016c620c888"
+    },
+    {
+      "id": "01a1dba3-3890-7452-bbd8-e57919e23678",
+      "file": "stories/0006-generar-la-lista-de-la-compra-desde-el-m.md",
+      "revision": 2,
+      "contentHash": "b0602bbb021cf6330485224390ae23fa75a1a90bab099e44e1e5b9de1087bf02"
+    },
+    {
+      "id": "01a1dba3-3891-77bd-afcd-31fbb678d026",
+      "file": "stories/0007-agrupar-la-lista-de-la-compra-por-pasill.md",
+      "revision": 2,
+      "contentHash": "9e2c9dbafac72374c463fa1b16c096951d41f8a0b54709f533e5c755de90ded6"
+    },
+    {
+      "id": "01a1dba3-3892-712f-b266-e561486c0409",
+      "file": "stories/0008-modo-cocina-con-la-pantalla-siempre-ence.md",
+      "revision": 2,
+      "contentHash": "de67930d90d0735e181a867ae2625703c35ac90939d5a022feb7d0ad8614c881"
+    },
+    {
+      "id": "01a1dba3-3893-70cb-8d9d-3288d5bcf873",
+      "file": "stories/0009-importar-recetas-desde-un-archivo-de-tex.md",
+      "revision": 2,
+      "contentHash": "ff6d17cebfaef244c3fd41c184c17eff605d3b63eebc47ae9ff927f81c180b2e"
+    }
+  ]
+}

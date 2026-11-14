@@ -128,16 +128,17 @@ export function AgentAccessSection({ projectId }: Props) {
       </h2>
       <p className="field__hint">
         Una credencial permite a un agente usar este proyecto, y nada más, a
-        través del servicio local de este equipo. La conexión por MCP llega en
-        la próxima versión.
+        través del servidor MCP <code>kanbania-mcp</code> y del servicio local
+        de este equipo. Cómo configurarlo: guía local del repositorio (
+        <code>docs/GUIA-LOCAL.md</code>).
       </p>
       <p className="field__hint">
         {service.state.status === "ready" &&
           (service.state.data.running && service.state.data.port !== undefined
             ? `Servicio local: activo en este equipo (127.0.0.1:${String(service.state.data.port)}).`
-            : "Servicio local: no disponible mientras el almacenamiento no esté abierto.")}
+            : "Servicio local: no disponible. Los agentes no pueden conectarse ahora; cierra Kanban IA y vuelve a abrirlo.")}
         {service.state.status === "error" &&
-          "Servicio local: no se pudo consultar su estado."}
+          "Servicio local: no se pudo consultar su estado. Cierra Kanban IA y vuelve a abrirlo."}
       </p>
 
       <div className="form-row">
