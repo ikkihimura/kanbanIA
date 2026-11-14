@@ -66,17 +66,18 @@ pub enum CoreError {
 
     /// El agente ya tiene el máximo de reclamos vigentes en el proyecto.
     #[error(
-        "Ya tienes {limit} historias reclamadas en este proyecto. Deja de renovar alguna y \
-         espera a que venza antes de reclamar otra."
+        "Ya tienes {limit} historias reclamadas en este proyecto. Entrega alguna, o deja de \
+         renovarla y espera a que venza, antes de reclamar otra."
     )]
     ClaimLimit { limit: i64 },
 
-    /// El reclamo ya no está vigente: venció o lo liberó una persona.
+    /// El reclamo ya no está vigente: venció, se entregó, lo liberó una persona, se revocó su
+    /// credencial o la historia se archivó o aceptó.
     #[error("{}", if *.expired {
         "El reclamo venció. Si la historia sigue lista, reclámala de nuevo."
     } else {
-        "El reclamo ya no está vigente: una persona lo liberó o reasignó la historia, o la \
-         historia se archivó o aceptó. Deja de trabajar en ella."
+        "El reclamo ya no está vigente: ya entregaste, una persona lo liberó o reasignó la \
+         historia, se archivó o aceptó, o se revocó la credencial. Deja de trabajar en ella."
     })]
     ClaimEnded { expired: bool },
 

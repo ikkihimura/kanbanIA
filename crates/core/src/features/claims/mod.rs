@@ -14,7 +14,12 @@
 //! - Solo una persona libera un reclamo (`release_claim`, `Actor::Human`). Restaurar una copia
 //!   cierra todos los reclamos de la copia.
 //! - La hora se lee dentro de la transacción de escritura (tras esperar el bloqueo).
+//! - Toda operación de agentes sobre una historia (renovar y, desde HU-015, bloqueos,
+//!   subtareas y entregas) pasa por `require_active_claim`. Entregar cierra el reclamo
+//!   (`delivered`); aceptar o archivar lo cierran (`closed`); revocar la credencial con la que
+//!   se reclamó, también (`revoked`). En todos los casos la asignación se queda.
 
+mod active;
 mod claim;
 mod end;
 mod list;
@@ -22,8 +27,12 @@ mod release;
 mod renew;
 mod story_claim;
 
+pub(crate) use active::require_active_claim;
 pub use claim::{ClaimStoryInput, claim_story};
-pub(crate) use end::{close_restored_claims, end_open_claims};
+pub(crate) use end::{
+    EndReason, close_credential_claims, close_restored_claims, close_story_claims, end_claim,
+    end_open_claims,
+};
 pub use list::list_active_claims;
 pub use release::{ReleaseClaimInput, release_claim};
 pub use renew::{RenewClaimInput, renew_claim};

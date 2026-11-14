@@ -16,6 +16,7 @@ pub use move_story::{MoveStoryInput, move_story};
 pub use story::{AcceptanceCriterion, Priority, StoryDetail, StorySummary};
 pub use update::{CriterionDraft, UpdateStoryInput, update_story};
 
+pub(crate) use create::{NewStory, insert_story};
 pub(crate) use placement::{append_to_column, place_at_index};
 pub(crate) use story::{
     MAX_CRITERIA, count_in_column, load_detail, load_story, validate_criterion,

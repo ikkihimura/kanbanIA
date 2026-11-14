@@ -5,6 +5,9 @@
 //! Expresión SQL booleana sobre los alias `s` (stories) y `c` (su columna). Parámetros, en
 //! este orden: id del agente de la sesión, hora en ms (`Store::now_ms`), id del agente otra vez.
 //! Un reclamo abierto de otro agente cuenta mientras no haya vencido (`claimed_by_other!`).
+//! Una historia con una entrega pendiente de revisión no está lista (HU-015): aunque la tarjeta
+//! no haya podido pasar a «revisión», nadie la vuelve a tomar hasta que una persona decida;
+//! devolver la entrega la deja lista otra vez.
 
 /// SQL estático (sqlx 0.9 rechaza cadenas dinámicas): úsalo dentro de `concat!`.
 macro_rules! ready_for_agent {
@@ -13,6 +16,8 @@ macro_rules! ready_for_agent {
             "(c.category IN ('backlog', 'ready') \
           AND s.archived_at IS NULL AND s.accepted_at IS NULL \
           AND NOT EXISTS (SELECT 1 FROM story_blockers b WHERE b.story_id = s.id) \
+          AND NOT EXISTS (SELECT 1 FROM deliveries dl \
+                          WHERE dl.story_id = s.id AND dl.status = 'pending') \
           AND NOT EXISTS (SELECT 1 FROM story_dependencies d \
                           JOIN stories p ON p.id = d.depends_on_id \
                           WHERE d.story_id = s.id AND p.accepted_at IS NULL) \

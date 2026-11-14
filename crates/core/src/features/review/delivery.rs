@@ -6,6 +6,7 @@ use sqlx::SqliteConnection;
 use ts_rs::TS;
 
 use crate::error::CoreError;
+use crate::platform::text::has_invisible_formatting;
 
 pub(super) const MAX_REFERENCES: usize = 10;
 const MAX_SUMMARY_CHARS: usize = 2_000;
@@ -56,7 +57,7 @@ pub enum ReferenceStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export)]
 pub struct ReferenceInput {
     pub kind: ReferenceKind,
@@ -92,7 +93,7 @@ pub struct Delivery {
     pub decided_at: Option<String>,
 }
 
-pub(super) fn validate_summary(raw: &str) -> Result<String, CoreError> {
+pub(crate) fn validate_summary(raw: &str) -> Result<String, CoreError> {
     let summary = raw.trim();
     let invalid = |reason: &str| CoreError::Validation {
         field: "summary",
@@ -116,7 +117,7 @@ pub(super) fn validate_summary(raw: &str) -> Result<String, CoreError> {
     Ok(summary.to_owned())
 }
 
-pub(super) fn validate_references(
+pub(crate) fn validate_references(
     refs: &[ReferenceInput],
 ) -> Result<Vec<ReferenceInput>, CoreError> {
     let invalid = |reason: String| CoreError::Validation {
@@ -136,9 +137,11 @@ pub(super) fn validate_references(
                     "Cada referencia debe tener entre 1 y 2 000 caracteres.".into(),
                 ));
             }
-            if value.chars().any(char::is_control) {
+            if value.chars().any(char::is_control) || has_invisible_formatting(value) {
                 return Err(invalid(
-                    "Las referencias no pueden contener caracteres de control.".into(),
+                    "Las referencias no pueden contener caracteres de control ni de formato \
+                     invisibles."
+                        .into(),
                 ));
             }
             match reference.kind {
@@ -155,6 +158,16 @@ pub(super) fn validate_references(
                 ReferenceKind::Path => {
                     if !Path::new(value).is_absolute() {
                         return Err(invalid(format!("«{value}» no es una ruta absoluta.")));
+                    }
+                    // `.`/`..` permitirían esconder una ruta de red tras un prefijo local
+                    // (`/tmp/../net/host`): se exige la ruta ya normalizada.
+                    if value
+                        .split(['/', '\\'])
+                        .any(|part| part == "." || part == "..")
+                    {
+                        return Err(invalid(format!(
+                            "«{value}» contiene «.» o «..»: escribe la ruta normalizada."
+                        )));
                     }
                     // Comprobar rutas de red (UNC, `//host`, autofs `/net/`) abriría conexiones
                     // salientes (p. ej. SMB con credenciales de Windows) o colgaría la app.
@@ -307,9 +320,15 @@ const STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Calcula la accesibilidad de las referencias fuera del runtime asíncrono y con límite de
 /// tiempo: si el disco no responde, quedan como `Unverified` en vez de bloquear la app.
+///
+/// Las rutas de entregas `reported` (texto de un agente no confiable) nunca se tocan en disco:
+/// quedan `Unverified`. Así un agente no puede hacer que la app abra conexiones de red (SMB,
+/// autofs) disfrazando una ruta, sea cual sea la plataforma (HU-015).
 pub(super) async fn resolve_reference_status(deliveries: &mut [Delivery]) {
+    let checked = |d: &Delivery| d.source == DeliverySource::Manual;
     let targets: Vec<(ReferenceKind, String)> = deliveries
         .iter()
+        .filter(|d| checked(d))
         .flat_map(|d| d.references.iter().map(|r| (r.kind, r.value.clone())))
         .collect();
     if targets.is_empty() {
@@ -325,7 +344,7 @@ pub(super) async fn resolve_reference_status(deliveries: &mut [Delivery]) {
         return;
     };
     let mut statuses = statuses.into_iter();
-    for delivery in deliveries {
+    for delivery in deliveries.iter_mut().filter(|d| checked(d)) {
         for reference in &mut delivery.references {
             if let Some(status) = statuses.next() {
                 reference.status = status;

@@ -10,6 +10,9 @@ import type { LocalServiceStatus } from "../../contracts/generated/LocalServiceS
 import type { RevokeAgentCredentialInput } from "../../contracts/generated/RevokeAgentCredentialInput";
 import type { ReleaseClaimInput } from "../../contracts/generated/ReleaseClaimInput";
 import type { StoryClaim } from "../../contracts/generated/StoryClaim";
+import type { AgentChange } from "../../contracts/generated/AgentChange";
+import type { StoryActivity } from "../../contracts/generated/StoryActivity";
+import type { StoryActivityInput } from "../../contracts/generated/StoryActivityInput";
 import type { BackupInfo } from "../../contracts/generated/BackupInfo";
 import type { RestoreOutcome } from "../../contracts/generated/RestoreOutcome";
 import type { RestoreSource } from "../../contracts/generated/RestoreSource";
@@ -402,6 +405,46 @@ export function listActiveClaims(projectId: string): Promise<StoryClaim[]> {
 /** Libera un reclamo (solo personas). Idempotente: liberar uno ya cerrado no falla. */
 export function releaseClaim(input: ReleaseClaimInput): Promise<void> {
   return call("release_claim", { input });
+}
+
+// --- actividad reportada por agentes (HU-015) ---
+
+/**
+ * Actividad que los agentes reportaron en una historia (de la más reciente a la más antigua).
+ * Son afirmaciones del agente, no hechos observados por la app.
+ */
+export function listStoryActivity(
+  input: StoryActivityInput,
+): Promise<StoryActivity> {
+  return call("list_story_activity", { input });
+}
+
+/** Nombre del evento emitido por el host (`AGENT_CHANGE_EVENT` en commands/agent_reports.rs). */
+export const AGENT_CHANGE_EVENT = "agent-change";
+
+/** Comprueba la forma del aviso antes de usarlo: un evento mal formado se ignora. */
+export function isAgentChange(value: unknown): value is AgentChange {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.projectId === "string" &&
+    Array.isArray(candidate.storyIds) &&
+    candidate.storyIds.every((id) => typeof id === "string")
+  );
+}
+
+/**
+ * Escucha los avisos de cambios hechos por agentes (reclamar, renovar, bloqueo, subtarea,
+ * entrega). Solo sirven para recargar: el núcleo sigue siendo la autoridad. Devuelve la función
+ * para dejar de escuchar.
+ */
+export async function onAgentChange(
+  handler: (change: AgentChange) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => undefined;
+  return listen<unknown>(AGENT_CHANGE_EVENT, (event) => {
+    if (isAgentChange(event.payload)) handler(event.payload);
+  });
 }
 
 // --- errores ---

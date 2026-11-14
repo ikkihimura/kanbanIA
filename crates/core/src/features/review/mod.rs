@@ -25,6 +25,10 @@ pub use delivery::{
 pub use get::{AcceptanceEvent, AcceptanceEventKind, Blocker, StoryReview, get_story_review};
 pub use submit::{SubmitDeliveryInput, submit_delivery};
 
+pub(crate) use decisions::{validate_reason, write_blocker};
+pub(crate) use delivery::{validate_references, validate_summary};
+pub(crate) use submit::{NewDelivery, insert_delivery, move_to_review};
+
 use sqlx::SqliteConnection;
 
 use crate::error::CoreError;
@@ -32,14 +36,7 @@ use crate::features::columns::{Column, ColumnCategory, columns_of_project};
 use crate::features::team::load_agent;
 use crate::platform::actor::Actor;
 
-/// Caracteres de formato invisibles (bidi, ancho cero) que podrían disfrazar un texto ante
-/// quien revisa. Se rechazan en resúmenes y motivos.
-pub(crate) fn has_invisible_formatting(text: &str) -> bool {
-    text.chars().any(|c| {
-        matches!(c,
-            '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
-    })
-}
+pub(crate) use crate::platform::text::has_invisible_formatting;
 
 /// Origen de lo que registra un actor: persona → manual; agente existente → reportado.
 async fn source_of(

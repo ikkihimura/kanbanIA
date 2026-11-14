@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { StoryClaim } from "../../contracts/generated/StoryClaim";
 import { listActiveClaims, releaseClaim } from "../../shared/ipc/commands";
+import { useRefreshSignal } from "../../shared/ipc/useAgentChanges";
 import { useIpcResource } from "../../shared/ipc/useIpcResource";
 import { useMutation } from "../../shared/ipc/useMutation";
 import { formatDateTime, formatTime } from "../../shared/ui/format";
@@ -13,13 +14,20 @@ interface Props {
   storyId: string;
   /** Se liberó el reclamo: el núcleo también quitó la asignación del agente. */
   onReleased?: () => void;
+  /** Cambia cuando un agente reclama o renueva esta historia: vuelve a consultar. */
+  refreshSignal?: number;
 }
 
 /**
  * Reclamo vigente de la historia (HU-014). Los agentes reclaman y renuevan por MCP; aquí la
  * persona solo lo ve y, si hace falta, lo libera. Liberar también quita la asignación.
  */
-export function ClaimPanel({ projectId, storyId, onReleased }: Props) {
+export function ClaimPanel({
+  projectId,
+  storyId,
+  onReleased,
+  refreshSignal,
+}: Props) {
   const id = useId();
   const load = useCallback(() => listActiveClaims(projectId), [projectId]);
   const claims = useIpcResource(load);
@@ -40,9 +48,11 @@ export function ClaimPanel({ projectId, storyId, onReleased }: Props) {
   );
   const claim = active.find((c) => c.storyId === storyId);
 
-  function reload() {
-    claims.run(load, { keepData: true });
-  }
+  const { run } = claims;
+  const reload = useCallback(() => {
+    run(load, { keepData: true });
+  }, [run, load]);
+  useRefreshSignal(refreshSignal, reload);
 
   function openConfirm(current: StoryClaim) {
     releaser.reset();

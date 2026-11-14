@@ -7,12 +7,17 @@ use std::sync::Arc;
 
 use kanbania_core::error::{CoreError, ErrorCode, ErrorPayload};
 use kanbania_core::features::access::LocalServiceStatus;
+use kanbania_core::features::agent_activity::AgentChange;
 use kanbania_core::platform::storage::Store;
 use kanbania_local_service::{LocalService, StoreSource};
 use tauri::async_runtime::Mutex;
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::storage::StorageSlot;
+
+/// Evento que el host emite a la ventana principal cuando un agente cambia el tablero (carga:
+/// `AgentChange`). La UI recarga; el núcleo sigue siendo la autoridad.
+pub const AGENT_CHANGE_EVENT: &str = "agent-change";
 
 #[derive(Default)]
 pub struct ServiceSlot {
@@ -79,6 +84,13 @@ impl<R: Runtime> StoreSource for HostStore<R> {
                 None => Err(for_agents(CoreError::StorageLocked.to_payload(None))),
             }
         })
+    }
+
+    fn agent_changed(&self, change: AgentChange) {
+        // Solo un aviso para recargar: si la ventana no está, no pasa nada.
+        if let Err(error) = self.0.emit_to("main", AGENT_CHANGE_EVENT, change) {
+            eprintln!("[local-service] no se pudo avisar a la ventana: {error}");
+        }
     }
 }
 

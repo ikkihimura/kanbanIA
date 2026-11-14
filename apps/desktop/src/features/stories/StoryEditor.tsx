@@ -6,11 +6,13 @@ import {
   listColumns,
   restoreStory,
 } from "../../shared/ipc/commands";
+import { useAgentChanges } from "../../shared/ipc/useAgentChanges";
 import { useIpcResource } from "../../shared/ipc/useIpcResource";
 import { useMutation } from "../../shared/ipc/useMutation";
 import { formatDateTime } from "../../shared/ui/format";
 import { MarkdownPreview } from "../../shared/ui/MarkdownPreview";
 import { useUnsavedChangesGuard } from "../../shared/ui/useUnsavedChangesGuard";
+import { AgentActivityPanel } from "../agent_activity/AgentActivityPanel";
 import { ClaimPanel } from "../claims/ClaimPanel";
 import { RelationsPanel } from "../relations/RelationsPanel";
 import { ReviewPanel } from "../review/ReviewPanel";
@@ -70,6 +72,40 @@ export function StoryEditor({
     if (!dirtyRef.current) setFormEpoch((n) => n + 1);
     run(load, { keepData: true });
   }, [run, load]);
+
+  // Avisos de agentes (HU-015): reclamar, renovar, bloqueo, subtarea o entrega. Se recargan
+  // la historia y los paneles de solo lectura; el borrador nunca se pisa. El formulario solo
+  // se reconstruye si la revisión cambió y no hay cambios sin guardar (así no se pierde el
+  // foco por un aviso que no tocó la historia). Con borrador, guardar dará el conflicto.
+  const [agentEpoch, setAgentEpoch] = useState(0);
+  const agentSync = useRef(false);
+  const formRevision = useRef<number | null>(null);
+  useAgentChanges(projectId, (change) => {
+    if (!change.storyIds.includes(storyId)) return;
+    setAgentEpoch((n) => n + 1);
+    agentSync.current = true;
+    setLatest(null);
+    run(load, { keepData: true });
+  });
+  // Revisión con la que se montó el formulario (su `key` cambia al reconstruirlo).
+  const formKey = story ? `${story.id}-${String(formEpoch)}` : null;
+  const mountedFormKey = useRef<string | null>(null);
+  useEffect(() => {
+    if (story?.archivedAt !== null) {
+      mountedFormKey.current = null;
+      return;
+    }
+    if (mountedFormKey.current !== formKey) {
+      mountedFormKey.current = formKey;
+      formRevision.current = story.revision;
+    }
+  }, [story, formKey]);
+  useEffect(() => {
+    if (state.status !== "ready" || !agentSync.current) return;
+    agentSync.current = false;
+    if (!dirtyRef.current && state.data.revision !== formRevision.current)
+      setFormEpoch((n) => n + 1);
+  }, [state]);
 
   function leave(action: () => void) {
     if (dirty) setPendingLeave(() => action);
@@ -214,6 +250,7 @@ export function StoryEditor({
             projectId={projectId}
             storyId={story.id}
             readOnly={story.archivedAt !== null}
+            refreshSignal={agentEpoch}
             onOpenStory={(id) => {
               leave(() => {
                 onOpenStory(id);
@@ -228,9 +265,17 @@ export function StoryEditor({
             key={`claim-${story.id}-${String(claimEpoch)}`}
             projectId={projectId}
             storyId={story.id}
+            refreshSignal={agentEpoch}
             onReleased={() => {
               setRelationsEpoch((n) => n + 1);
             }}
+          />
+
+          <AgentActivityPanel
+            key={`activity-${story.id}`}
+            projectId={projectId}
+            storyId={story.id}
+            refreshSignal={agentEpoch}
           />
 
           <ReviewPanel
@@ -238,6 +283,7 @@ export function StoryEditor({
             story={story}
             locked={dirty}
             onStoryChanged={reload}
+            refreshSignal={agentEpoch}
           />
 
           {story.archivedAt ? (
@@ -245,7 +291,7 @@ export function StoryEditor({
           ) : (
             <section className="panel">
               <StoryForm
-                key={`${story.id}-${String(formEpoch)}`}
+                key={formKey}
                 story={story}
                 onSaved={setLatest}
                 onDirtyChange={setDirty}

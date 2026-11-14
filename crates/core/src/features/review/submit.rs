@@ -1,14 +1,15 @@
 use serde::{Deserialize, Serialize};
+use sqlx::SqliteConnection;
 use ts_rs::TS;
 
 use super::delivery::{
-    Delivery, ReferenceInput, deliveries_of_story, resolve_reference_status, validate_references,
-    validate_summary,
+    Delivery, DeliverySource, ReferenceInput, deliveries_of_story, resolve_reference_status,
+    validate_references, validate_summary,
 };
 use super::{first_column_of, source_of};
 use crate::error::CoreError;
 use crate::features::columns::{ColumnCategory, ensure_capacity};
-use crate::features::stories::{append_to_column, load_story};
+use crate::features::stories::{StorySummary, append_to_column, load_story};
 use crate::platform::actor::Actor;
 use crate::platform::idempotency::MutationKey;
 use crate::platform::storage::Store;
@@ -36,6 +37,8 @@ pub async fn submit_delivery(
     actor: &Actor,
     input: &SubmitDeliveryInput,
 ) -> Result<Delivery, CoreError> {
+    // Los agentes entregan con `agent_reports::submit_result`, que exige su reclamo vigente.
+    actor.require_human("registrar una entrega desde la app")?;
     let key = MutationKey::new(actor.receipt_key(), OPERATION, &input.request_id)?;
     let summary = validate_summary(&input.summary)?;
     let references = validate_references(&input.references)?;
@@ -72,57 +75,22 @@ pub async fn submit_delivery(
                     });
                 }
 
-                if input.send_to_review
-                    && let Some(review) =
-                        first_column_of(conn, &input.project_id, ColumnCategory::Review).await?
-                {
-                    let in_review = sqlx::query_scalar::<_, bool>(
-                        "SELECT category = 'review' FROM columns WHERE id = ?",
-                    )
-                    .bind(&story.column_id)
-                    .fetch_one(&mut *conn)
-                    .await?;
-                    if !in_review {
-                        ensure_capacity(conn, &review, 1).await?;
-                        append_to_column(conn, &story, &review.id).await?;
-                        sqlx::query("UPDATE stories SET revision = revision + 1 WHERE id = ?")
-                            .bind(&story.id)
-                            .execute(&mut *conn)
-                            .await?;
-                    }
+                if input.send_to_review {
+                    move_to_review(conn, &input.project_id, &story, true).await?;
                 }
-
-                let number: i64 = sqlx::query_scalar(
-                    "SELECT COALESCE(MAX(number), 0) + 1 FROM deliveries WHERE story_id = ?",
+                insert_delivery(
+                    conn,
+                    &NewDelivery {
+                        id: &id,
+                        project_id: &input.project_id,
+                        story_id: &story.id,
+                        source,
+                        agent_id: agent_id.as_deref(),
+                        summary: &summary,
+                        references: &references,
+                    },
                 )
-                .bind(&story.id)
-                .fetch_one(&mut *conn)
                 .await?;
-                sqlx::query(
-                    "INSERT INTO deliveries (id, project_id, story_id, number, source, agent_id, \
-                     summary) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                )
-                .bind(&id)
-                .bind(&input.project_id)
-                .bind(&story.id)
-                .bind(number)
-                .bind(source.as_str())
-                .bind(&agent_id)
-                .bind(&summary)
-                .execute(&mut *conn)
-                .await?;
-                for (position, reference) in (0_i64..).zip(&references) {
-                    sqlx::query(
-                        "INSERT INTO delivery_references (delivery_id, position, kind, value) \
-                         VALUES (?, ?, ?, ?)",
-                    )
-                    .bind(&id)
-                    .bind(position)
-                    .bind(reference.kind.as_str())
-                    .bind(&reference.value)
-                    .execute(&mut *conn)
-                    .await?;
-                }
                 Ok(id)
             })
         })
@@ -141,4 +109,88 @@ pub async fn submit_delivery(
     deliveries
         .pop()
         .ok_or(CoreError::NotFound { entity: "Entrega" })
+}
+
+/// Entrega a insertar dentro de una transacción.
+pub(crate) struct NewDelivery<'a> {
+    pub id: &'a str,
+    pub project_id: &'a str,
+    pub story_id: &'a str,
+    pub source: DeliverySource,
+    pub agent_id: Option<&'a str>,
+    pub summary: &'a str,
+    pub references: &'a [ReferenceInput],
+}
+
+/// Inserta la entrega y sus referencias (ya validadas). Devuelve su número (E-n).
+pub(crate) async fn insert_delivery(
+    conn: &mut SqliteConnection,
+    delivery: &NewDelivery<'_>,
+) -> Result<i64, CoreError> {
+    let number: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(number), 0) + 1 FROM deliveries WHERE story_id = ?",
+    )
+    .bind(delivery.story_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    sqlx::query(
+        "INSERT INTO deliveries (id, project_id, story_id, number, source, agent_id, \
+         summary) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(delivery.id)
+    .bind(delivery.project_id)
+    .bind(delivery.story_id)
+    .bind(number)
+    .bind(delivery.source.as_str())
+    .bind(delivery.agent_id)
+    .bind(delivery.summary)
+    .execute(&mut *conn)
+    .await?;
+    for (position, reference) in (0_i64..).zip(delivery.references) {
+        sqlx::query(
+            "INSERT INTO delivery_references (delivery_id, position, kind, value) \
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(delivery.id)
+        .bind(position)
+        .bind(reference.kind.as_str())
+        .bind(&reference.value)
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(number)
+}
+
+/// Mueve la tarjeta a la primera columna «revisión» si hay una y no está ya en ella.
+/// Con `strict`, una columna llena devuelve el error de WIP; sin él, la tarjeta se queda donde
+/// está (la entrega de un agente no se pierde por el WIP). Devuelve si la tarjeta está en
+/// revisión al terminar.
+pub(crate) async fn move_to_review(
+    conn: &mut SqliteConnection,
+    project_id: &str,
+    story: &StorySummary,
+    strict: bool,
+) -> Result<bool, CoreError> {
+    let Some(review) = first_column_of(conn, project_id, ColumnCategory::Review).await? else {
+        return Ok(false);
+    };
+    let in_review =
+        sqlx::query_scalar::<_, bool>("SELECT category = 'review' FROM columns WHERE id = ?")
+            .bind(&story.column_id)
+            .fetch_one(&mut *conn)
+            .await?;
+    if in_review {
+        return Ok(true);
+    }
+    match ensure_capacity(conn, &review, 1).await {
+        Ok(()) => {}
+        Err(CoreError::WipLimitExceeded { .. }) if !strict => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    append_to_column(conn, story, &review.id).await?;
+    sqlx::query("UPDATE stories SET revision = revision + 1 WHERE id = ?")
+        .bind(&story.id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(true)
 }

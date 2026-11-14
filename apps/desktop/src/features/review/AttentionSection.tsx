@@ -1,6 +1,7 @@
 import { useCallback, useEffect } from "react";
 import type { AttentionItem } from "../../contracts/generated/AttentionItem";
 import { listAttention } from "../../shared/ipc/commands";
+import { useAgentChanges } from "../../shared/ipc/useAgentChanges";
 import { useIpcResource } from "../../shared/ipc/useIpcResource";
 
 interface Props {
@@ -42,6 +43,10 @@ export function AttentionSection({ projectId, onOpenStory }: Props) {
       window.removeEventListener("focus", refresh);
     };
   }, [run, load]);
+  // Bloqueos y entregas reportados por agentes (HU-015) aparecen sin esperar.
+  useAgentChanges(projectId, () => {
+    run(load, { keepData: true });
+  });
   const items = state.status === "ready" ? state.data : [];
 
   return (

@@ -242,17 +242,17 @@ async fn agent_reports_delivery_and_blocker_but_cannot_decide() {
     let story = env.story("Integración", &["Pasa la prueba"]).await;
     let agent = env.agent().await;
 
-    let delivery = submit_delivery(
+    // Por la vía de la app, un agente no entrega ni bloquea: lo hace por `agent_reports`,
+    // con su reclamo vigente (HU-015).
+    let as_agent = submit_delivery(
         &env.store,
         &agent,
         &env.deliver(&story, "Hecho por el agente", false),
     )
     .await
-    .unwrap();
-    assert_eq!(delivery.source, DeliverySource::Reported);
-    assert_eq!(delivery.agent_name.as_deref(), Some("Robota"));
-
-    set_story_blocker(
+    .unwrap_err();
+    assert_eq!(as_agent.code(), ErrorCode::Forbidden);
+    let blocked = set_story_blocker(
         &env.store,
         &agent,
         &SetBlockerInput {
@@ -262,11 +262,15 @@ async fn agent_reports_delivery_and_blocker_but_cannot_decide() {
         },
     )
     .await
+    .unwrap_err();
+    assert_eq!(blocked.code(), ErrorCode::Forbidden);
+    let delivery = submit_delivery(
+        &env.store,
+        &Actor::Human,
+        &env.deliver(&story, "Hecho a mano", false),
+    )
+    .await
     .unwrap();
-    let review = get_story_review(&env.store, &env.project.id, &story.id)
-        .await
-        .unwrap();
-    assert_eq!(review.blocker.unwrap().source, DeliverySource::Reported);
 
     // Un agente no acepta, no reabre ni devuelve entregas.
     let accept = env
@@ -333,7 +337,7 @@ async fn invalid_deliveries_are_rejected() {
             .await
             .unwrap_err()
             .code(),
-        ErrorCode::NotFound
+        ErrorCode::Forbidden
     );
 }
 
@@ -753,7 +757,7 @@ async fn accepting_clears_the_blocker_so_it_does_not_return_on_reopen() {
 }
 
 #[tokio::test]
-async fn agents_cannot_hide_human_blockers_but_manage_their_own() {
+async fn agents_cannot_touch_blockers_through_the_app_path() {
     let env = Env::new().await;
     let story = env.story("Bloqueos", &["ok"]).await;
     let agent = env.agent().await;
@@ -765,6 +769,8 @@ async fn agents_cannot_hide_human_blockers_but_manage_their_own() {
     )
     .await
     .unwrap();
+    // Ni cambiarlo, ni quitarlo, ni poner uno propio: los agentes usan `report_blocker`
+    // (HU-015, `tests/agent_reports.rs`), que solo toca sus propios bloqueos.
     for change in [None, Some("Otro motivo")] {
         let error = set_story_blocker(&env.store, &agent, &blocker(&env, &story, change))
             .await
@@ -775,28 +781,6 @@ async fn agents_cannot_hide_human_blockers_but_manage_their_own() {
         .await
         .unwrap();
     assert_eq!(review.blocker.unwrap().reason, "Decisión humana");
-
-    // La persona lo quita; el agente reporta el suyo y puede quitarlo.
-    set_story_blocker(&env.store, &Actor::Human, &blocker(&env, &story, None))
-        .await
-        .unwrap();
-    set_story_blocker(
-        &env.store,
-        &agent,
-        &blocker(&env, &story, Some("Sin acceso")),
-    )
-    .await
-    .unwrap();
-    set_story_blocker(&env.store, &agent, &blocker(&env, &story, None))
-        .await
-        .unwrap();
-    assert!(
-        get_story_review(&env.store, &env.project.id, &story.id)
-            .await
-            .unwrap()
-            .blocker
-            .is_none()
-    );
 }
 
 #[tokio::test]
@@ -959,7 +943,7 @@ async fn attention_is_isolated_per_project_and_ignores_plain_edits_in_order() {
 }
 
 #[tokio::test]
-async fn invisible_formatting_and_network_paths_are_rejected_and_agents_get_no_disk_status() {
+async fn invisible_formatting_and_network_paths_are_rejected() {
     let env = Env::new().await;
     let story = env.story("Texto", &["ok"]).await;
 
@@ -982,17 +966,17 @@ async fn invisible_formatting_and_network_paths_are_rejected_and_agents_get_no_d
         .unwrap_err();
     assert_eq!(error.to_payload(None).field.as_deref(), Some("references"));
 
-    // El agente no recibe si una ruta existe: siempre «no verificada».
+    // Una ruta que entrega la persona se comprueba al revisar. Las de agentes nunca se tocan
+    // en disco (`tests/agent_reports.rs`).
     let dir = tempfile::tempdir().unwrap();
-    let agent = env.agent().await;
-    let mut probe = env.deliver(&story, "sondeo", false);
-    probe.references = vec![ReferenceInput {
+    let mut local = env.deliver(&story, "local", false);
+    local.references = vec![ReferenceInput {
         kind: ReferenceKind::Path,
         value: dir.path().to_str().unwrap().into(),
     }];
-    let delivery = submit_delivery(&env.store, &agent, &probe).await.unwrap();
-    assert_eq!(delivery.references[0].status, ReferenceStatus::Unverified);
-    // La persona sí lo ve al revisar.
+    submit_delivery(&env.store, &Actor::Human, &local)
+        .await
+        .unwrap();
     let review = get_story_review(&env.store, &env.project.id, &story.id)
         .await
         .unwrap();
@@ -1000,6 +984,22 @@ async fn invisible_formatting_and_network_paths_are_rejected_and_agents_get_no_d
         review.deliveries[0].references[0].status,
         ReferenceStatus::Accessible
     );
+    // Rutas de red disfrazadas con `.`/`..`.
+    for disguised in ["/tmp/../net/host/x", "/./net/host/x"] {
+        let mut path = env.deliver(&story, "ok", false);
+        path.references = vec![ReferenceInput {
+            kind: ReferenceKind::Path,
+            value: disguised.into(),
+        }];
+        assert_eq!(
+            submit_delivery(&env.store, &Actor::Human, &path)
+                .await
+                .unwrap_err()
+                .code(),
+            ErrorCode::Validation,
+            "{disguised}"
+        );
+    }
 }
 
 /// Soltar en una segunda columna «hecho» acepta y coloca en una sola transacción, con el WIP

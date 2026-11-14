@@ -20,6 +20,7 @@ import {
   moveStory,
   toUiError,
 } from "../../shared/ipc/commands";
+import { useAgentChanges } from "../../shared/ipc/useAgentChanges";
 import { useIpcResource } from "../../shared/ipc/useIpcResource";
 import { formatTime } from "../../shared/ui/format";
 import { useUnexpiredClaims } from "../claims/useUnexpiredClaims";
@@ -41,6 +42,8 @@ import {
 
 const NO_CARDS: StorySummary[] = [];
 const NO_CLAIMS: StoryClaim[] = [];
+
+const AGENT_NOTICE = "Tablero actualizado con cambios de un agente.";
 
 const KEY_MOVES: Record<string, KeyMove> = {
   ArrowLeft: "left",
@@ -119,9 +122,12 @@ export function Board({ projectId, onOpenStory }: Props) {
   // Tarjeta que debe tener el foco tras mover. Se mantiene hasta que llega una lista distinta
   // de `until` (la tarjeta puede remontarse en otra columna); `null` = basta con enfocarla una vez.
   // Es una ref: el efecto la consume al cambiar las tarjetas o cerrarse el diálogo.
-  const focus = useRef<{ id: string; until: StorySummary[] | null } | null>(
-    null,
-  );
+  // `ifLost` (avisos de agentes): solo si el foco se perdió, nunca se lo quita a otro control.
+  const focus = useRef<{
+    id: string;
+    until: StorySummary[] | null;
+    ifLost?: boolean;
+  } | null>(null);
   const setFocus = (next: { id: string; until: StorySummary[] | null }) => {
     focus.current = next;
   };
@@ -151,6 +157,14 @@ export function Board({ projectId, onOpenStory }: Props) {
     const target = focus.current;
     if (target === null || accepting !== null) return;
     const button = cardButtons.current.get(target.id);
+    if (target.ifLost) {
+      focus.current = null;
+      const lost =
+        document.activeElement === null ||
+        document.activeElement === document.body;
+      if (button && lost) button.focus();
+      return;
+    }
     if (button) {
       button.focus();
       if (target.until !== base) focus.current = null;
@@ -167,6 +181,30 @@ export function Board({ projectId, onOpenStory }: Props) {
     reloadStories();
     columns.run(loadColumns, { keepData: true });
   }, [reloadStories, columns, loadColumns]);
+
+  // Avisos de agentes (HU-015): tarjetas nuevas, columna, bloqueo y reclamos. Filtros y carriles
+  // se conservan. Durante un movimiento la recarga espera a que termine: llegar antes
+  // desharía la vista optimista y permitiría un segundo movimiento a la vez.
+  const moving = useRef(false);
+  const agentReloadPending = useRef(false);
+  const agentReload = useCallback(() => {
+    // Si una tarjeta tiene el foco, lo recupera aunque cambie de columna (se vuelve a montar).
+    const active = document.activeElement;
+    for (const [storyId, button] of cardButtons.current) {
+      if (button === active)
+        focus.current = { id: storyId, until: null, ifLost: true };
+    }
+    reloadStories();
+    // Aviso discreto para lectores de pantalla: como mucho uno por ráfaga (useAgentChanges
+    // agrupa los avisos). Un error visible de un movimiento no se tapa.
+    setMessage((current) =>
+      current?.error ? current : { text: AGENT_NOTICE, error: false },
+    );
+  }, [reloadStories]);
+  useAgentChanges(projectId, () => {
+    if (moving.current) agentReloadPending.current = true;
+    else agentReload();
+  });
 
   if (columns.state.status === "error" || stories.state.status === "error") {
     const text =
@@ -229,6 +267,7 @@ export function Board({ projectId, onOpenStory }: Props) {
       cards: applyMove(cards, storyId, columnId, index),
     });
     if (keepFocus) setFocus({ id: storyId, until: loaded });
+    moving.current = true;
     try {
       const saved = await moveStory({
         projectId,
@@ -262,6 +301,12 @@ export function Board({ projectId, onOpenStory }: Props) {
         error: true,
       });
       if (reloaded) reload();
+    } finally {
+      moving.current = false;
+      if (agentReloadPending.current) {
+        agentReloadPending.current = false;
+        agentReload();
+      }
     }
   }
 

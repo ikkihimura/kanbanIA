@@ -3,6 +3,7 @@ use ts_rs::TS;
 
 use super::story::{ENTITY, StorySummary, count_in_column, load_story, not_archived};
 use crate::error::CoreError;
+use crate::features::claims::{EndReason, close_story_claims};
 use crate::features::columns::{ColumnCategory, columns_of_project, ensure_capacity, load_column};
 use crate::platform::storage::Store;
 
@@ -35,13 +36,15 @@ pub async fn archive_story(
     store: &Store,
     input: &ArchiveStoryInput,
 ) -> Result<StorySummary, CoreError> {
-    let input = input.clone();
+    let (input, clock) = (input.clone(), store.clone());
     store
         .write(move |conn| {
             Box::pin(async move {
                 let story =
                     current(conn, &input.project_id, &input.id, input.expected_revision).await?;
                 not_archived(&story)?;
+                // Archivada: ya no hay trabajo que reservar (HU-015).
+                close_story_claims(conn, &input.id, EndReason::Closed, clock.now_ms()).await?;
                 let position = story.position.unwrap_or_default();
 
                 sqlx::query(

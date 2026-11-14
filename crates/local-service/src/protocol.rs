@@ -6,7 +6,11 @@ use sha2::{Digest, Sha256};
 use crate::descriptor::{Secret, hex};
 
 /// Versión de la API (prefijo de rutas `/v1`). Tipos servidos: `SessionInfo`, `ReadyPage`,
-/// `StoryContext` y `StoryClaim`; cuerpos: `ClaimStoryInput` y `{requestId}` al renovar. v1 no se congela hasta publicar M2: hasta entonces, un cambio incompatible
+/// `StoryContext`, `StoryClaim`, `ReportedBlocker`, `CreatedSubtask` y `SubmittedResult`;
+/// cuerpos: `ClaimStoryInput`, `{requestId}` al renovar y, sobre `/v1/claims/{id}/…`,
+/// `{requestId, reason?}` (bloqueo), `{requestId, title, description?}` (subtarea) y
+/// `{requestId, summary, references}` (resultado). v1 no se congela hasta publicar M2: hasta
+/// entonces, un cambio incompatible
 /// se hace en el mismo commit en servidor, cliente y `kanbania-mcp`. Después, retirar o
 /// renombrar una ruta o un campo exige subirla.
 pub const API_VERSION: u32 = 1;

@@ -383,4 +383,134 @@ mod tests {
 
         assert!(!data.path().join(BACKUP_DIR).exists());
     }
+
+    /// HU-015: la 0010 reconstruye `story_claims`. Una base en la 0009 con reclamos abiertos y
+    /// cerrados conserva sus filas y el índice de un solo reclamo abierto por historia.
+    #[tokio::test]
+    async fn migration_0010_keeps_claims_and_their_unique_index() {
+        use crate::features::access::{CreateAgentCredentialInput, create_agent_credential};
+        use crate::features::projects::{CreateProjectInput, create_project};
+        use crate::features::stories::{CreateStoryInput, create_story};
+        use crate::features::team::{AgentFields, AvatarSpec, CreateAgentInput, create_agent};
+        use crate::platform::actor::Actor;
+
+        let migrations = tempfile::tempdir().unwrap();
+        let real = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        for entry in std::fs::read_dir(real).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().into_string().unwrap();
+            if name.as_str() < "0010" {
+                std::fs::copy(entry.path(), migrations.path().join(&name)).unwrap();
+            }
+        }
+        let v9 = Migrator::new(migrations.path()).await.unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let store = Store::open_with(data.path(), &v9).await.unwrap();
+        assert_eq!(store.schema_version().await.unwrap(), 9);
+        let project = create_project(
+            &store,
+            "ui",
+            &CreateProjectInput {
+                request_id: "p".into(),
+                name: "P".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let agent = create_agent(
+            &store,
+            "ui",
+            &CreateAgentInput {
+                request_id: "a".into(),
+                fields: AgentFields {
+                    name: "Bot".into(),
+                    role: String::new(),
+                    provider: String::new(),
+                    model: String::new(),
+                    capabilities: vec![],
+                    avatar: AvatarSpec::DEFAULT_AGENT,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let credential = create_agent_credential(
+            &store,
+            &Actor::Human,
+            &CreateAgentCredentialInput {
+                project_id: project.id.clone(),
+                agent_id: agent.id.clone(),
+            },
+        )
+        .await
+        .unwrap()
+        .credential;
+        let story = create_story(
+            &store,
+            "ui",
+            &CreateStoryInput {
+                request_id: "s".into(),
+                project_id: project.id.clone(),
+                title: "S".into(),
+                column_id: None,
+                priority: None,
+            },
+        )
+        .await
+        .unwrap();
+        for (id, ended) in [("k-cerrado", Some(5_i64)), ("k-abierto", None)] {
+            sqlx::query(
+                "INSERT INTO story_claims (id, project_id, story_id, agent_id, credential_id, \
+                 claimed_at_ms, expires_at_ms, ended_at_ms, end_reason) \
+                 VALUES (?, ?, ?, ?, ?, 1, 10, ?, ?)",
+            )
+            .bind(id)
+            .bind(&project.id)
+            .bind(&story.id)
+            .bind(&agent.id)
+            .bind(&credential.id)
+            .bind(ended)
+            .bind(ended.map(|_| "released"))
+            .execute(store.reader())
+            .await
+            .unwrap();
+        }
+        store.close().await;
+        drop(store);
+
+        let store = Store::open(data.path()).await.unwrap();
+        assert_eq!(store.schema_version().await.unwrap(), latest());
+        let rows: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT id, end_reason FROM story_claims ORDER BY id")
+                .fetch_all(store.reader())
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("k-abierto".to_owned(), None),
+                ("k-cerrado".to_owned(), Some("released".to_owned()))
+            ]
+        );
+        // El índice único sigue: otro reclamo abierto de la misma historia falla.
+        let duplicate = sqlx::query(
+            "INSERT INTO story_claims (id, project_id, story_id, agent_id, credential_id, \
+             claimed_at_ms, expires_at_ms) VALUES ('k-otro', ?, ?, ?, ?, 1, 10)",
+        )
+        .bind(&project.id)
+        .bind(&story.id)
+        .bind(&agent.id)
+        .bind(&credential.id)
+        .execute(store.reader())
+        .await;
+        assert!(duplicate.is_err());
+        // Y los motivos nuevos son válidos.
+        sqlx::query(
+            "UPDATE story_claims SET ended_at_ms = 6, end_reason = 'delivered' \
+             WHERE id = 'k-abierto'",
+        )
+        .execute(store.reader())
+        .await
+        .unwrap();
+    }
 }

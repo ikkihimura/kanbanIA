@@ -9,6 +9,7 @@ import {
   listStories,
   newRequestId,
 } from "../../shared/ipc/commands";
+import { useAgentChanges } from "../../shared/ipc/useAgentChanges";
 import { useIpcResource } from "../../shared/ipc/useIpcResource";
 import { useMutation } from "../../shared/ipc/useMutation";
 import { FieldError } from "../../shared/ui/FieldError";
@@ -36,6 +37,12 @@ export function StoriesSection({ projectId, onOpenStory }: Props) {
   const [priority, setPriority] = useState<Priority>("medium");
   const requestId = useRef(newRequestId());
   const create = useMutation(createStory);
+  // Subtareas, columnas y bloqueos que cambian los agentes (HU-015). Solo la lista: el
+  // formulario de nueva historia conserva lo escrito.
+  const { run: runStories } = stories;
+  useAgentChanges(projectId, () => {
+    runStories(loadStories, { keepData: true });
+  });
 
   async function handleCreate() {
     const result = await create.mutate({

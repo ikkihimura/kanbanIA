@@ -13,6 +13,7 @@ import {
   setStoryEpic,
   setStoryParent,
 } from "../../shared/ipc/commands";
+import { useRefreshSignal } from "../../shared/ipc/useAgentChanges";
 import { useIpcResource } from "../../shared/ipc/useIpcResource";
 import { useMutation } from "../../shared/ipc/useMutation";
 import { PixelAvatar } from "../team/PixelAvatar";
@@ -31,6 +32,8 @@ interface Props {
   onOpenStory: (storyId: string) => void;
   /** Cambió el agente asignado: el núcleo cierra el reclamo vigente de otro agente (HU-014). */
   onAgentChanged?: () => void;
+  /** Cambia cuando un agente crea una subtarea o reclama la historia: vuelve a consultar. */
+  refreshSignal?: number;
 }
 
 /**
@@ -43,6 +46,7 @@ export function RelationsPanel({
   readOnly,
   onOpenStory,
   onAgentChanged,
+  refreshSignal,
 }: Props) {
   const id = useId();
   const loadRelations = useCallback(
@@ -61,6 +65,14 @@ export function RelationsPanel({
   const [prerequisite, setPrerequisite] = useState("");
   const [announcement, setAnnouncement] = useState("");
   const titleRef = useRef<HTMLHeadingElement>(null);
+  const { run: runRelations } = relations;
+  const { run: runStories } = stories;
+  const refresh = useCallback(() => {
+    runRelations(loadRelations, { keepData: true });
+    // La lista de historias alimenta los selectores (p. ej. una subtarea nueva).
+    runStories(loadStories, { keepData: true });
+  }, [runRelations, runStories, loadRelations, loadStories]);
+  useRefreshSignal(refreshSignal, refresh);
   const addSelectRef = useRef<HTMLSelectElement>(null);
 
   // Todas las mutaciones devuelven las relaciones actualizadas.

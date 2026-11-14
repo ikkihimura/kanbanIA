@@ -1,5 +1,7 @@
 import { useCallback, useId, useRef, useState } from "react";
 import type { Delivery } from "../../contracts/generated/Delivery";
+import type { DeliveryReference } from "../../contracts/generated/DeliveryReference";
+import type { DeliverySource } from "../../contracts/generated/DeliverySource";
 import type { ReferenceInput } from "../../contracts/generated/ReferenceInput";
 import type { ReferenceStatus } from "../../contracts/generated/ReferenceStatus";
 import type { StoryDetail } from "../../contracts/generated/StoryDetail";
@@ -15,16 +17,44 @@ import {
   submitDelivery,
   type UiError,
 } from "../../shared/ipc/commands";
+import { useRefreshSignal } from "../../shared/ipc/useAgentChanges";
 import { useIpcResource } from "../../shared/ipc/useIpcResource";
 import { useMutation } from "../../shared/ipc/useMutation";
 import { formatDateTime } from "../../shared/ui/format";
 
-const REFERENCE_STATUS: Record<ReferenceStatus, string> = {
+const REFERENCE_STATUS: Record<
+  Exclude<ReferenceStatus, "unverified">,
+  string
+> = {
   accessible: "Accesible",
   missing: "No encontrada",
   inaccessible: "Sin acceso",
-  unverified: "URL no verificada",
 };
+
+/**
+ * Texto y tono de una referencia. «No comprobada» no es un error ni un éxito: las URL nunca se
+ * visitan y las rutas reportadas por agentes nunca se miran en disco (son su afirmación).
+ */
+function referenceBadge(
+  reference: DeliveryReference,
+  source: DeliverySource,
+): { text: string; className: string } {
+  if (reference.status === "unverified") {
+    const what =
+      reference.kind === "path" ? "Ruta no comprobada" : "URL no verificada";
+    return {
+      text: source === "reported" ? `${what} (reportada por el agente)` : what,
+      className: "badge",
+    };
+  }
+  return {
+    text: REFERENCE_STATUS[reference.status],
+    className:
+      reference.status === "accessible"
+        ? "badge badge--ok"
+        : "badge badge--warn",
+  };
+}
 
 const DELIVERY_STATUS: Record<Delivery["status"], string> = {
   pending: "Pendiente de revisión",
@@ -41,10 +71,20 @@ interface Props {
   locked: boolean;
   /** La historia cambió (columna, aceptación…): el editor debe recargarla. */
   onStoryChanged: () => void;
+  /**
+   * Cambia cuando un agente reporta un bloqueo o una entrega: vuelve a consultar sin desmontar
+   * los formularios abiertos.
+   */
+  refreshSignal?: number;
 }
 
 /** Bloqueo, entregas, aceptación humana, reapertura e historial. */
-export function ReviewPanel({ story, locked, onStoryChanged }: Props) {
+export function ReviewPanel({
+  story,
+  locked,
+  onStoryChanged,
+  refreshSignal,
+}: Props) {
   const id = useId();
   const load = useCallback(
     () => getStoryReview(story.projectId, story.id),
@@ -54,6 +94,10 @@ export function ReviewPanel({ story, locked, onStoryChanged }: Props) {
   const [message, setMessage] = useState("");
   const archived = story.archivedAt !== null;
   const accepted = story.acceptedAt !== null;
+  const refresh = useCallback(() => {
+    run(load, { keepData: true });
+  }, [run, load]);
+  useRefreshSignal(refreshSignal, refresh);
 
   const changed = useCallback(
     (text: string, storyChanged: boolean) => {
@@ -681,16 +725,15 @@ function DeliveryItem({
       )}
       {delivery.references.length > 0 && (
         <ul className="relations__list">
-          {delivery.references.map((reference, index) => (
-            <li key={index} className="relations__item">
-              <code className="repo__path">{reference.value}</code>
-              <span
-                className={`badge ${reference.status === "accessible" ? "badge--ok" : "badge--warn"}`}
-              >
-                {REFERENCE_STATUS[reference.status]}
-              </span>
-            </li>
-          ))}
+          {delivery.references.map((reference, index) => {
+            const badge = referenceBadge(reference, delivery.source);
+            return (
+              <li key={index} className="relations__item">
+                <code className="repo__path">{reference.value}</code>
+                <span className={badge.className}>{badge.text}</span>
+              </li>
+            );
+          })}
         </ul>
       )}
       {delivery.status === "pending" &&

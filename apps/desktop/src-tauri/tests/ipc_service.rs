@@ -289,3 +289,99 @@ fn the_app_sees_agent_claims_and_a_person_releases_them() {
     assert_eq!(error["code"], "not_found");
     shut_down(&app);
 }
+
+#[test]
+fn agent_reports_reach_the_app_as_events_and_reported_activity() {
+    use std::sync::{Arc, Mutex};
+    use tauri::Listener;
+
+    let data = tempfile::tempdir().unwrap();
+    let app = launch(data.path());
+    let (project, created) = project_with_credential(&app, "Uno");
+    let (other, _) = project_with_credential(&app, "Dos");
+    let story = invoke(
+        &app,
+        "create_story",
+        json!({ "input": { "requestId": "s-1", "projectId": project["id"], "title": "API" } }),
+    )
+    .unwrap();
+    let events: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let sink = events.clone();
+    app.listen_any("agent-change", move |event| {
+        sink.lock()
+            .unwrap()
+            .push(serde_json::from_str(event.payload()).unwrap());
+    });
+    let client = ServiceClient::new(data.path(), created["token"].as_str().unwrap().to_owned());
+
+    let claim = block_on(client.post_json(
+        "/v1/claims",
+        &json!({ "requestId": "c-1", "storyId": story["id"] }),
+    ))
+    .unwrap();
+    let claim_id = claim["claimId"].as_str().unwrap();
+    block_on(client.post_json(
+        &format!("/v1/claims/{claim_id}/blocker"),
+        &json!({ "requestId": "b-1", "reason": "Falta la clave" }),
+    ))
+    .unwrap();
+    let delivered = block_on(client.post_json(
+        &format!("/v1/claims/{claim_id}/result"),
+        &json!({ "requestId": "r-1", "summary": "Hecho", "references": [] }),
+    ))
+    .unwrap();
+    assert_eq!(delivered["deliveryNumber"], 1);
+
+    // Un aviso por operación confirmada, con el proyecto de la sesión y la historia.
+    let seen = events.lock().unwrap().clone();
+    assert_eq!(seen.len(), 3, "{seen:?}");
+    for event in &seen {
+        assert_eq!(event["projectId"], project["id"]);
+        assert_eq!(event["storyIds"], json!([story["id"]]));
+    }
+    // Una operación fallida (reclamo ya cerrado) no avisa.
+    assert!(
+        block_on(client.post_json(
+            &format!("/v1/claims/{claim_id}/blocker"),
+            &json!({ "requestId": "b-2", "reason": "Otra" }),
+        ))
+        .is_err()
+    );
+    assert_eq!(events.lock().unwrap().len(), 3);
+
+    // La app lee la actividad reportada, la más reciente primero.
+    let activity = invoke(
+        &app,
+        "list_story_activity",
+        json!({ "input": { "projectId": project["id"], "storyId": story["id"] } }),
+    )
+    .unwrap();
+    let kinds: Vec<&str> = activity["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    // Entregar quita el bloqueo que reportó el propio agente.
+    assert_eq!(
+        kinds,
+        [
+            "delivered",
+            "blocker_cleared",
+            "blocker_reported",
+            "claimed"
+        ]
+    );
+    assert_eq!(activity["entries"][0]["detail"], "E1");
+    assert_eq!(activity["entries"][0]["agent"]["agentName"], "Robo Uno");
+    assert_eq!(activity["lastReportedAt"], activity["entries"][0]["at"]);
+    // Con otro proyecto, la historia no existe.
+    let error = invoke(
+        &app,
+        "list_story_activity",
+        json!({ "input": { "projectId": other["id"], "storyId": story["id"] } }),
+    )
+    .unwrap_err();
+    assert_eq!(error["code"], "not_found");
+    shut_down(&app);
+}

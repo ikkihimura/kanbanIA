@@ -24,3 +24,4 @@ pub use set_parent::{SetStoryParentInput, set_story_parent};
 
 pub(crate) use dependencies::MAX_PREREQUISITES;
 pub(crate) use graph::{is_self_or_ancestor, reaches_through_dependencies};
+pub(crate) use set_parent::link_new_child;

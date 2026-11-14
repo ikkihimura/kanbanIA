@@ -70,3 +70,22 @@ pub async fn set_story_parent(
         })
         .await
 }
+
+/// Enlaza como subtarea de `parent_id` una historia recién creada en la misma transacción (no
+/// puede formar ciclo ni tener padre). Toda regla nueva de parentesco va aquí también.
+pub(crate) async fn link_new_child(
+    conn: &mut sqlx::SqliteConnection,
+    project_id: &str,
+    child_id: &str,
+    parent_id: &str,
+) -> Result<(), CoreError> {
+    let parent = require(conn, project_id, parent_id).await?;
+    require_not_archived(&parent, "parentId")?;
+    sqlx::query("INSERT INTO story_parents (story_id, project_id, parent_id) VALUES (?, ?, ?)")
+        .bind(child_id)
+        .bind(project_id)
+        .bind(parent_id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}

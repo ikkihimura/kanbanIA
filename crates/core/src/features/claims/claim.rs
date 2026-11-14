@@ -4,6 +4,7 @@ use sqlx::SqliteConnection;
 use super::story_claim::{CLAIM_DURATION_MS, MAX_OPEN_CLAIMS, StoryClaim, load_claim, validate_id};
 use crate::error::CoreError;
 use crate::features::access::AgentSession;
+use crate::features::agent_activity::{ActivityKind, record_activity};
 use crate::features::agent_work::ready_for_agent;
 use crate::platform::storage::Store;
 
@@ -104,6 +105,18 @@ async fn claim_in_tx(
     // Otro proyecto o inexistente: sin distinguir.
     let story_id = story_id.ok_or(CoreError::NotFound { entity: "Historia" })?;
 
+    // La credencial se autenticó antes de la transacción: si se revocó entre medias, no se
+    // crea un reclamo que nadie cerraría (revocar ya cerró los suyos).
+    let revoked: bool =
+        sqlx::query_scalar("SELECT revoked_at IS NOT NULL FROM agent_credentials WHERE id = ?")
+            .bind(session.credential_id())
+            .fetch_optional(&mut *conn)
+            .await?
+            .unwrap_or(true);
+    if revoked {
+        return Err(CoreError::Unauthorized);
+    }
+
     close_expired(conn, &story_id, now).await?;
 
     let open: Option<(String, String)> = sqlx::query_as(
@@ -174,6 +187,7 @@ async fn claim_in_tx(
     .bind(session.agent_id())
     .execute(&mut *conn)
     .await?;
+    record_activity(conn, session, &story_id, ActivityKind::Claimed, None, now).await?;
 
     load_claim(conn, &claim_id).await
 }

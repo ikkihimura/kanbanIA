@@ -13,6 +13,7 @@ use kanbania_core::features::access::{
     CreateAgentCredentialInput, RevokeAgentCredentialInput, create_agent_credential,
     revoke_agent_credential,
 };
+use kanbania_core::features::agent_activity::AgentChange;
 use kanbania_core::features::claims::{ReleaseClaimInput, release_claim};
 use kanbania_core::features::projects::{CreateProjectInput, Project, create_project};
 use kanbania_core::features::stories::{CreateStoryInput, StorySummary, create_story};
@@ -792,5 +793,374 @@ async fn an_agent_claims_and_renews_only_within_its_session() {
         .await
         .unwrap_err();
     assert_eq!(api_code(&error), (401, "unauthorized"));
+    service.stop().await;
+}
+
+// ---------- HU-015: bloqueos, subtareas y entregas por HTTP ----------
+
+/// Almacén fijo que además registra los avisos `agent_changed`.
+struct Recording {
+    store: Store,
+    changes: std::sync::Mutex<Vec<AgentChange>>,
+}
+
+impl Recording {
+    fn new(store: &Store) -> Arc<Self> {
+        Arc::new(Self {
+            store: store.clone(),
+            changes: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Avisos recibidos desde la última llamada.
+    fn take(&self) -> Vec<AgentChange> {
+        std::mem::take(&mut *self.changes.lock().unwrap())
+    }
+}
+
+impl StoreSource for Recording {
+    fn store(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Store, kanbania_core::error::ErrorPayload>>
+                + Send
+                + '_,
+        >,
+    > {
+        let store = self.store.clone();
+        Box::pin(async move { Ok(store) })
+    }
+
+    fn agent_changed(&self, change: AgentChange) {
+        self.changes.lock().unwrap().push(change);
+    }
+}
+
+async fn claim_on(client: &ServiceClient, story_id: &str) -> String {
+    let claim = client
+        .post_json(
+            "/v1/claims",
+            &serde_json::json!({ "requestId": rid(), "storyId": story_id }),
+        )
+        .await
+        .unwrap();
+    claim["claimId"].as_str().unwrap().to_owned()
+}
+
+/// Cuerpos válidos de las tres rutas para un reclamo.
+fn report_bodies(claim_id: &str) -> [(String, Value); 3] {
+    [
+        (
+            format!("/v1/claims/{claim_id}/blocker"),
+            serde_json::json!({ "requestId": rid(), "reason": "Espera" }),
+        ),
+        (
+            format!("/v1/claims/{claim_id}/subtasks"),
+            serde_json::json!({ "requestId": rid(), "title": "Hija" }),
+        ),
+        (
+            format!("/v1/claims/{claim_id}/result"),
+            serde_json::json!({ "requestId": rid(), "summary": "Hecho" }),
+        ),
+    ]
+}
+
+/// POST en crudo con cuerpo `chunked` (sin `Content-Length`) troceado.
+async fn raw_chunked_post(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8]) -> u16 {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let mut request = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\
+         Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n"
+    );
+    for (k, v) in headers {
+        request.push_str(&format!("{k}: {v}\r\n"));
+    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes()).await.unwrap();
+    for chunk in body.chunks(8 * 1024) {
+        let mut piece = format!("{:x}\r\n", chunk.len()).into_bytes();
+        piece.extend_from_slice(chunk);
+        piece.extend_from_slice(b"\r\n");
+        // El servidor puede cortar en cuanto supera el límite.
+        if stream.write_all(&piece).await.is_err() {
+            break;
+        }
+    }
+    let _ = stream.write_all(b"0\r\n\r\n").await;
+    let mut response = Vec::new();
+    let _ = stream.read_to_end(&mut response).await;
+    let text = String::from_utf8_lossy(&response);
+    text[9..12].parse().unwrap()
+}
+
+#[tokio::test]
+async fn an_agent_reports_blockers_subtasks_and_results_and_the_host_is_told() {
+    let w = world().await;
+    let source = Recording::new(&w.store);
+    let service = LocalService::start(w.data.path(), source.clone())
+        .await
+        .unwrap();
+    let client = ServiceClient::new(w.data.path(), w.token.clone());
+    let claim_id = claim_on(&client, &w.story.id).await;
+    let changed = |ids: Vec<&str>| AgentChange {
+        project_id: w.mine.id.clone(),
+        story_ids: ids.into_iter().map(str::to_owned).collect(),
+    };
+    assert_eq!(source.take(), [changed(vec![&w.story.id])], "reclamar");
+
+    // Bloqueo.
+    let path = format!("/v1/claims/{claim_id}/blocker");
+    let body = serde_json::json!({ "requestId": rid(), "reason": "Falta acceso" });
+    let blocked = client.post_json(&path, &body).await.unwrap();
+    assert_eq!(blocked["blocked"], true);
+    assert_eq!(blocked["reason"], "Falta acceso");
+    assert_eq!(blocked["storyNumber"], w.story.number);
+    assert_eq!(source.take(), [changed(vec![&w.story.id])]);
+    // Reintento idéntico → la misma respuesta; otro motivo con el mismo id → conflicto, sin aviso.
+    assert_eq!(client.post_json(&path, &body).await.unwrap(), blocked);
+    source.take();
+    let reused = serde_json::json!({ "requestId": body["requestId"], "reason": "Otro" });
+    let error = client.post_json(&path, &reused).await.unwrap_err();
+    assert_eq!(api_code(&error), (409, "idempotency_conflict"));
+    assert!(source.take().is_empty(), "un fallo no avisa");
+    // Quitar el bloqueo propio: `reason` nulo u omitido.
+    for body in [
+        serde_json::json!({ "requestId": rid(), "reason": null }),
+        serde_json::json!({ "requestId": rid() }),
+    ] {
+        let cleared = client.post_json(&path, &body).await.unwrap();
+        assert_eq!(cleared["blocked"], false, "{body}");
+    }
+    source.take();
+
+    // Subtarea: avisa de la historia reclamada y de la nueva.
+    let path = format!("/v1/claims/{claim_id}/subtasks");
+    let body = serde_json::json!({ "requestId": rid(), "title": "Hija", "description": "Texto" });
+    let created = client.post_json(&path, &body).await.unwrap();
+    assert_eq!(created["parentStoryId"], w.story.id.as_str());
+    assert_eq!(created["title"], "Hija");
+    let child = created["storyId"].as_str().unwrap();
+    let notice = source.take();
+    assert_eq!(notice.len(), 1);
+    assert_eq!(notice[0].project_id, w.mine.id);
+    let mut ids = notice[0].story_ids.clone();
+    ids.sort();
+    let mut expected = vec![w.story.id.clone(), child.to_owned()];
+    expected.sort();
+    assert_eq!(ids, expected);
+    assert_eq!(client.post_json(&path, &body).await.unwrap(), created);
+    source.take();
+    let invalid = serde_json::json!({ "requestId": rid(), "title": "   " });
+    let error = client.post_json(&path, &invalid).await.unwrap_err();
+    assert_eq!(api_code(&error), (400, "validation"));
+    assert!(source.take().is_empty());
+
+    // Entrega: pendiente de revisión, cierra el reclamo.
+    let path = format!("/v1/claims/{claim_id}/result");
+    let body = serde_json::json!({
+        "requestId": rid(),
+        "summary": "Hecho",
+        "references": [{ "kind": "url", "value": "https://example.com/pr/1" }],
+    });
+    let submitted = client.post_json(&path, &body).await.unwrap();
+    assert_eq!(submitted["deliveryNumber"], 1);
+    assert_eq!(submitted["storyId"], w.story.id.as_str());
+    assert!(submitted["deliveryId"].is_string() && submitted["inReview"].is_boolean());
+    assert_eq!(source.take(), [changed(vec![&w.story.id])]);
+    // Reintento tras cerrar el reclamo: la entrega original, no una segunda.
+    assert_eq!(client.post_json(&path, &body).await.unwrap(), submitted);
+    source.take();
+    // El reclamo ya no sirve: ninguna de las rutas escribe ni avisa.
+    for (path, body) in report_bodies(&claim_id) {
+        let error = client.post_json(&path, &body).await.unwrap_err();
+        assert_eq!(api_code(&error), (409, "claim_ended"), "{path}");
+    }
+    assert!(source.take().is_empty());
+
+    service.stop().await;
+}
+
+#[tokio::test]
+async fn reports_only_work_on_the_agents_own_claim_in_its_project() {
+    let w = world().await;
+    let source = Recording::new(&w.store);
+    let service = LocalService::start(w.data.path(), source.clone())
+        .await
+        .unwrap();
+    let client = ServiceClient::new(w.data.path(), w.token.clone());
+
+    // Reclamo del mismo agente en otro proyecto (otra credencial).
+    let foreign = create_agent_credential(
+        &w.store,
+        &Actor::Human,
+        &CreateAgentCredentialInput {
+            project_id: w.other.id.clone(),
+            agent_id: w.agent.id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let foreign_client = ServiceClient::new(w.data.path(), foreign.token);
+    let foreign_claim = claim_on(&foreign_client, &w.foreign_story.id).await;
+    // Reclamo de otro agente del mismo proyecto.
+    let second = second_agent_client(&w).await;
+    let theirs = story(&w.store, &w.mine, "Suya").await;
+    let their_claim = claim_on(&second, &theirs.id).await;
+    source.take();
+
+    for claim_id in [&foreign_claim, &their_claim, &"0".repeat(36)] {
+        for (path, body) in report_bodies(claim_id) {
+            let error = client.post_json(&path, &body).await.unwrap_err();
+            assert_eq!(api_code(&error), (404, "not_found"), "{path}");
+        }
+    }
+    // Id demasiado largo: también «no encontrado», sin llegar al núcleo.
+    for (path, body) in report_bodies(&"a".repeat(65)) {
+        let error = client.post_json(&path, &body).await.unwrap_err();
+        assert_eq!(api_code(&error), (404, "not_found"), "{path}");
+    }
+    assert!(source.take().is_empty(), "nada cambió");
+    // Ni el proyecto ajeno ni la historia del otro agente cambiaron.
+    for (project, story) in [(&w.other.id, &w.foreign_story.id), (&w.mine.id, &theirs.id)] {
+        let review = kanbania_core::features::review::get_story_review(&w.store, project, story)
+            .await
+            .unwrap();
+        assert!(review.blocker.is_none() && review.deliveries.is_empty());
+    }
+
+    // El agente y el proyecto salen de la sesión: campos así (o desconocidos) → 400.
+    let mine = claim_on(&client, &w.story.id).await;
+    source.take();
+    let bodies = [
+        (
+            "blocker",
+            serde_json::json!({ "requestId": rid(), "reason": "x", "agentId": w.agent.id }),
+        ),
+        (
+            "blocker",
+            serde_json::json!({ "requestId": rid(), "reason": "x", "claimId": their_claim }),
+        ),
+        (
+            "subtasks",
+            serde_json::json!({ "requestId": rid(), "title": "x", "projectId": w.other.id }),
+        ),
+        (
+            "subtasks",
+            serde_json::json!({ "requestId": rid(), "title": "x", "columnId": "c" }),
+        ),
+        (
+            "result",
+            serde_json::json!({ "requestId": rid(), "summary": "x", "agentId": w.agent.id }),
+        ),
+        (
+            "result",
+            serde_json::json!({ "requestId": rid(), "summary": "x", "accepted": true }),
+        ),
+        (
+            "result",
+            serde_json::json!({ "requestId": rid(), "summary": "x", "references": [
+                { "kind": "url", "value": "https://a.example", "projectId": w.other.id }
+            ] }),
+        ),
+        (
+            "result",
+            serde_json::json!({ "requestId": rid(), "summary": "x", "references": [
+                { "kind": "ftp", "value": "ftp://a.example" }
+            ] }),
+        ),
+        ("result", serde_json::json!({ "requestId": rid() })),
+        ("subtasks", serde_json::json!({ "title": "x" })),
+    ];
+    for (action, body) in bodies {
+        let error = client
+            .post_json(&format!("/v1/claims/{mine}/{action}"), &body)
+            .await
+            .unwrap_err();
+        assert_eq!(api_code(&error), (400, "validation"), "{action} {body}");
+    }
+    assert!(source.take().is_empty());
+
+    service.stop().await;
+}
+
+#[tokio::test]
+async fn reports_need_a_live_credential_and_bounded_bodies() {
+    let w = world().await;
+    let source = Recording::new(&w.store);
+    let service = LocalService::start(w.data.path(), source.clone())
+        .await
+        .unwrap();
+    let port = service.port();
+    let client = ServiceClient::new(w.data.path(), w.token.clone());
+    let claim_id = claim_on(&client, &w.story.id).await;
+    source.take();
+
+    // Cuerpo con `Content-Length` mayor que el límite → 413 antes de leerlo.
+    let big = "x".repeat(kanbania_local_service::MAX_BODY_BYTES + 1);
+    for (path, mut body) in report_bodies(&claim_id) {
+        let field = if path.ends_with("blocker") {
+            "reason"
+        } else if path.ends_with("subtasks") {
+            "description"
+        } else {
+            "summary"
+        };
+        body[field] = big.clone().into();
+        let error = client.post_json(&path, &body).await.unwrap_err();
+        assert_eq!(api_code(&error), (413, "validation"), "{path}");
+    }
+    // `chunked` sin longitud declarada: lo corta el extractor (`DefaultBodyLimit`).
+    let session = session_token(w.data.path());
+    let bearer = format!("Bearer {}", w.token);
+    let auth = [
+        ("X-Kanbania-Session", session.as_str()),
+        ("Authorization", bearer.as_str()),
+    ];
+    let chunked =
+        serde_json::to_vec(&serde_json::json!({ "requestId": rid(), "summary": big })).unwrap();
+    let status = raw_chunked_post(
+        port,
+        &format!("/v1/claims/{claim_id}/result"),
+        &auth,
+        &chunked,
+    )
+    .await;
+    assert_eq!(status, 413);
+    // Un cuerpo `chunked` pequeño sí entra (el límite no rechaza `chunked` en sí).
+    let small =
+        serde_json::to_vec(&serde_json::json!({ "requestId": rid(), "reason": "Espera" })).unwrap();
+    let status = raw_chunked_post(
+        port,
+        &format!("/v1/claims/{claim_id}/blocker"),
+        &auth,
+        &small,
+    )
+    .await;
+    assert_eq!(status, 200);
+    source.take();
+
+    // Credencial revocada → 401 en las tres rutas; nada se escribe ni se avisa.
+    revoke_agent_credential(
+        &w.store,
+        &Actor::Human,
+        &RevokeAgentCredentialInput {
+            project_id: w.mine.id.clone(),
+            id: w.credential_id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    for (path, body) in report_bodies(&claim_id) {
+        let error = client.post_json(&path, &body).await.unwrap_err();
+        assert_eq!(api_code(&error), (401, "unauthorized"), "{path}");
+    }
+    assert!(source.take().is_empty());
+    let review =
+        kanbania_core::features::review::get_story_review(&w.store, &w.mine.id, &w.story.id)
+            .await
+            .unwrap();
+    assert!(review.deliveries.is_empty());
+
     service.stop().await;
 }

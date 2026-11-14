@@ -81,6 +81,7 @@ pub fn register_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
             commands::access::get_local_service_status,
             commands::claims::list_active_claims,
             commands::claims::release_claim,
+            commands::agent_activity::list_story_activity,
         ])
 }
 

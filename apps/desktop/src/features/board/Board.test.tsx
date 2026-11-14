@@ -12,6 +12,7 @@ import type { StoryClaim } from "../../contracts/generated/StoryClaim";
 import type { StoryDetail } from "../../contracts/generated/StoryDetail";
 import type { StorySummary } from "../../contracts/generated/StorySummary";
 import * as commands from "../../shared/ipc/commands";
+import { emitAgentChange, fakeAgentChanges } from "../../test/agentChanges";
 import { Board } from "./Board";
 import { applyMove } from "./boardModel";
 import { card, column } from "./boardFixtures";
@@ -26,6 +27,7 @@ vi.mock("../../shared/ipc/commands", async (importOriginal) => ({
   getStory: vi.fn(),
   acceptStory: vi.fn(),
   listActiveClaims: vi.fn(),
+  onAgentChange: vi.fn(),
 }));
 
 const mocked = vi.mocked(commands);
@@ -78,6 +80,7 @@ function renderBoard() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  fakeAgentChanges(mocked.onAgentChange);
   server = [
     card("s1", "todo", 0, {
       title: "Login",
@@ -226,6 +229,165 @@ describe("Board", () => {
       await screen.findByText(/Reclamada por Jean Claude/),
     ).toBeInTheDocument();
     expect(mocked.listActiveClaims).toHaveBeenCalledTimes(2);
+  });
+
+  it("un aviso de un agente del proyecto recarga tarjetas, columna, bloqueo y reclamo", async () => {
+    const user = userEvent.setup();
+    renderBoard();
+    await screen.findByRole("button", { name: /^#2 API/ });
+    await waitFor(() => {
+      expect(mocked.listActiveClaims).toHaveBeenCalledTimes(1);
+    });
+    // Estado local que no debe perderse con la recarga.
+    await user.selectOptions(screen.getByLabelText("Carriles"), "agent");
+    await user.type(screen.getByLabelText("Buscar"), "n");
+
+    // El agente reclamó #1, la movió (entrega), reportó un bloqueo y creó la subtarea #6.
+    server = [
+      ...server.map((s) =>
+        s.id === "s1"
+          ? { ...s, columnId: "doing", position: 1, blockerReason: "Sin red" }
+          : s,
+      ),
+      card("s6", "todo", 2, { title: "Subtarea nueva", parentId: "s1" }),
+    ];
+    mocked.listActiveClaims.mockResolvedValue([
+      claimOf("s1", "2099-11-12T10:30:00Z"),
+    ]);
+    await emitAgentChange({ projectId: "p1", storyIds: ["s1", "s6"] });
+
+    expect(
+      await screen.findByRole("button", { name: /^#6 Subtarea nueva/ }),
+    ).toBeInTheDocument();
+    const login = screen.getByRole("button", { name: /^#1 Login/ });
+    expect(
+      within(
+        screen.getByRole("group", { name: /^En curso, carril .*Jean Claude/ }),
+      ).getByRole("button", { name: /^#1 Login/ }),
+    ).toBe(login);
+    expect(screen.getByText("Bloqueada: Sin red")).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Reclamada por Jean Claude/),
+    ).toBeInTheDocument();
+    expect(mocked.listStories).toHaveBeenCalledTimes(2);
+    expect(mocked.listActiveClaims).toHaveBeenCalledTimes(2);
+    // Filtros y carriles intactos; el tablero no pasó por «Cargando».
+    expect(screen.getByLabelText("Carriles")).toHaveValue("agent");
+    expect(screen.getByLabelText("Buscar")).toHaveValue("n");
+    expect(screen.queryByText("Cargando tablero…")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "✓ Tablero actualizado con cambios de un agente.",
+    );
+  });
+
+  it("una ráfaga de avisos da una sola recarga y un solo mensaje", async () => {
+    renderBoard();
+    await screen.findByRole("button", { name: /^#2 API/ });
+    await waitFor(() => {
+      expect(mocked.listActiveClaims).toHaveBeenCalledTimes(1);
+    });
+    const status = screen.getByRole("status");
+    const announced: string[] = [];
+    const observer = new MutationObserver(() => {
+      announced.push(status.textContent);
+    });
+    observer.observe(status, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+
+    await emitAgentChange(
+      // 8 avisos separados por 15 ms: todos dentro de una ventana de agrupación (300 ms).
+      Array.from({ length: 8 }, (_, i) => ({
+        projectId: "p1",
+        storyIds: [`s${String((i % 4) + 1)}`],
+      })),
+      { gapMs: 15 },
+    );
+
+    await waitFor(() => {
+      expect(mocked.listStories).toHaveBeenCalledTimes(2);
+    });
+    expect(mocked.listActiveClaims).toHaveBeenCalledTimes(2);
+    observer.disconnect();
+    expect(
+      announced.filter((t) => t.includes("cambios de un agente")),
+    ).toHaveLength(1);
+  });
+
+  it("ignora los avisos de agentes de otro proyecto", async () => {
+    renderBoard();
+    await screen.findByRole("button", { name: /^#2 API/ });
+    await waitFor(() => {
+      expect(mocked.listActiveClaims).toHaveBeenCalledTimes(1);
+    });
+
+    await emitAgentChange({ projectId: "p2", storyIds: ["s1"] });
+
+    // Da tiempo a que una recarga indebida llegara a pedirse.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mocked.listStories).toHaveBeenCalledTimes(1);
+    expect(mocked.listActiveClaims).toHaveBeenCalledTimes(1);
+  });
+
+  it("si la tarjeta enfocada cambia de columna por un agente, conserva el foco", async () => {
+    renderBoard();
+    const login = await screen.findByRole("button", { name: /^#1 Login/ });
+    login.focus();
+
+    server = server.map((s) =>
+      s.id === "s1" ? { ...s, columnId: "doing", position: 1 } : s,
+    );
+    await emitAgentChange({ projectId: "p1", storyIds: ["s1"] });
+
+    await waitFor(() => {
+      expect(cardIn("En curso", 1)).toHaveFocus();
+    });
+  });
+
+  it("un aviso durante un movimiento espera a que termine para recargar", async () => {
+    let fail: (error: unknown) => void = () => undefined;
+    // El movimiento falla sin recargar (p. ej. WIP): solo recarga el aviso pendiente.
+    mocked.moveStory.mockImplementation(
+      () =>
+        new Promise((_, reject) => {
+          fail = reject;
+        }),
+    );
+    renderBoard();
+    const api = await screen.findByRole("button", { name: /^#2 API/ });
+    fireEvent.keyDown(api, { key: "ArrowUp", altKey: true });
+    await waitFor(() => {
+      expect(mocked.moveStory).toHaveBeenCalled();
+    });
+
+    await emitAgentChange({ projectId: "p1", storyIds: ["s3"] });
+    // La vista optimista sigue: #2 ya arriba, sin recargar todavía.
+    expect(mocked.listStories).toHaveBeenCalledTimes(1);
+    const first = within(screen.getByRole("group", { name: "Por hacer" }))
+      .getAllByRole("button", { name: /^#\d+ / })
+      .at(0);
+    expect(first).toHaveAccessibleName(/^#2 API/);
+
+    await act(async () => {
+      fail({
+        code: "wip_limit_exceeded",
+        message: "La columna está llena.",
+        recoverable: true,
+      });
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(mocked.listStories).toHaveBeenCalledTimes(2);
+    });
+    expect(mocked.listActiveClaims).toHaveBeenCalledTimes(2);
+    // El error del movimiento no queda tapado por el aviso del agente.
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "La columna está llena.",
+    );
   });
 
   it("filtra por texto y por épica, y agrupa en carriles", async () => {

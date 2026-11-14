@@ -47,6 +47,9 @@ struct World {
     token: String,
     mine: StorySummary,
     foreign: StorySummary,
+    project_id: String,
+    other_project_id: String,
+    agent_id: String,
 }
 
 async fn project(store: &Store, name: &str) -> Project {
@@ -119,6 +122,9 @@ async fn world() -> World {
         token,
         mine,
         foreign,
+        project_id: p.id.clone(),
+        other_project_id: other.id.clone(),
+        agent_id: agent.id.clone(),
     }
 }
 
@@ -184,9 +190,12 @@ async fn discovery_and_calls_through_a_real_mcp_client() {
         names,
         [
             "claim_story",
+            "create_subtask",
             "get_story_context",
             "list_ready_stories",
-            "renew_claim"
+            "renew_claim",
+            "report_blocker",
+            "submit_result"
         ]
     );
     for tool in &tools {
@@ -219,6 +228,62 @@ async fn discovery_and_calls_through_a_real_mcp_client() {
         kanbania_core::features::claims::MAX_OPEN_CLAIMS
     );
     assert!(described("claim_story").contains(&limit));
+    let subtasks = format!(
+        "Como mucho {} subtareas",
+        kanbania_core::features::agent_reports::MAX_SUBTASKS_PER_STORY
+    );
+    assert!(described("create_subtask").contains(&subtasks));
+    let pending = format!(
+        "y {} subtareas creadas por agentes",
+        kanbania_core::features::agent_reports::MAX_PENDING_AGENT_SUBTASKS
+    );
+    assert!(described("create_subtask").contains(&pending));
+    assert!(described("create_subtask").contains("Un solo nivel"));
+    // Causas de [claim_ended], también la credencial revocada y la entrega.
+    for tool in [
+        "renew_claim",
+        "report_blocker",
+        "create_subtask",
+        "submit_result",
+    ] {
+        let text = described(tool);
+        for cause in [
+            "venció",
+            "entregaste",
+            "liberó o reasignó",
+            "archivó o aceptó",
+            "revocó",
+        ] {
+            assert!(text.contains(cause), "{tool}: {cause}");
+        }
+    }
+    assert!(described("report_blocker").contains("solo una persona puede quitarlo"));
+    assert!(described("submit_result").contains("64 KB"));
+    assert!(described("list_ready_stories").contains("entrega pendiente"));
+    assert!(described("get_story_context").contains("personas u otros agentes"));
+    // La descripción escribe la cifra con separador de miles: ligada a la constante.
+    assert_eq!(
+        kanbania_core::features::agent_reports::MAX_SUBTASK_DESCRIPTION_CHARS,
+        10_000
+    );
+    assert!(described("create_subtask").contains("hasta 10 000"));
+    // Lo que el agente debe saber antes de entregar: revisión humana, nunca autoaceptación.
+    let submit = described("submit_result");
+    for phrase in [
+        "pendiente de revisión humana",
+        "nunca aceptas",
+        "cierra tu reclamo",
+        "reportada por ti",
+        "reclamo vigente",
+    ] {
+        assert!(submit.contains(phrase), "{phrase}: {submit}");
+    }
+    for tool in ["report_blocker", "create_subtask"] {
+        assert!(described(tool).contains("reclamo vigente"), "{tool}");
+    }
+    let instructions = info["instructions"].as_str().unwrap();
+    assert!(instructions.contains("pendiente de revisión humana"));
+    assert!(instructions.contains("nunca aceptas"));
     let list_schema =
         serde_json::to_value(tools.iter().find(|t| t.name == "list_ready_stories")).unwrap();
     assert_eq!(
@@ -380,7 +445,7 @@ async fn it_starts_with_the_app_closed_and_follows_app_restarts() {
     let logs = tempfile::tempdir().unwrap();
     // Sin app: el servidor MCP arranca y se descubre igual; las llamadas lo explican.
     let client = connect(w.data.path(), &w.token, &logs.path().join("e.log")).await;
-    assert_eq!(client.list_all_tools().await.unwrap().len(), 4);
+    assert_eq!(client.list_all_tools().await.unwrap().len(), 7);
     let (error, text) = call(&client, "list_ready_stories", json!({})).await;
     assert!(error);
     assert!(text.as_str().unwrap().starts_with("[app_closed]"), "{text}");
@@ -443,4 +508,363 @@ async fn without_a_valid_token_it_refuses_to_start_and_says_why_on_stderr() {
     }
     // Nunca crea ni abre datos.
     assert_eq!(std::fs::read_dir(data.path()).unwrap().count(), 0);
+}
+
+/// Texto de un error de herramienta (falla si la llamada no fue un error).
+async fn tool_error(client: &RunningService<RoleClient, ()>, tool: &str, args: Value) -> String {
+    let (error, payload) = call(client, tool, args.clone()).await;
+    assert!(error, "{tool} {args} debía fallar: {payload}");
+    payload.as_str().unwrap().to_owned()
+}
+
+/// HU-015: consulta → reclamo → bloqueo → subtarea → entrega con un cliente MCP real.
+#[tokio::test]
+async fn an_agent_reports_and_delivers_through_a_real_mcp_client() {
+    use kanbania_core::features::access::authenticate_agent;
+    use kanbania_core::features::claims::{ClaimStoryInput, claim_story};
+    use kanbania_core::features::review::{DeliverySource, DeliveryStatus, get_story_review};
+
+    let w = world().await;
+    let service = LocalService::start(w.data.path(), Arc::new(Fixed(w.store.clone())))
+        .await
+        .unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    let client = connect(w.data.path(), &w.token, &logs.path().join("e.log")).await;
+
+    // Consulta y reclamo.
+    let (error, page) = call(&client, "list_ready_stories", json!({})).await;
+    assert!(!error, "{page}");
+    assert!(
+        page["stories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["id"] == w.mine.id.as_str())
+    );
+    let (error, claim) = call(
+        &client,
+        "claim_story",
+        json!({ "requestId": rid(), "storyId": w.mine.id }),
+    )
+    .await;
+    assert!(!error, "{claim}");
+    let claim_id = claim["claimId"].as_str().unwrap().to_owned();
+
+    // Bloqueo: reintento idéntico → misma respuesta; mismo requestId con otro motivo → conflicto.
+    let block_args =
+        json!({ "claimId": claim_id, "requestId": rid(), "reason": "Falta acceso al repo" });
+    let (error, blocked) = call(&client, "report_blocker", block_args.clone()).await;
+    assert!(!error, "{blocked}");
+    assert_eq!(blocked["blocked"], true);
+    assert_eq!(blocked["storyId"], w.mine.id.as_str());
+    let (error, again) = call(&client, "report_blocker", block_args.clone()).await;
+    assert!(!error, "{again}");
+    assert_eq!(again, blocked);
+    let mut other_reason = block_args.clone();
+    other_reason["reason"] = "Otro motivo".into();
+    let text = tool_error(&client, "report_blocker", other_reason).await;
+    assert!(text.starts_with("[idempotency_conflict]"), "{text}");
+    let (_, context) = call(
+        &client,
+        "get_story_context",
+        json!({ "storyId": w.mine.id }),
+    )
+    .await;
+    assert_eq!(context["blockerReason"], "Falta acceso al repo");
+    let review = get_story_review(&w.store, &w.project_id, &w.mine.id)
+        .await
+        .unwrap();
+    let blocker = serde_json::to_value(review.blocker.unwrap()).unwrap();
+    assert_eq!(blocker["source"], "reported", "afirmación del agente");
+    // Quitar su propio bloqueo (reason omitido).
+    let (error, cleared) = call(
+        &client,
+        "report_blocker",
+        json!({ "claimId": claim_id, "requestId": rid() }),
+    )
+    .await;
+    assert!(!error, "{cleared}");
+    assert_eq!(cleared["blocked"], false);
+    assert!(cleared["reason"].is_null());
+
+    // Subtarea: un reintento no duplica; otro título con el mismo requestId → conflicto.
+    let subtask_args = json!({
+        "claimId": claim_id,
+        "requestId": rid(),
+        "title": "Preparar migración",
+        "description": "Detalles **en Markdown**",
+    });
+    let (error, subtask) = call(&client, "create_subtask", subtask_args.clone()).await;
+    assert!(!error, "{subtask}");
+    assert_eq!(subtask["parentStoryId"], w.mine.id.as_str());
+    assert_eq!(subtask["parentNumber"], w.mine.number);
+    assert_eq!(subtask["title"], "Preparar migración");
+    let (error, again) = call(&client, "create_subtask", subtask_args.clone()).await;
+    assert!(!error, "{again}");
+    assert_eq!(again["storyId"], subtask["storyId"]);
+    let mut other_title = subtask_args.clone();
+    other_title["title"] = "Otra cosa".into();
+    let text = tool_error(&client, "create_subtask", other_title).await;
+    assert!(text.starts_with("[idempotency_conflict]"), "{text}");
+    let (_, context) = call(
+        &client,
+        "get_story_context",
+        json!({ "storyId": w.mine.id }),
+    )
+    .await;
+    let children = context["subtasks"].as_array().unwrap();
+    assert_eq!(children.len(), 1, "sin duplicados: {children:?}");
+    assert_eq!(children[0]["id"], subtask["storyId"]);
+    // La subtarea nace sin agente: sale lista para cualquiera.
+    let (_, child) = call(
+        &client,
+        "get_story_context",
+        json!({ "storyId": subtask["storyId"] }),
+    )
+    .await;
+    assert_eq!(child["assignment"], "none");
+    assert_eq!(child["parent"]["id"], w.mine.id.as_str());
+    assert_eq!(child["column"]["category"], "backlog");
+    // Un solo nivel: la subtarea de un agente se puede reclamar, pero no admite subtareas de
+    // agentes.
+    let (error, child_claim) = call(
+        &client,
+        "claim_story",
+        json!({ "requestId": rid(), "storyId": subtask["storyId"] }),
+    )
+    .await;
+    assert!(!error, "{child_claim}");
+    let text = tool_error(
+        &client,
+        "create_subtask",
+        json!({ "claimId": child_claim["claimId"], "requestId": rid(), "title": "Nieta" }),
+    )
+    .await;
+    assert!(text.starts_with("[validation]"), "{text}");
+    let (_, child) = call(
+        &client,
+        "get_story_context",
+        json!({ "storyId": subtask["storyId"] }),
+    )
+    .await;
+    assert!(child["subtasks"].as_array().unwrap().is_empty());
+
+    // Argumentos inválidos: no llegan al servicio.
+    for bad in ["../session", "..", "a/b", "../../v1/session", ""] {
+        for (tool, extra) in [
+            ("report_blocker", json!({ "reason": "x" })),
+            ("create_subtask", json!({ "title": "x" })),
+            ("submit_result", json!({ "summary": "x" })),
+            ("renew_claim", json!({})),
+        ] {
+            let mut args = extra.clone();
+            args["claimId"] = bad.into();
+            args["requestId"] = rid().into();
+            let text = tool_error(&client, tool, args).await;
+            assert!(
+                text.starts_with("claimId no válido"),
+                "{tool} {bad}: {text}"
+            );
+        }
+    }
+    for args in [
+        json!({ "claimId": claim_id, "requestId": "con espacio", "summary": "x" }),
+        json!({ "claimId": claim_id, "requestId": "a/../b", "summary": "x" }),
+    ] {
+        let text = tool_error(&client, "submit_result", args).await;
+        assert!(text.starts_with("requestId no válido"), "{text}");
+    }
+    // Campos desconocidos (elegir agente o proyecto, o colarlos en una referencia): rechazados.
+    for (tool, args) in [
+        (
+            "report_blocker",
+            json!({ "claimId": claim_id, "requestId": rid(), "agentId": w.agent_id }),
+        ),
+        (
+            "create_subtask",
+            json!({ "claimId": claim_id, "requestId": rid(), "title": "x",
+                    "projectId": w.other_project_id }),
+        ),
+        (
+            "submit_result",
+            json!({ "claimId": claim_id, "requestId": rid(), "summary": "x",
+                    "references": [{ "kind": "url", "value": "https://a.example",
+                                     "projectId": w.other_project_id }] }),
+        ),
+        (
+            "submit_result",
+            json!({ "claimId": claim_id, "requestId": rid(), "summary": "x",
+                    "references": [{ "kind": "ftp", "value": "ftp://a.example" }] }),
+        ),
+    ] {
+        let (error, _) = call(&client, tool, args.clone()).await;
+        assert!(error, "{tool} {args}");
+    }
+    // Validación del núcleo, explicada al agente.
+    let text = tool_error(
+        &client,
+        "submit_result",
+        json!({ "claimId": claim_id, "requestId": rid(), "summary": "x",
+                "references": [{ "kind": "path", "value": "relativa/archivo" }] }),
+    )
+    .await;
+    assert!(text.starts_with("[validation]"), "{text}");
+    for value in ["/tmp/../etc/passwd", "/tmp/./x", "/tmp/a\u{E0041}b"] {
+        let text = tool_error(
+            &client,
+            "submit_result",
+            json!({ "claimId": claim_id, "requestId": rid(), "summary": "x",
+                    "references": [{ "kind": "path", "value": value }] }),
+        )
+        .await;
+        assert!(text.starts_with("[validation]"), "{value}: {text}");
+    }
+    // Más de 64 KB en total: el MCP lo rechaza sin enviarlo.
+    let text = tool_error(
+        &client,
+        "submit_result",
+        json!({ "claimId": claim_id, "requestId": rid(),
+                "summary": "x".repeat(kanbania_local_service::MAX_BODY_BYTES) }),
+    )
+    .await;
+    assert!(
+        text.contains("64 KB") && text.contains("No se envió nada"),
+        "{text}"
+    );
+
+    // Reclamo de otro proyecto (del mismo agente): no se encuentra.
+    let foreign_token = create_agent_credential(
+        &w.store,
+        &Actor::Human,
+        &CreateAgentCredentialInput {
+            project_id: w.other_project_id.clone(),
+            agent_id: w.agent_id.clone(),
+        },
+    )
+    .await
+    .unwrap()
+    .token;
+    let foreign_session = authenticate_agent(&w.store, &foreign_token).await.unwrap();
+    let foreign_claim = claim_story(
+        &w.store,
+        &foreign_session,
+        &ClaimStoryInput {
+            request_id: rid(),
+            story_id: Some(w.foreign.id.clone()),
+            number: None,
+        },
+    )
+    .await
+    .unwrap();
+    for (tool, extra) in [
+        ("report_blocker", json!({ "reason": "x" })),
+        ("create_subtask", json!({ "title": "x" })),
+        ("submit_result", json!({ "summary": "x" })),
+    ] {
+        let mut args = extra;
+        args["claimId"] = foreign_claim.claim_id.clone().into();
+        args["requestId"] = rid().into();
+        let text = tool_error(&client, tool, args).await;
+        assert!(text.starts_with("[not_found]"), "{tool}: {text}");
+    }
+    let foreign_review = get_story_review(&w.store, &w.other_project_id, &w.foreign.id)
+        .await
+        .unwrap();
+    assert!(foreign_review.deliveries.is_empty() && foreign_review.blocker.is_none());
+
+    // Bloqueo propio puesto al entregar: la entrega lo quita.
+    let (error, _) = call(
+        &client,
+        "report_blocker",
+        json!({ "claimId": claim_id, "requestId": rid(), "reason": "Espera revisión externa" }),
+    )
+    .await;
+    assert!(!error);
+
+    // Entrega: queda pendiente de revisión, sin aceptar; un reintento no la duplica.
+    let submit_args = json!({
+        "claimId": claim_id,
+        "requestId": rid(),
+        "summary": "Hecho: migración y pruebas.",
+        "references": [
+            { "kind": "url", "value": "https://example.com/pr/1" },
+            { "kind": "path", "value": "/tmp/kanbania-informe.txt" },
+        ],
+    });
+    let (error, delivered) = call(&client, "submit_result", submit_args.clone()).await;
+    assert!(!error, "{delivered}");
+    assert_eq!(delivered["deliveryNumber"], 1);
+    assert_eq!(delivered["storyId"], w.mine.id.as_str());
+    assert_eq!(delivered["inReview"], true);
+    let (error, again) = call(&client, "submit_result", submit_args.clone()).await;
+    assert!(!error, "{again}");
+    assert_eq!(again, delivered);
+    let mut other_summary = submit_args.clone();
+    other_summary["summary"] = "Otro resumen".into();
+    let text = tool_error(&client, "submit_result", other_summary).await;
+    assert!(text.starts_with("[idempotency_conflict]"), "{text}");
+
+    let review = get_story_review(&w.store, &w.project_id, &w.mine.id)
+        .await
+        .unwrap();
+    assert!(review.accepted_at.is_none(), "un agente nunca acepta");
+    assert_eq!(review.deliveries.len(), 1, "sin duplicados");
+    let delivery = &review.deliveries[0];
+    assert_eq!(delivery.source, DeliverySource::Reported);
+    assert_eq!(delivery.status, DeliveryStatus::Pending);
+    assert_eq!(delivery.agent_id.as_deref(), Some(w.agent_id.as_str()));
+    assert_eq!(delivery.references.len(), 2);
+    let (_, context) = call(
+        &client,
+        "get_story_context",
+        json!({ "storyId": w.mine.id }),
+    )
+    .await;
+    assert_eq!(context["column"]["category"], "review");
+    assert!(context["acceptedAt"].is_null());
+    assert!(context["yourClaim"].is_null(), "entregar cierra el reclamo");
+    assert!(
+        context["blockerReason"].is_null(),
+        "entregar quita el bloqueo propio"
+    );
+    assert!(review.blocker.is_none());
+    // Con la entrega pendiente, la historia no vuelve a la lista ni se puede reclamar.
+    let (_, page) = call(&client, "list_ready_stories", json!({})).await;
+    assert!(
+        page["stories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["id"] != w.mine.id.as_str()),
+        "{page}"
+    );
+    assert_eq!(context["ready"], false);
+    let text = tool_error(
+        &client,
+        "claim_story",
+        json!({ "requestId": rid(), "storyId": w.mine.id }),
+    )
+    .await;
+    assert!(text.starts_with("[not_ready]"), "{text}");
+
+    // Tras entregar, el reclamo ya no sirve para nada.
+    for (tool, extra) in [
+        ("renew_claim", json!({})),
+        ("report_blocker", json!({ "reason": "x" })),
+        ("create_subtask", json!({ "title": "x" })),
+        ("submit_result", json!({ "summary": "Segunda entrega" })),
+    ] {
+        let mut args = extra;
+        args["claimId"] = claim_id.clone().into();
+        args["requestId"] = rid().into();
+        let text = tool_error(&client, tool, args).await;
+        assert!(text.starts_with("[claim_ended]"), "{tool}: {text}");
+    }
+    let review = get_story_review(&w.store, &w.project_id, &w.mine.id)
+        .await
+        .unwrap();
+    assert_eq!(review.deliveries.len(), 1);
+
+    service.stop().await;
+    client.cancel().await.unwrap();
 }

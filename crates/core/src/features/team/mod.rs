@@ -3,6 +3,7 @@
 
 mod agents;
 mod avatar;
+mod claim_owner;
 mod user;
 
 pub use agents::{
@@ -10,6 +11,7 @@ pub use agents::{
     update_agent,
 };
 pub use avatar::{AVATAR_LIMITS, AvatarSpec};
+pub use claim_owner::ClaimOwner;
 pub use user::{UpdateUserProfileInput, UserProfile, get_user_profile, update_user_profile};
 
 pub(crate) use agents::load_agent;

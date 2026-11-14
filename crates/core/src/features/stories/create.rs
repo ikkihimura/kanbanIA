@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sqlx::SqliteConnection;
 use ts_rs::TS;
 
 use super::story::{ENTITY, Priority, StorySummary, count_in_column, load_story, validate_title};
@@ -59,46 +60,77 @@ pub async fn create_story(
         .write_idempotent(&key, &payload, move |conn| {
             Box::pin(async move {
                 ensure_project_exists(conn, &project_id).await?;
-                let column = match column_id {
-                    Some(column_id) => load_column(conn, &project_id, &column_id)
-                        .await?
-                        .ok_or(CoreError::NotFound { entity: "Columna" })?,
-                    None => default_column(columns_of_project(conn, &project_id).await?)?,
-                };
-                if column.category == ColumnCategory::Done {
-                    return Err(CoreError::AcceptanceRequired {
-                        column: column.name,
-                    });
-                }
-                ensure_capacity(conn, &column, 1).await?;
-
-                let position = count_in_column(conn, &column.id).await?;
-                let number: i64 = sqlx::query_scalar(
-                    "SELECT COALESCE(MAX(number), 0) + 1 FROM stories WHERE project_id = ?",
+                insert_story(
+                    conn,
+                    &NewStory {
+                        id: &id,
+                        project_id: &project_id,
+                        column_id: column_id.as_deref(),
+                        title: &title,
+                        description: "",
+                        priority,
+                    },
                 )
-                .bind(&project_id)
-                .fetch_one(&mut *conn)
-                .await?;
-                sqlx::query(
-                    "INSERT INTO stories \
-                     (id, project_id, number, column_id, position, title, priority) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?)",
-                )
-                .bind(&id)
-                .bind(&project_id)
-                .bind(number)
-                .bind(&column.id)
-                .bind(position)
-                .bind(&title)
-                .bind(priority.as_str())
-                .execute(&mut *conn)
-                .await?;
-                load_story(conn, &project_id, &id)
-                    .await?
-                    .ok_or(CoreError::NotFound { entity: ENTITY })
+                .await
             })
         })
         .await
+}
+
+/// Historia a crear dentro de una transacción (ya validada).
+pub(crate) struct NewStory<'a> {
+    pub id: &'a str,
+    pub project_id: &'a str,
+    /// Si es `None`: primera columna «backlog» o, si no hay, la primera que no sea «hecho».
+    pub column_id: Option<&'a str>,
+    pub title: &'a str,
+    pub description: &'a str,
+    pub priority: Priority,
+}
+
+/// Inserta la historia al final de su columna con el siguiente número del proyecto. Aplica las
+/// reglas de entrada en columna (nunca «hecho», WIP).
+pub(crate) async fn insert_story(
+    conn: &mut SqliteConnection,
+    story: &NewStory<'_>,
+) -> Result<StorySummary, CoreError> {
+    let column = match story.column_id {
+        Some(column_id) => load_column(conn, story.project_id, column_id)
+            .await?
+            .ok_or(CoreError::NotFound { entity: "Columna" })?,
+        None => default_column(columns_of_project(conn, story.project_id).await?)?,
+    };
+    if column.category == ColumnCategory::Done {
+        return Err(CoreError::AcceptanceRequired {
+            column: column.name,
+        });
+    }
+    ensure_capacity(conn, &column, 1).await?;
+
+    let position = count_in_column(conn, &column.id).await?;
+    let number: i64 =
+        sqlx::query_scalar("SELECT COALESCE(MAX(number), 0) + 1 FROM stories WHERE project_id = ?")
+            .bind(story.project_id)
+            .fetch_one(&mut *conn)
+            .await?;
+    sqlx::query(
+        "INSERT INTO stories \
+         (id, project_id, number, column_id, position, title, description, priority) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(story.id)
+    .bind(story.project_id)
+    .bind(number)
+    .bind(&column.id)
+    .bind(position)
+    .bind(story.title)
+    .bind(story.description)
+    .bind(story.priority.as_str())
+    .execute(&mut *conn)
+    .await?;
+    load_story(conn, story.project_id, story.id)
+        .await?
+        .ok_or(CoreError::NotFound { entity: ENTITY })
 }
 
 fn default_column(columns: Vec<Column>) -> Result<Column, CoreError> {

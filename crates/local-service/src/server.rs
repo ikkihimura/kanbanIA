@@ -25,10 +25,16 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use kanbania_core::error::{CoreError, ErrorCode, ErrorPayload};
 use kanbania_core::features::access::{AgentSession, authenticate_agent, describe_session};
+use kanbania_core::features::agent_activity::AgentChange;
+use kanbania_core::features::agent_reports::{
+    CreateSubtaskInput, ReportBlockerInput, SubmitResultInput, create_subtask, report_blocker,
+    submit_result,
+};
 use kanbania_core::features::agent_work::{
     ReadyQuery, StoryKey, get_story_context, list_ready_stories,
 };
 use kanbania_core::features::claims::{ClaimStoryInput, RenewClaimInput, claim_story, renew_claim};
+use kanbania_core::features::review::ReferenceInput;
 use kanbania_core::platform::storage::Store;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -45,6 +51,10 @@ type StoreFuture<'a> = Pin<Box<dyn Future<Output = Result<Store, ErrorPayload>> 
 /// así el servicio usa el único propietario de datos y respeta cierres y restauraciones.
 pub trait StoreSource: Send + Sync + 'static {
     fn store(&self) -> StoreFuture<'_>;
+
+    /// Un agente cambió el tablero (operación ya confirmada). El host lo reenvía a la UI para
+    /// que recargue. No debe bloquear: se llama antes de responder al agente.
+    fn agent_changed(&self, _change: AgentChange) {}
 }
 
 struct Shared {
@@ -58,6 +68,7 @@ struct Shared {
 struct Authed {
     session: AgentSession,
     store: Store,
+    source: Arc<dyn StoreSource>,
 }
 
 /// Servicio en marcha. Al pararlo, borra su descriptor (si sigue siendo el suyo).
@@ -138,6 +149,9 @@ fn router(shared: Arc<Shared>) -> Router {
         )
         .route("/v1/claims", post(claim))
         .route("/v1/claims/{id}/renew", post(renew))
+        .route("/v1/claims/{id}/blocker", post(blocker))
+        .route("/v1/claims/{id}/subtasks", post(subtask))
+        .route("/v1/claims/{id}/result", post(result))
         .route_layer(from_fn_with_state(shared.clone(), authenticate));
     Router::new()
         .route("/v1/handshake", get(handshake))
@@ -208,7 +222,11 @@ async fn authenticate(
     };
     match authenticate_agent(&store, &token).await {
         Ok(session) => {
-            request.extensions_mut().insert(Authed { session, store });
+            request.extensions_mut().insert(Authed {
+                session,
+                store,
+                source: shared.source.clone(),
+            });
             next.run(request).await
         }
         Err(error) => core_error(&error),
@@ -309,7 +327,10 @@ async fn claim(
         Err(rejection) => return json_rejection(&rejection),
     };
     match claim_story(&authed.store, &authed.session, &input).await {
-        Ok(claim) => Json(claim).into_response(),
+        Ok(claim) => {
+            authed.changed(claim.story_ids());
+            Json(claim).into_response()
+        }
         Err(error) => core_error_for(&error, Some(&input.request_id)),
     }
 }
@@ -330,7 +351,7 @@ async fn renew(
         Ok(Json(body)) => body,
         Err(rejection) => return json_rejection(&rejection),
     };
-    if id.is_empty() || id.len() > MAX_ID_LEN {
+    if !valid_claim_id(&id) {
         return core_error(&CoreError::NotFound { entity: "Reclamo" });
     }
     let input = RenewClaimInput {
@@ -338,8 +359,131 @@ async fn renew(
         claim_id: id,
     };
     match renew_claim(&authed.store, &authed.session, &input).await {
-        Ok(claim) => Json(claim).into_response(),
+        Ok(claim) => {
+            authed.changed(claim.story_ids());
+            Json(claim).into_response()
+        }
         Err(error) => core_error_for(&error, Some(&input.request_id)),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BlockerBody {
+    request_id: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// Reporta (o quita, con `reason` nulo) el bloqueo de la historia de un reclamo propio.
+async fn blocker(
+    Extension(authed): Extension<Authed>,
+    UrlPath(id): UrlPath<String>,
+    body: Result<Json<BlockerBody>, JsonRejection>,
+) -> Response {
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => return json_rejection(&rejection),
+    };
+    if !valid_claim_id(&id) {
+        return core_error(&CoreError::NotFound { entity: "Reclamo" });
+    }
+    let input = ReportBlockerInput {
+        request_id: body.request_id,
+        claim_id: id,
+        reason: body.reason,
+    };
+    match report_blocker(&authed.store, &authed.session, &input).await {
+        Ok(reported) => {
+            authed.changed(reported.story_ids());
+            Json(reported).into_response()
+        }
+        Err(error) => core_error_for(&error, Some(&input.request_id)),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SubtaskBody {
+    request_id: String,
+    title: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+/// Crea una subtarea de la historia de un reclamo propio.
+async fn subtask(
+    Extension(authed): Extension<Authed>,
+    UrlPath(id): UrlPath<String>,
+    body: Result<Json<SubtaskBody>, JsonRejection>,
+) -> Response {
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => return json_rejection(&rejection),
+    };
+    if !valid_claim_id(&id) {
+        return core_error(&CoreError::NotFound { entity: "Reclamo" });
+    }
+    let input = CreateSubtaskInput {
+        request_id: body.request_id,
+        claim_id: id,
+        title: body.title,
+        description: body.description,
+    };
+    match create_subtask(&authed.store, &authed.session, &input).await {
+        Ok(created) => {
+            authed.changed(created.story_ids());
+            Json(created).into_response()
+        }
+        Err(error) => core_error_for(&error, Some(&input.request_id)),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ResultBody {
+    request_id: String,
+    summary: String,
+    #[serde(default)]
+    references: Vec<ReferenceInput>,
+}
+
+/// Entrega el resultado de un reclamo propio (queda pendiente de revisión humana).
+async fn result(
+    Extension(authed): Extension<Authed>,
+    UrlPath(id): UrlPath<String>,
+    body: Result<Json<ResultBody>, JsonRejection>,
+) -> Response {
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => return json_rejection(&rejection),
+    };
+    if !valid_claim_id(&id) {
+        return core_error(&CoreError::NotFound { entity: "Reclamo" });
+    }
+    let input = SubmitResultInput {
+        request_id: body.request_id,
+        claim_id: id,
+        summary: body.summary,
+        references: body.references,
+    };
+    match submit_result(&authed.store, &authed.session, &input).await {
+        Ok(submitted) => {
+            authed.changed(submitted.story_ids());
+            Json(submitted).into_response()
+        }
+        Err(error) => core_error_for(&error, Some(&input.request_id)),
+    }
+}
+
+fn valid_claim_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= MAX_ID_LEN
+}
+
+impl Authed {
+    fn changed(&self, story_ids: Vec<String>) {
+        self.source
+            .agent_changed(AgentChange::new(&self.session, story_ids));
     }
 }
 

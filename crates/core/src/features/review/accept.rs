@@ -5,6 +5,7 @@ use ts_rs::TS;
 
 use super::first_column_of;
 use crate::error::CoreError;
+use crate::features::claims::{EndReason, close_story_claims};
 use crate::features::columns::{ColumnCategory, columns_of_project, ensure_capacity, load_column};
 use crate::features::stories::{
     StorySummary, append_to_column, load_detail, load_story, place_at_index,
@@ -70,7 +71,7 @@ pub async fn accept_story(
             "La posición no puede ser negativa.".into(),
         ));
     }
-    let input = input.clone();
+    let (input, clock) = (input.clone(), store.clone());
 
     store
         .write(move |conn| {
@@ -183,6 +184,8 @@ pub async fn accept_story(
                 .bind(&story.id)
                 .execute(&mut *conn)
                 .await?;
+                // Aceptada: ya no hay trabajo que reservar (HU-015).
+                close_story_claims(conn, &story.id, EndReason::Closed, clock.now_ms()).await?;
 
                 let snapshot: Vec<SatisfiedCriterion> = story
                     .criteria

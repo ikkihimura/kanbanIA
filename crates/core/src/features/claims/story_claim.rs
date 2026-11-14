@@ -3,6 +3,7 @@ use sqlx::SqliteConnection;
 use ts_rs::TS;
 
 use crate::error::CoreError;
+pub use crate::features::team::ClaimOwner;
 
 pub(super) const ENTITY: &str = "Reclamo";
 /// Duración de un reclamo y de cada renovación (decisión del propietario).
@@ -12,18 +13,6 @@ pub(super) const MAX_ID_LEN: usize = 64;
 /// Reclamos vigentes a la vez por agente y proyecto: un agente (con fallos o manipulado por el
 /// texto de una historia) no puede reservar todo el backlog.
 pub const MAX_OPEN_CLAIMS: i64 = 5;
-
-/// Agente que tiene el reclamo.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct ClaimOwner {
-    pub agent_id: String,
-    /// Se muestra como A-n.
-    #[ts(type = "number")]
-    pub agent_number: i64,
-    pub agent_name: String,
-}
 
 /// Reclamo de una historia. Mientras `expiresAt` no pase, ningún otro agente puede tomarla.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -112,4 +101,11 @@ pub(super) fn validate_id(field: &'static str, id: &str) -> Result<(), CoreError
         });
     }
     Ok(())
+}
+
+impl StoryClaim {
+    /// Historias que cambió reclamar o renovar (para `AgentChange`).
+    pub fn story_ids(&self) -> Vec<String> {
+        vec![self.story_id.clone()]
+    }
 }

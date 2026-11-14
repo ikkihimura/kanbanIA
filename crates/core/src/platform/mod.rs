@@ -5,3 +5,4 @@ pub mod clock;
 pub mod idempotency;
 pub mod revision;
 pub mod storage;
+pub mod text;

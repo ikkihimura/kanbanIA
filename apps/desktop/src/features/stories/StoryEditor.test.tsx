@@ -1,12 +1,14 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ErrorPayload } from "../../contracts/generated/ErrorPayload";
+import type { StoryReview } from "../../contracts/generated/StoryReview";
 import type { Column } from "../../contracts/generated/Column";
 import type { StoryClaim } from "../../contracts/generated/StoryClaim";
 import type { StoryDetail } from "../../contracts/generated/StoryDetail";
 import type { StorySummary } from "../../contracts/generated/StorySummary";
 import * as commands from "../../shared/ipc/commands";
+import { emitAgentChange, fakeAgentChanges } from "../../test/agentChanges";
 import { StoriesSection } from "./StoriesSection";
 import { StoryEditor } from "./StoryEditor";
 
@@ -29,6 +31,9 @@ vi.mock("../../shared/ipc/commands", async (importOriginal) => {
     getStoryRelations: vi.fn(),
     listEpics: vi.fn(),
     listActiveClaims: vi.fn(),
+    getStoryReview: vi.fn(),
+    listStoryActivity: vi.fn(),
+    onAgentChange: vi.fn(),
   };
 });
 
@@ -134,7 +139,22 @@ function renderEditor(onBack = vi.fn()) {
   return { ...view, onBack };
 }
 
+const emptyReview: StoryReview = {
+  storyId: "s1",
+  acceptedAt: null,
+  blocker: null,
+  deliveries: [],
+  history: [],
+};
+
 beforeEach(() => {
+  vi.clearAllMocks();
+  fakeAgentChanges(mocked.onAgentChange);
+  mocked.getStoryReview.mockResolvedValue(emptyReview);
+  mocked.listStoryActivity.mockResolvedValue({
+    lastReportedAt: null,
+    entries: [],
+  });
   mocked.setUnsavedChanges.mockResolvedValue(undefined);
   mocked.getStoryRelations.mockResolvedValue({
     storyId: "s1",
@@ -530,11 +550,224 @@ describe("StoryEditor", () => {
   });
 });
 
+describe("StoryEditor con avisos de agentes", () => {
+  const claimedAt = "2026-11-12T10:00:00Z";
+  const deliveredAt = "2026-11-12T10:20:00Z";
+
+  /** Respuestas del núcleo después de que el agente entregue E2 y cree la subtarea #12. */
+  function agentDelivered() {
+    mocked.getStory.mockResolvedValue(story({ columnId: "c2", revision: 2 }));
+    mocked.getStoryReview.mockResolvedValue({
+      ...emptyReview,
+      deliveries: [
+        {
+          id: "d2",
+          storyId: "s1",
+          number: 2,
+          source: "reported",
+          agentId: "a1",
+          agentName: "Robo",
+          summary: "Exportación lista",
+          references: [],
+          status: "pending",
+          returnReason: null,
+          createdAt: deliveredAt,
+          decidedAt: null,
+        },
+      ],
+    });
+    mocked.listStoryActivity.mockResolvedValue({
+      lastReportedAt: deliveredAt,
+      entries: [
+        {
+          kind: "delivered",
+          agent: roboClaim.owner,
+          detail: "E2",
+          at: deliveredAt,
+        },
+        {
+          kind: "subtask_created",
+          agent: roboClaim.owner,
+          detail: "#12",
+          at: claimedAt,
+        },
+        {
+          kind: "claimed",
+          agent: roboClaim.owner,
+          detail: null,
+          at: claimedAt,
+        },
+      ],
+    });
+    // Entregar cierra el reclamo.
+    mocked.listActiveClaims.mockResolvedValue([]);
+    mocked.getStoryRelations.mockResolvedValue({
+      ...noRelations,
+      children: [
+        {
+          id: "s12",
+          number: 12,
+          title: "Subtarea del agente",
+          state: "pending",
+          archived: false,
+        },
+      ],
+    });
+  }
+
+  function claimedByRobo() {
+    mocked.listActiveClaims.mockResolvedValue([roboClaim]);
+    mocked.listStoryActivity.mockResolvedValue({
+      lastReportedAt: claimedAt,
+      entries: [
+        {
+          kind: "claimed",
+          agent: roboClaim.owner,
+          detail: null,
+          at: claimedAt,
+        },
+      ],
+    });
+  }
+
+  it("recarga reclamo, actividad, revisión y subtareas sin perder el borrador", async () => {
+    const user = userEvent.setup();
+    claimedByRobo();
+    renderEditor();
+
+    expect(await screen.findByText("Reclamó")).toBeInTheDocument();
+    const claimRegion = await screen.findByRole("region", { name: "Reclamo" });
+    expect(
+      await within(claimRegion).findByText("A-2 Robo", { selector: "strong" }),
+    ).toBeInTheDocument();
+    // Borrador en el contenido y texto a medio escribir en un panel de revisión.
+    const title = await screen.findByLabelText("Título");
+    await user.type(title, " ya");
+    const reason = await screen.findByLabelText("Motivo del bloqueo");
+    await user.type(reason, "Esperando");
+    expect(screen.getByText("Cambios sin guardar")).toBeInTheDocument();
+
+    agentDelivered();
+    await emitAgentChange({ projectId: "p1", storyIds: ["s1", "s12"] });
+
+    expect(await screen.findByText("Entregó E2")).toBeInTheDocument();
+    expect(screen.getByText("Creó la subtarea #12")).toBeInTheDocument();
+    expect(
+      await screen.findByText("1 entrega pendiente de revisión"),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("Sin reclamo.")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "#12 Subtarea del agente" }),
+    ).toBeInTheDocument();
+    // Nada de lo escrito se pierde.
+    expect(screen.getByLabelText("Título")).toHaveValue("Exportar CSV ya");
+    expect(screen.getByLabelText("Motivo del bloqueo")).toHaveValue(
+      "Esperando",
+    );
+    expect(screen.getByText("Cambios sin guardar")).toBeInTheDocument();
+
+    // El borrador sigue ligado a la revisión que editó: el núcleo detectará el conflicto.
+    mocked.updateStory.mockRejectedValue(
+      conflictWith(story({ columnId: "c2", revision: 2 })),
+    );
+    await user.click(screen.getByRole("button", { name: "Guardar y volver" }));
+    expect(mocked.updateStory).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedRevision: 1,
+        title: "Exportar CSV ya",
+      }),
+    );
+    expect(screen.getByLabelText("Título")).toHaveValue("Exportar CSV ya");
+  });
+
+  it("sin borrador, el formulario toma la revisión nueva", async () => {
+    const user = userEvent.setup();
+    mocked.updateStory.mockImplementation((input) =>
+      Promise.resolve(story({ title: input.title, revision: 3 })),
+    );
+    renderEditor();
+    await screen.findByLabelText("Título");
+
+    agentDelivered();
+    await emitAgentChange({ projectId: "p1", storyIds: ["s1"] });
+    expect(await screen.findByText("Entregó E2")).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("Título"), "!");
+    await user.click(screen.getByRole("button", { name: "Guardar y volver" }));
+    expect(mocked.updateStory).toHaveBeenCalledWith(
+      expect.objectContaining({ expectedRevision: 2 }),
+    );
+  });
+
+  it("ignora los avisos de otro proyecto o de otra historia", async () => {
+    claimedByRobo();
+    renderEditor();
+    expect(await screen.findByText("Reclamó")).toBeInTheDocument();
+    await screen.findByLabelText("Título");
+
+    agentDelivered();
+    await emitAgentChange({ projectId: "p2", storyIds: ["s1"] });
+    await emitAgentChange({ projectId: "p1", storyIds: ["s9"] });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(mocked.getStory).toHaveBeenCalledTimes(1);
+    expect(mocked.listStoryActivity).toHaveBeenCalledTimes(1);
+    expect(mocked.getStoryReview).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("Entregó E2")).not.toBeInTheDocument();
+  });
+});
+
 describe("StoriesSection", () => {
   it("muestra el estado vacío", async () => {
     mocked.listStories.mockResolvedValue([]);
     render(<StoriesSection projectId="p1" onOpenStory={vi.fn()} />);
 
     expect(await screen.findByText(/Aún no hay historias/)).toBeInTheDocument();
+  });
+
+  it("un aviso de un agente del proyecto recarga la lista sin perder lo escrito", async () => {
+    const user = userEvent.setup();
+    const parent = summaryOf(story());
+    mocked.listStories.mockResolvedValue([parent]);
+    render(<StoriesSection projectId="p1" onOpenStory={vi.fn()} />);
+    await screen.findByRole("button", { name: /^#7 Exportar CSV/ });
+    await user.type(
+      screen.getByLabelText("Título de la nueva historia"),
+      "Idea a medias",
+    );
+
+    mocked.listStories.mockResolvedValue([
+      parent,
+      {
+        ...parent,
+        id: "s12",
+        number: 12,
+        title: "Subtarea del agente",
+        parentId: "s1",
+      },
+    ]);
+    await emitAgentChange({ projectId: "p1", storyIds: ["s1", "s12"] });
+
+    const sub = await screen.findByRole("button", {
+      name: /^#12 Subtarea del agente/,
+    });
+    expect(sub).toHaveTextContent("subtarea de #7");
+    expect(screen.getByLabelText("Título de la nueva historia")).toHaveValue(
+      "Idea a medias",
+    );
+    expect(screen.queryByText("Cargando historias…")).not.toBeInTheDocument();
+    expect(mocked.listStories).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignora los avisos de agentes de otro proyecto", async () => {
+    mocked.listStories.mockResolvedValue([summaryOf(story())]);
+    render(<StoriesSection projectId="p1" onOpenStory={vi.fn()} />);
+    await screen.findByRole("button", { name: /^#7 Exportar CSV/ });
+
+    await emitAgentChange({ projectId: "p2", storyIds: ["s1"] });
+
+    expect(mocked.listStories).toHaveBeenCalledTimes(1);
   });
 });

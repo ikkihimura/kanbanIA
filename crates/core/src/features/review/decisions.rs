@@ -1,11 +1,12 @@
 //! Devolver entregas y marcar/quitar bloqueos.
 
 use serde::Deserialize;
+use sqlx::SqliteConnection;
 use ts_rs::TS;
 
 use super::source_of;
 use crate::error::CoreError;
-use crate::features::stories::load_story;
+use crate::features::stories::{StorySummary, load_story};
 use crate::platform::actor::Actor;
 use crate::platform::storage::Store;
 
@@ -28,7 +29,7 @@ pub struct SetBlockerInput {
     pub reason: Option<String>,
 }
 
-fn validate_reason(raw: &str) -> Result<String, CoreError> {
+pub(crate) fn validate_reason(raw: &str) -> Result<String, CoreError> {
     let reason = raw.trim();
     if reason.is_empty()
         || reason.chars().count() > 500
@@ -97,6 +98,8 @@ pub async fn set_story_blocker(
     actor: &Actor,
     input: &SetBlockerInput,
 ) -> Result<(), CoreError> {
+    // Los agentes reportan con `agent_reports::report_blocker`, que exige su reclamo vigente.
+    actor.require_human("marcar un bloqueo desde la app")?;
     let reason = input.reason.as_deref().map(validate_reason).transpose()?;
     let actor = actor.clone();
     let input = input.clone();
@@ -106,63 +109,75 @@ pub async fn set_story_blocker(
                 let story = load_story(conn, &input.project_id, &input.story_id)
                     .await?
                     .ok_or(CoreError::NotFound { entity: "Historia" })?;
-                // Un agente solo puede cambiar o quitar sus propios bloqueos reportados: no
-                // puede ocultar un bloqueo marcado por una persona ni el de otro agente.
-                if let Actor::Agent { agent_id } = &actor {
-                    let existing: Option<(String, Option<String>)> = sqlx::query_as(
-                        "SELECT source, agent_id FROM story_blockers WHERE story_id = ?",
-                    )
-                    .bind(&story.id)
-                    .fetch_optional(&mut *conn)
-                    .await?;
-                    if let Some((source, owner)) = existing
-                        && (source != "reported" || owner.as_deref() != Some(agent_id.as_str()))
-                    {
-                        return Err(CoreError::Forbidden {
-                            reason: "Un agente no puede cambiar ni quitar un bloqueo marcado por \
-                                     una persona u otro agente."
-                                .into(),
-                        });
-                    }
-                }
-                match reason {
-                    Some(reason) => {
-                        if story.archived_at.is_some() || story.accepted_at.is_some() {
-                            return Err(CoreError::Validation {
-                                field: "storyId",
-                                reason: format!(
-                                    "La historia #{} está archivada o aceptada: no se bloquea.",
-                                    story.number
-                                ),
-                            });
-                        }
-                        let (source, agent_id) = source_of(conn, &actor).await?;
-                        sqlx::query(
-                            "INSERT INTO story_blockers (story_id, project_id, reason, source, \
-                             agent_id) VALUES (?, ?, ?, ?, ?) \
-                             ON CONFLICT (story_id) DO UPDATE SET reason = excluded.reason, \
-                             source = excluded.source, agent_id = excluded.agent_id, \
-                             created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
-                             WHERE story_blockers.reason <> excluded.reason \
-                                OR story_blockers.source <> excluded.source",
-                        )
-                        .bind(&story.id)
-                        .bind(&input.project_id)
-                        .bind(&reason)
-                        .bind(source.as_str())
-                        .bind(&agent_id)
-                        .execute(&mut *conn)
-                        .await?;
-                    }
-                    None => {
-                        sqlx::query("DELETE FROM story_blockers WHERE story_id = ?")
-                            .bind(&story.id)
-                            .execute(&mut *conn)
-                            .await?;
-                    }
-                }
+                write_blocker(conn, &actor, &input.project_id, &story, reason.as_deref()).await?;
                 Ok(())
             })
         })
         .await
+}
+
+/// Marca (`Some`) o quita (`None`) el bloqueo dentro de una transacción. Un agente solo cambia o
+/// quita sus propios bloqueos reportados.
+pub(crate) async fn write_blocker(
+    conn: &mut SqliteConnection,
+    actor: &Actor,
+    project_id: &str,
+    story: &StorySummary,
+    reason: Option<&str>,
+) -> Result<(), CoreError> {
+    // Un agente solo puede cambiar o quitar sus propios bloqueos reportados: no
+    // puede ocultar un bloqueo marcado por una persona ni el de otro agente.
+    if let Actor::Agent { agent_id } = actor {
+        let existing: Option<(String, Option<String>)> =
+            sqlx::query_as("SELECT source, agent_id FROM story_blockers WHERE story_id = ?")
+                .bind(&story.id)
+                .fetch_optional(&mut *conn)
+                .await?;
+        if let Some((source, owner)) = existing
+            && (source != "reported" || owner.as_deref() != Some(agent_id.as_str()))
+        {
+            return Err(CoreError::Forbidden {
+                reason: "Un agente no puede cambiar ni quitar un bloqueo marcado por \
+                             una persona u otro agente."
+                    .into(),
+            });
+        }
+    }
+    match reason {
+        Some(reason) => {
+            if story.archived_at.is_some() || story.accepted_at.is_some() {
+                return Err(CoreError::Validation {
+                    field: "storyId",
+                    reason: format!(
+                        "La historia #{} está archivada o aceptada: no se bloquea.",
+                        story.number
+                    ),
+                });
+            }
+            let (source, agent_id) = source_of(conn, actor).await?;
+            sqlx::query(
+                "INSERT INTO story_blockers (story_id, project_id, reason, source, \
+                     agent_id) VALUES (?, ?, ?, ?, ?) \
+                     ON CONFLICT (story_id) DO UPDATE SET reason = excluded.reason, \
+                     source = excluded.source, agent_id = excluded.agent_id, \
+                     created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                     WHERE story_blockers.reason <> excluded.reason \
+                        OR story_blockers.source <> excluded.source",
+            )
+            .bind(&story.id)
+            .bind(project_id)
+            .bind(reason)
+            .bind(source.as_str())
+            .bind(&agent_id)
+            .execute(&mut *conn)
+            .await?;
+        }
+        None => {
+            sqlx::query("DELETE FROM story_blockers WHERE story_id = ?")
+                .bind(&story.id)
+                .execute(&mut *conn)
+                .await?;
+        }
+    }
+    Ok(())
 }

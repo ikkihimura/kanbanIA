@@ -1,4 +1,5 @@
 pub mod access;
+pub mod agent_activity;
 pub mod app_info;
 pub mod backup;
 pub mod claims;

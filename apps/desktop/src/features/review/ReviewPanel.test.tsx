@@ -101,11 +101,59 @@ describe("ReviewPanel", () => {
     expect(
       await screen.findByText("Reportada por Robota", { exact: false }),
     ).toBeInTheDocument();
-    expect(screen.getByText("URL no verificada")).toBeInTheDocument();
-    expect(screen.getByText("No encontrada")).toBeInTheDocument();
+    expect(
+      screen.getByText("URL no verificada (reportada por el agente)"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("No encontrada")).toHaveClass("badge--warn");
     expect(
       screen.getByText("1 entrega pendiente de revisión"),
     ).toBeInTheDocument();
+  });
+
+  it("una ruta reportada por un agente se muestra como no comprobada, sin error ni éxito", async () => {
+    const base = review().deliveries[0];
+    if (!base) throw new Error("sin entrega");
+    mocked.getStoryReview.mockResolvedValue(
+      review({
+        deliveries: [
+          {
+            ...base,
+            references: [
+              {
+                kind: "path",
+                value: "/repo/informe.csv",
+                status: "unverified",
+              },
+            ],
+          },
+          {
+            ...base,
+            id: "d2",
+            number: 2,
+            source: "manual",
+            agentId: null,
+            agentName: null,
+            references: [
+              { kind: "path", value: "/repo/manual.csv", status: "accessible" },
+            ],
+          },
+        ],
+      }),
+    );
+    renderPanel();
+
+    const unverified = await screen.findByText(
+      "Ruta no comprobada (reportada por el agente)",
+    );
+    expect(unverified).toHaveClass("badge");
+    expect(unverified).not.toHaveClass("badge--warn");
+    expect(unverified).not.toHaveClass("badge--ok");
+    // Nada sugiere que la ruta exista o falte.
+    expect(screen.queryByText("URL no verificada")).not.toBeInTheDocument();
+    expect(screen.queryByText("No encontrada")).not.toBeInTheDocument();
+    expect(screen.queryByText("Sin acceso")).not.toBeInTheDocument();
+    // Una ruta manual comprobada por la app sigue mostrándose como accesible.
+    expect(screen.getByText("Accesible")).toHaveClass("badge--ok");
   });
 
   it("aceptar exige marcar todos los criterios y envía los marcados", async () => {
