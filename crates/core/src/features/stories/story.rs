@@ -213,6 +213,25 @@ async fn load_row(
     )
 }
 
+/// La historia existe en el proyecto (archivada o no); si no, «no encontrada».
+pub(crate) async fn ensure_story_exists(
+    conn: &mut SqliteConnection,
+    project_id: &str,
+    id: &str,
+) -> Result<(), CoreError> {
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM stories WHERE project_id = ? AND id = ?)")
+            .bind(project_id)
+            .bind(id)
+            .fetch_one(&mut *conn)
+            .await?;
+    if exists {
+        Ok(())
+    } else {
+        Err(CoreError::NotFound { entity: ENTITY })
+    }
+}
+
 pub(crate) async fn load_story(
     conn: &mut SqliteConnection,
     project_id: &str,

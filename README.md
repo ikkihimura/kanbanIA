@@ -1,6 +1,6 @@
 # Kanban IA
 
-Kanban desktop local para historias, épicas y agentes de IA. Estado: **MVP local (M2)**: planificación en el tablero y agentes por MCP, validado solo en macOS; no es una versión alfa distribuible. Para completar un ciclo real (proyecto → agente por MCP → entrega → aceptación) y probar con el paquete de demostración, sigue la [guía local](docs/GUIA-LOCAL.md). Planificación en [`docs/`](docs/) y estado en [`docs/BACKLOG.md`](docs/BACKLOG.md).
+Kanban desktop local para historias, épicas y agentes de IA. Estado: **MVP local (M2)**: planificación en el tablero y agentes por MCP, validado solo en macOS; no es una versión alfa distribuible. M3 en curso: cada historia puede «Preparar intento» con una instantánea inmutable, pero aún no hay ejecutor (el intento queda en cola). Para completar un ciclo real (proyecto → agente por MCP → entrega → aceptación) y probar con el paquete de demostración, sigue la [guía local](docs/GUIA-LOCAL.md). Planificación en [`docs/`](docs/) y estado en [`docs/BACKLOG.md`](docs/BACKLOG.md).
 
 ## Requisitos
 

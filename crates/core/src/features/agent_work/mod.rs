@@ -9,7 +9,7 @@ mod context;
 mod ready;
 mod rule;
 
-pub(crate) use rule::{claimed_by_other, ready_for_agent};
+pub(crate) use rule::{claimed_by_other, pending_delivery, ready_for_agent};
 
 pub use context::{
     ContextColumn, ContextEpic, ContextRef, StoryContext, StoryKey, YourClaim, get_story_context,

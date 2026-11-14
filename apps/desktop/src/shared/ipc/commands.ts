@@ -13,6 +13,10 @@ import type { StoryClaim } from "../../contracts/generated/StoryClaim";
 import type { AgentChange } from "../../contracts/generated/AgentChange";
 import type { StoryActivity } from "../../contracts/generated/StoryActivity";
 import type { StoryActivityInput } from "../../contracts/generated/StoryActivityInput";
+import type { CancelRunInput } from "../../contracts/generated/CancelRunInput";
+import type { CreateRunInput } from "../../contracts/generated/CreateRunInput";
+import type { RunDetail } from "../../contracts/generated/RunDetail";
+import type { RunSummary } from "../../contracts/generated/RunSummary";
 import type { BackupInfo } from "../../contracts/generated/BackupInfo";
 import type { RestoreOutcome } from "../../contracts/generated/RestoreOutcome";
 import type { RestoreSource } from "../../contracts/generated/RestoreSource";
@@ -314,6 +318,35 @@ export function setStoryBlocker(input: SetBlockerInput): Promise<void> {
 }
 
 // --- cierre con cambios sin guardar ---
+
+// --- intentos de ejecución (HU-017) ---
+
+/**
+ * Prepara un intento: congela la instantánea (historia, criterios, agente, repositorios e
+ * instrucciones con la nota) y lo deja en cola. Falla con `run_active` si la historia ya tiene
+ * uno activo. Mantén el mismo `requestId` al reintentar el mismo envío.
+ */
+export function createRun(input: CreateRunInput): Promise<RunSummary> {
+  return call("create_run", { input });
+}
+
+/** Cancela un intento activo; uno terminado devuelve `invalid_run_transition`. */
+export function cancelRun(input: CancelRunInput): Promise<RunSummary> {
+  return call("cancel_run", { input });
+}
+
+/** Intentos de una historia, del más reciente al más antiguo. */
+export function listStoryRuns(
+  projectId: string,
+  storyId: string,
+): Promise<RunSummary[]> {
+  return call("list_story_runs", { projectId, storyId });
+}
+
+/** Detalle de un intento: resumen, instantánea congelada y últimos eventos. */
+export function getRun(projectId: string, runId: string): Promise<RunDetail> {
+  return call("get_run", { projectId, runId });
+}
 
 /** Nombre del evento emitido por el host (`CONFIRM_CLOSE_EVENT` en exit_guard.rs). */
 export const CONFIRM_CLOSE_EVENT = "unsaved-changes:confirm-close";

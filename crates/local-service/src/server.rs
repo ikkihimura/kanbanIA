@@ -563,7 +563,10 @@ fn status_for(code: ErrorCode) -> StatusCode {
         | ErrorCode::Claimed
         | ErrorCode::NotReady
         | ErrorCode::ClaimLimit
-        | ErrorCode::ClaimEnded => StatusCode::CONFLICT,
+        | ErrorCode::ClaimEnded
+        // Intentos (HU-017): ninguna ruta los sirve; el `match` debe ser exhaustivo.
+        | ErrorCode::RunActive
+        | ErrorCode::InvalidRunTransition => StatusCode::CONFLICT,
         ErrorCode::StorageLocked
         | ErrorCode::StorageNewerSchema
         | ErrorCode::StorageMigrationFailed

@@ -15,6 +15,7 @@
 //! válido de este formato; nunca otra cosa.
 
 use crate::features::claims::close_restored_claims;
+use crate::features::runs::interrupt_restored_runs;
 use crate::platform::clock::{Clock, SystemClock};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -677,6 +678,8 @@ async fn restore_locked(
             reconcile_restored(&mut conn, &revocations).await?;
             // Ningún reclamo de la copia revive (ver `claims`).
             close_restored_claims(&mut conn, SystemClock.now_ms()).await?;
+            // Ningún intento activo de la copia se da por bueno (ver `runs`).
+            interrupt_restored_runs(&mut conn, SystemClock.now_ms()).await?;
             vacuum_into(&mut conn, &staging).await?;
             Ok(version)
         }

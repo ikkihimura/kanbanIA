@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ErrorPayload } from "../../contracts/generated/ErrorPayload";
 import type { StoryReview } from "../../contracts/generated/StoryReview";
 import type { Column } from "../../contracts/generated/Column";
+import type { RunDetail } from "../../contracts/generated/RunDetail";
+import type { RunSummary } from "../../contracts/generated/RunSummary";
 import type { StoryClaim } from "../../contracts/generated/StoryClaim";
 import type { StoryDetail } from "../../contracts/generated/StoryDetail";
 import type { StorySummary } from "../../contracts/generated/StorySummary";
@@ -33,6 +35,10 @@ vi.mock("../../shared/ipc/commands", async (importOriginal) => {
     listActiveClaims: vi.fn(),
     getStoryReview: vi.fn(),
     listStoryActivity: vi.fn(),
+    listStoryRuns: vi.fn(),
+    createRun: vi.fn(),
+    cancelRun: vi.fn(),
+    getRun: vi.fn(),
     onAgentChange: vi.fn(),
   };
 });
@@ -156,6 +162,7 @@ beforeEach(() => {
     entries: [],
   });
   mocked.setUnsavedChanges.mockResolvedValue(undefined);
+  mocked.listStoryRuns.mockResolvedValue([]);
   mocked.getStoryRelations.mockResolvedValue({
     storyId: "s1",
     epic: null,
@@ -249,7 +256,9 @@ describe("StoryEditor", () => {
     await waitFor(() => {
       expect(screen.getByLabelText("Agente asignado")).toHaveValue("");
     });
-    expect(mocked.getStoryRelations).toHaveBeenCalledTimes(2);
+    // «Relaciones» e «Intentos» (agente por defecto) consultan la asignación al montar y al
+    // liberar: dos veces cada uno.
+    expect(mocked.getStoryRelations).toHaveBeenCalledTimes(4);
   });
 
   it("quitar el agente en «Relaciones» vuelve a consultar el reclamo", async () => {
@@ -769,5 +778,135 @@ describe("StoriesSection", () => {
     await emitAgentChange({ projectId: "p2", storyIds: ["s1"] });
 
     expect(mocked.listStories).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("StoryEditor · intentos (HU-017)", () => {
+  const queued: RunSummary = {
+    id: "r1",
+    projectId: "p1",
+    storyId: "s1",
+    number: 1,
+    state: "queued",
+    agentId: "a1",
+    agentNumber: 2,
+    agentName: "Robo",
+    createdAt: "2026-11-12T10:00:00Z",
+    updatedAt: "2026-11-12T10:00:00Z",
+    endedAt: null,
+    endReason: null,
+    usage: { inputTokens: null, outputTokens: null, costUsdMicros: null },
+    lastSequence: 1,
+    snapshotSha256: "ab".repeat(32),
+  };
+  const frozen: RunDetail = {
+    run: queued,
+    snapshot: {
+      schemaVersion: 1,
+      createdAt: "2026-11-12T10:00:00Z",
+      story: {
+        id: "s1",
+        number: 7,
+        title: "Título al preparar",
+        description: "Descripción al preparar",
+        priority: "medium",
+        revision: 1,
+        column: { name: "Listo", category: "ready" },
+      },
+      criteria: [{ number: 1, text: "Criterio al preparar" }],
+      epic: null,
+      parent: null,
+      prerequisites: [],
+      agent: {
+        id: "a1",
+        number: 2,
+        name: "Robo",
+        role: "Rol",
+        provider: "P",
+        model: "M",
+        capabilities: [],
+      },
+      repositories: [],
+      instructions: "# Instrucciones",
+      note: null,
+    },
+    snapshotIntact: true,
+    events: [],
+    eventsTruncated: false,
+  };
+
+  it("el detalle muestra la instantánea, no la historia actual", async () => {
+    const user = userEvent.setup();
+    mocked.listStoryRuns.mockResolvedValue([queued]);
+    mocked.getRun.mockResolvedValue(frozen);
+    renderEditor();
+
+    // La historia actual ya no se parece a la instantánea.
+    expect(await screen.findByDisplayValue("Exportar CSV")).toBeInTheDocument();
+    await user.click(
+      await screen.findByRole("button", { name: "Ver detalle del intento #1" }),
+    );
+    const region = await screen.findByRole("region", {
+      name: "Detalle del intento #1",
+    });
+    expect(region).toHaveTextContent("Título al preparar");
+    expect(region).toHaveTextContent("Descripción al preparar");
+    expect(region).toHaveTextContent("CA-1: Criterio al preparar");
+    expect(region).not.toHaveTextContent("Exportar CSV");
+    expect(region).not.toHaveTextContent("Texto inicial");
+    expect(region).not.toHaveTextContent("Descarga un archivo");
+  });
+
+  it("archivar la historia vuelve a consultar los intentos", async () => {
+    const user = userEvent.setup();
+    mocked.listStoryRuns.mockResolvedValueOnce([queued]).mockResolvedValue([
+      {
+        ...queued,
+        state: "cancelled",
+        endedAt: "2026-11-12T11:00:00Z",
+        endReason: "La historia se archivó.",
+      },
+    ]);
+    mocked.archiveStory.mockResolvedValue(summaryOf(story()));
+    mocked.getStory
+      .mockResolvedValueOnce(story())
+      .mockResolvedValue(
+        story({ archivedAt: "2026-11-12T11:00:00Z", position: null }),
+      );
+    renderEditor();
+
+    expect(await screen.findByText("En cola")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Archivar" }));
+    await user.click(
+      within(
+        screen.getByRole("group", { name: "Confirmar archivo" }),
+      ).getByRole("button", { name: "Archivar" }),
+    );
+
+    expect(
+      await screen.findByText("La historia se archivó."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Cancelado")).toBeInTheDocument();
+    expect(
+      screen.getByText(/está archivada: restáurala para preparar un intento/),
+    ).toBeInTheDocument();
+    expect(mocked.listStoryRuns).toHaveBeenCalledTimes(2);
+  });
+
+  it("una nota sin enviar cuenta como cambio sin guardar", async () => {
+    const user = userEvent.setup();
+    const { onBack } = renderEditor();
+
+    await user.type(
+      await screen.findByLabelText("Nota para el agente (opcional)"),
+      "hola",
+    );
+    expect(mocked.setUnsavedChanges).toHaveBeenLastCalledWith(true);
+
+    await user.click(screen.getByRole("button", { name: "← Proyecto" }));
+    expect(
+      screen.getByText("Tienes cambios sin guardar. ¿Salir y descartarlos?"),
+    ).toBeInTheDocument();
+    expect(onBack).not.toHaveBeenCalled();
   });
 });

@@ -16,6 +16,7 @@ import { AgentActivityPanel } from "../agent_activity/AgentActivityPanel";
 import { ClaimPanel } from "../claims/ClaimPanel";
 import { RelationsPanel } from "../relations/RelationsPanel";
 import { ReviewPanel } from "../review/ReviewPanel";
+import { RunsPanel } from "../runs/RunsPanel";
 import { PRIORITY_LABEL } from "./priorities";
 import { StoryForm } from "./StoryForm";
 
@@ -50,8 +51,13 @@ export function StoryEditor({
   // reclamo): cada contador vuelve a montar el panel contrario para que no muestre datos viejos.
   const [claimEpoch, setClaimEpoch] = useState(0);
   const [relationsEpoch, setRelationsEpoch] = useState(0);
+  // Intentos (HU-017): aceptar o archivar cancelan el intento activo en el núcleo y la
+  // asignación cambia el agente por defecto; este contador hace que el panel vuelva a consultar.
+  const [runsEpoch, setRunsEpoch] = useState(0);
+  // Nota o agente elegidos para un intento sin preparar: también es un borrador.
+  const [runDraft, setRunDraft] = useState(false);
   // Cerrar la ventana o salir con cambios sin guardar pide confirmación (ver exit_guard.rs).
-  useUnsavedChangesGuard(dirty);
+  useUnsavedChangesGuard(dirty || runDraft);
 
   const story = latest ?? (state.status === "ready" ? state.data : null);
 
@@ -70,6 +76,7 @@ export function StoryEditor({
   const reload = useCallback(() => {
     setLatest(null);
     if (!dirtyRef.current) setFormEpoch((n) => n + 1);
+    setRunsEpoch((n) => n + 1);
     run(load, { keepData: true });
   }, [run, load]);
 
@@ -108,7 +115,7 @@ export function StoryEditor({
   }, [state]);
 
   function leave(action: () => void) {
-    if (dirty) setPendingLeave(() => action);
+    if (dirty || runDraft) setPendingLeave(() => action);
     else action();
   }
 
@@ -258,6 +265,7 @@ export function StoryEditor({
             }}
             onAgentChanged={() => {
               setClaimEpoch((n) => n + 1);
+              setRunsEpoch((n) => n + 1);
             }}
           />
 
@@ -268,6 +276,7 @@ export function StoryEditor({
             refreshSignal={agentEpoch}
             onReleased={() => {
               setRelationsEpoch((n) => n + 1);
+              setRunsEpoch((n) => n + 1);
             }}
           />
 
@@ -276,6 +285,21 @@ export function StoryEditor({
             projectId={projectId}
             storyId={story.id}
             refreshSignal={agentEpoch}
+          />
+
+          <RunsPanel
+            key={`runs-${story.id}`}
+            projectId={projectId}
+            storyId={story.id}
+            closed={
+              story.archivedAt !== null
+                ? "archived"
+                : story.acceptedAt !== null
+                  ? "accepted"
+                  : null
+            }
+            refreshSignal={agentEpoch + runsEpoch}
+            onDirtyChange={setRunDraft}
           />
 
           <ReviewPanel

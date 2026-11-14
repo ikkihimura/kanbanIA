@@ -16,9 +16,9 @@ macro_rules! ready_for_agent {
             "(c.category IN ('backlog', 'ready') \
           AND s.archived_at IS NULL AND s.accepted_at IS NULL \
           AND NOT EXISTS (SELECT 1 FROM story_blockers b WHERE b.story_id = s.id) \
-          AND NOT EXISTS (SELECT 1 FROM deliveries dl \
-                          WHERE dl.story_id = s.id AND dl.status = 'pending') \
-          AND NOT EXISTS (SELECT 1 FROM story_dependencies d \
+          AND NOT ",
+            $crate::features::agent_work::pending_delivery!(),
+            " AND NOT EXISTS (SELECT 1 FROM story_dependencies d \
                           JOIN stories p ON p.id = d.depends_on_id \
                           WHERE d.story_id = s.id AND p.accepted_at IS NULL) \
           AND NOT EXISTS (SELECT 1 FROM story_agents x \
@@ -41,3 +41,12 @@ macro_rules! claimed_by_other {
     };
 }
 pub(crate) use claimed_by_other;
+
+/// `s` tiene una entrega pendiente de revisión (HU-015). Sin parámetros. También la usa
+/// `runs::ensure_runnable`: una historia en revisión no admite otro intento.
+macro_rules! pending_delivery {
+    () => {
+        "EXISTS (SELECT 1 FROM deliveries dl WHERE dl.story_id = s.id AND dl.status = 'pending')"
+    };
+}
+pub(crate) use pending_delivery;

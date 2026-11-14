@@ -1083,6 +1083,73 @@ textarea {
   min-width: 0;
 }
 
+/* ---------- intentos (HU-017) ---------- */
+
+.run-notice {
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  color: var(--color-warn);
+  border: 2px dashed var(--color-warn);
+}
+
+.run-list {
+  margin-top: 16px;
+}
+
+.run-form__alert {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+  padding: 8px 12px;
+  color: var(--color-danger);
+  border: 2px solid var(--color-danger);
+}
+
+.run-form__alert p {
+  margin: 0;
+}
+
+.run-detail {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 12px 16px;
+  border: 2px solid var(--color-border);
+}
+
+.run-detail__body {
+  display: grid;
+  gap: 12px;
+}
+
+.run-detail__body p {
+  margin: 0;
+}
+
+.run-detail__snapshot {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  background: var(--color-surface-raised);
+}
+
+.run-detail__subtitle {
+  margin: 8px 0 0;
+  font-size: 0.875rem;
+  color: var(--color-muted);
+}
+
+.run-detail__warning {
+  padding: 8px 12px;
+  color: var(--color-warn);
+  border: 2px solid var(--color-warn);
+}
+
+.run-detail__repo {
+  display: grid;
+  gap: 2px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .shell__cursor {
     animation: none;

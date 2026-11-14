@@ -5,6 +5,7 @@ use super::story::{ENTITY, StorySummary, count_in_column, load_story, not_archiv
 use crate::error::CoreError;
 use crate::features::claims::{EndReason, close_story_claims};
 use crate::features::columns::{ColumnCategory, columns_of_project, ensure_capacity, load_column};
+use crate::features::runs::{StoryClosed, cancel_story_runs};
 use crate::platform::storage::Store;
 
 #[derive(Debug, Clone, Deserialize, TS)]
@@ -44,7 +45,10 @@ pub async fn archive_story(
                     current(conn, &input.project_id, &input.id, input.expected_revision).await?;
                 not_archived(&story)?;
                 // Archivada: ya no hay trabajo que reservar (HU-015).
-                close_story_claims(conn, &input.id, EndReason::Closed, clock.now_ms()).await?;
+                let now = clock.now_ms();
+                close_story_claims(conn, &input.id, EndReason::Closed, now).await?;
+                // Y ningún intento sigue activo (HU-017).
+                cancel_story_runs(conn, &input.id, StoryClosed::Archived, now).await?;
                 let position = story.position.unwrap_or_default();
 
                 sqlx::query(

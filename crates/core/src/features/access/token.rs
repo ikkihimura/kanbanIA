@@ -55,6 +55,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn generated_tokens_are_detected_as_secrets() {
+        // El detector vive en `platform::text`: si cambia el formato, esta prueba avisa.
+        let token = generate().unwrap().token;
+        assert!(crate::platform::text::contains_token_like(&token));
+        assert!(crate::platform::text::contains_secret_like(
+            &token.to_uppercase()
+        ));
+    }
+
+    #[test]
     fn generated_tokens_are_well_formed_unique_and_hashed() {
         let a = generate().unwrap();
         let b = generate().unwrap();

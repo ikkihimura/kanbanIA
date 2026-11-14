@@ -7,6 +7,7 @@ use super::first_column_of;
 use crate::error::CoreError;
 use crate::features::claims::{EndReason, close_story_claims};
 use crate::features::columns::{ColumnCategory, columns_of_project, ensure_capacity, load_column};
+use crate::features::runs::{StoryClosed, cancel_story_runs};
 use crate::features::stories::{
     StorySummary, append_to_column, load_detail, load_story, place_at_index,
 };
@@ -185,7 +186,10 @@ pub async fn accept_story(
                 .execute(&mut *conn)
                 .await?;
                 // Aceptada: ya no hay trabajo que reservar (HU-015).
-                close_story_claims(conn, &story.id, EndReason::Closed, clock.now_ms()).await?;
+                let now = clock.now_ms();
+                close_story_claims(conn, &story.id, EndReason::Closed, now).await?;
+                // Y ningún intento sigue activo (HU-017).
+                cancel_story_runs(conn, &story.id, StoryClosed::Accepted, now).await?;
 
                 let snapshot: Vec<SatisfiedCriterion> = story
                     .criteria

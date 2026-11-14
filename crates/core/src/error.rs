@@ -57,6 +57,14 @@ pub enum CoreError {
     #[error("Otro agente ya reclamó esta historia.")]
     Claimed,
 
+    /// Una persona intenta preparar un intento mientras otro agente tiene un reclamo vigente
+    /// sobre la historia (HU-017). Mismo código que `Claimed`, mensaje para la persona.
+    #[error(
+        "Otro agente tiene un reclamo vigente sobre esta historia. Libera el reclamo (o espera \
+         a que venza) antes de preparar un intento."
+    )]
+    ClaimedForRun,
+
     /// La historia no cumple la regla de «lista» para este agente.
     #[error(
         "La historia no está lista para reclamarse (columna, bloqueo, prerequisitos, \
@@ -80,6 +88,21 @@ pub enum CoreError {
          historia, se archivó o aceptó, o se revocó la credencial. Deja de trabajar en ella."
     })]
     ClaimEnded { expired: bool },
+
+    /// La historia ya tiene un intento activo (HU-017): solo uno a la vez.
+    #[error(
+        "La historia ya tiene un intento en curso (Intento #{number}). Espera a que termine o \
+         cancélalo antes de preparar otro."
+    )]
+    RunActive { number: i64 },
+
+    /// La máquina de estados de los intentos no admite el cambio. `from` y `to` son las
+    /// etiquetas en español de los estados.
+    #[error("Un intento «{from}» no puede pasar a «{to}».")]
+    InvalidRunTransition {
+        from: &'static str,
+        to: &'static str,
+    },
 
     #[error("los datos están abiertos por otra instancia")]
     StorageLocked,
@@ -118,6 +141,8 @@ pub enum ErrorCode {
     NotReady,
     ClaimLimit,
     ClaimEnded,
+    RunActive,
+    InvalidRunTransition,
     StorageLocked,
     StorageNewerSchema,
     StorageMigrationFailed,
@@ -160,10 +185,12 @@ impl CoreError {
             Self::IdempotencyConflict => ErrorCode::IdempotencyConflict,
             Self::WipLimitExceeded { .. } => ErrorCode::WipLimitExceeded,
             Self::AcceptanceRequired { .. } => ErrorCode::AcceptanceRequired,
-            Self::Claimed => ErrorCode::Claimed,
+            Self::Claimed | Self::ClaimedForRun => ErrorCode::Claimed,
             Self::NotReady => ErrorCode::NotReady,
             Self::ClaimLimit { .. } => ErrorCode::ClaimLimit,
             Self::ClaimEnded { .. } => ErrorCode::ClaimEnded,
+            Self::RunActive { .. } => ErrorCode::RunActive,
+            Self::InvalidRunTransition { .. } => ErrorCode::InvalidRunTransition,
             Self::StorageLocked => ErrorCode::StorageLocked,
             Self::NewerSchema(_) => ErrorCode::StorageNewerSchema,
             Self::MigrationFailed(_) => ErrorCode::StorageMigrationFailed,
@@ -180,7 +207,11 @@ impl CoreError {
             | Self::AlreadyExists { .. }
             | Self::Cycle { .. }
             | Self::WipLimitExceeded { .. }
-            | Self::AcceptanceRequired { .. } => (self.to_string(), true),
+            | Self::AcceptanceRequired { .. }
+            | Self::RunActive { .. }
+            | Self::ClaimedForRun => (self.to_string(), true),
+            // El intento ya cambió de estado: reintentar lo mismo no sirve.
+            Self::InvalidRunTransition { .. } => (self.to_string(), false),
             // Reintentar lo mismo no sirve: el agente debe cambiar de historia o reclamar.
             Self::Claimed | Self::NotReady | Self::ClaimLimit { .. } | Self::ClaimEnded { .. } => {
                 (self.to_string(), false)
