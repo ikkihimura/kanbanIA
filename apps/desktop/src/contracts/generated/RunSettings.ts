@@ -11,4 +11,9 @@ maxConcurrency: number,
 /**
  * Tiempo máximo de un proceso en minutos (1..240; por defecto 30).
  */
-timeoutMinutes: number, revision: number, };
+timeoutMinutes: number, 
+/**
+ * Ruta absoluta del ejecutable del adaptador de Claude Code (`claude-agent-acp`), tal como
+ * la escribió la persona; `null` = no configurado. Ruta local: nunca para agentes.
+ */
+claudeAcpPath: string | null, revision: number, };

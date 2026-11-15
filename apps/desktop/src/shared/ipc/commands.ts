@@ -13,6 +13,7 @@ import type { StoryClaim } from "../../contracts/generated/StoryClaim";
 import type { AgentChange } from "../../contracts/generated/AgentChange";
 import type { StoryActivity } from "../../contracts/generated/StoryActivity";
 import type { StoryActivityInput } from "../../contracts/generated/StoryActivityInput";
+import type { AcpAdapterCheck } from "../../contracts/generated/AcpAdapterCheck";
 import type { CancelRunInput } from "../../contracts/generated/CancelRunInput";
 import type { CreateRunInput } from "../../contracts/generated/CreateRunInput";
 import type { RunDetail } from "../../contracts/generated/RunDetail";
@@ -359,7 +360,8 @@ export function getRun(projectId: string, runId: string): Promise<RunDetail> {
 // --- ejecución supervisada (HU-018) ---
 
 /**
- * Pide iniciar un intento en cola con el proceso de prueba (sin IA). Sigue `queued` hasta que
+ * Pide iniciar un intento en cola con el ejecutor elegido: el proceso de prueba (sin IA) o
+ * Claude Code vía ACP (HU-019, exige un adaptador configurado). Sigue `queued` hasta que
  * el supervisor tenga hueco. Mantén el mismo `requestId` al reintentar el mismo envío.
  */
 export function startRun(input: StartRunInput): Promise<RunSummary> {
@@ -405,6 +407,17 @@ export function updateRunSettings(
   input: UpdateRunSettingsInput,
 ): Promise<RunSettings> {
   return call("update_run_settings", { input });
+}
+
+/**
+ * «Comprobar adaptador» (HU-019): lanza el adaptador ACP, solo hace `initialize` y devuelve lo
+ * que declaró. Con `path` comprueba esa ruta (sin guardarla); sin ella, la configurada. Los
+ * fallos son `validation` en el campo `claudeAcpPath`.
+ */
+export function checkAcpAdapter(
+  path: string | null = null,
+): Promise<AcpAdapterCheck> {
+  return call("check_acp_adapter", { path });
 }
 
 /** Nombre del evento emitido por el host (`RUN_CHANGE_EVENT` en run_supervisor.rs). */

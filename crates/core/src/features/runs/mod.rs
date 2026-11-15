@@ -1,5 +1,5 @@
 //! Slice `runs`: intentos de ejecución de una historia (HU-017) y su ejecución supervisada
-//! (HU-018). El ejecutor de HU-018 es un proceso de prueba (sin IA); HU-019 lo sustituye por ACP.
+//! (HU-018). Ejecutores: un proceso de prueba (sin IA, HU-018) y Claude Code vía ACP (HU-019).
 //!
 //! - Instantánea inmutable: al crear el intento se congela en JSON (con su SHA-256) lo que
 //!   recibiría el agente: historia, criterios, épica, padre, prerequisitos, perfil del agente,
@@ -22,8 +22,14 @@
 //!   (`crates/runner`) usa la API de `supervisor`, protegida por `SupervisorToken`.
 //!   Configuración de concurrencia y tiempo máximo en `run_settings`. Worktrees registrados en
 //!   `run_worktrees` (rutas absolutas, nunca para agentes).
+//! - ACP (HU-019): el ejecutor se elige al pedir el inicio (`RunExecutor`); la ruta del
+//!   adaptador vive en `run_settings` (validada en disco antes de guardarla). El supervisor
+//!   registra lo que el agente declaró al negociar (`record_acp_session`, evento
+//!   `acp_session`) y termina con motivos del núcleo (`RunFailure`, `RunOutcome`), nunca
+//!   con texto del agente.
 //! - Nada de esto se expone a agentes (servicio local o MCP).
 
+mod acp_session;
 mod cancel;
 mod close;
 mod create;
@@ -40,30 +46,35 @@ mod start;
 mod supervisor;
 mod worktree;
 
+pub use acp_session::{
+    ACP_CAPABILITIES, AcpAdapterCheck, AcpSessionInfo, MAX_ACP_CAPABILITIES, MAX_ACP_NAME_CHARS,
+    MAX_ACP_VERSION_CHARS, ReportedSession, prompt_digest, record_acp_session,
+};
 pub use cancel::{CancelRunInput, cancel_run};
 pub use create::{CreateRunInput, MAX_NOTE_CHARS, create_run};
 pub use event::{
     MAX_EVENT_PAYLOAD_BYTES, RecordRunEventInput, RecordedRunEvent, RunEvent, record_run_event,
 };
 pub use execution_views::{
-    RUN_OUTPUT_DIR, RemoveRunWorktreeInput, RunChange, RunOutputLine, RunOutputStream,
-    RunOutputView, WorktreeChanges,
+    RUN_OUTPUT_DIR, RemoveRunWorktreeInput, RunChange, RunOutputKind, RunOutputLine,
+    RunOutputStream, RunOutputView, WorktreeChanges,
 };
 pub use get::{MAX_DETAIL_EVENTS, RunDetail, RunEventRecord, RunStartRequest, get_run};
 pub use list::list_story_runs;
 pub use run::{RunState, RunSummary, RunUsage};
 pub use settings::{
-    MAX_CONCURRENCY, MAX_TIMEOUT_MINUTES, MIN_CONCURRENCY, MIN_TIMEOUT_MINUTES, RunSettings,
-    UpdateRunSettingsInput, get_run_settings, update_run_settings,
+    MAX_ADAPTER_PATH_CHARS, MAX_CONCURRENCY, MAX_TIMEOUT_MINUTES, MIN_CONCURRENCY,
+    MIN_TIMEOUT_MINUTES, RunSettings, UpdateRunSettingsInput, check_adapter_path, get_run_settings,
+    update_run_settings,
 };
 pub use snapshot::{
     RunSnapshot, SNAPSHOT_SCHEMA_VERSION, SnapshotAgent, SnapshotColumn, SnapshotCriterion,
     SnapshotEpic, SnapshotRepository, SnapshotStory, SnapshotStoryRef,
 };
-pub use start::{StartRunInput, TestScenario, start_run};
+pub use start::{RunExecutor, StartRunInput, TestScenario, start_run};
 pub use supervisor::{
-    Dispatch, DispatchOutcome, InterruptCause, PendingCancellation, PendingStart, RunFailure,
-    RunOutcome, SupervisorToken, begin_dispatch, discard_unused_worktree, finish_run,
+    Dispatch, DispatchExecutor, DispatchOutcome, InterruptCause, PendingCancellation, PendingStart,
+    RunFailure, RunOutcome, SupervisorToken, begin_dispatch, discard_unused_worktree, finish_run,
     interrupt_unverifiable_runs, mark_running, next_dispatchable, pending_cancellations,
     record_worktree, void_start_requests,
 };

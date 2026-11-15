@@ -3,4 +3,4 @@
 /**
  * Origen de una línea de salida.
  */
-export type RunOutputStream = "stdout" | "stderr" | "system";
+export type RunOutputStream = "stdout" | "stderr" | "system" | "agent";

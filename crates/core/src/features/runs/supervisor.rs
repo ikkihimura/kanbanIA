@@ -26,7 +26,8 @@ use sqlx::SqliteConnection;
 use super::run::{RunState, RunSummary, require_run_any, transition, validate_id};
 use super::runnable::ensure_runnable;
 use super::settings::load_settings;
-use super::start::TestScenario;
+use super::snapshot::agent_instructions;
+use super::start::{RunExecutor, TestScenario, load_snapshot};
 use super::worktree::{RunWorktree, load_worktree, worktree_plan};
 use crate::error::CoreError;
 use crate::features::stories::load_story;
@@ -81,6 +82,25 @@ pub struct PendingStart {
     pub requested_at_ms: i64,
 }
 
+/// Ejecutor de un intento despachado, con lo que necesita para lanzarse sin releer nada.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchExecutor {
+    /// Proceso de prueba incluido (sin IA) con su escenario.
+    TestProcess(TestScenario),
+    /// Claude Code vía ACP (HU-019).
+    ClaudeAcp {
+        /// Ruta del adaptador leída de la configuración al despachar, tal como la escribió la
+        /// persona (se validó en disco al guardarla; puede haber cambiado después: si no se
+        /// puede lanzar → `RunFailure::AdapterMissing`).
+        adapter_path: PathBuf,
+        /// Instrucciones Markdown de la instantánea, generadas con el mismo código que
+        /// `RunSnapshot.instructions` pero sin rutas absolutas de repositorios
+        /// (`snapshot::agent_instructions`): el único texto del prompt. El contenido de la
+        /// historia ya va delimitado como datos. La ruta del worktree es el `cwd`.
+        instructions: String,
+    },
+}
+
 /// Todo lo que el supervisor necesita para preparar y lanzar un intento despachado. Contiene
 /// rutas absolutas locales: nunca se envía a agentes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,7 +121,8 @@ pub struct Dispatch {
     pub branch: String,
     /// `<data_dir>/worktrees/<project_id>/<run_id>`: `cwd` del proceso.
     pub worktree_path: PathBuf,
-    pub scenario: TestScenario,
+    /// Ejecutor elegido al pedir el inicio.
+    pub executor: DispatchExecutor,
     /// Tiempo máximo leído de la configuración al despachar.
     pub timeout_minutes: i64,
 }
@@ -129,10 +150,36 @@ pub enum RunFailure {
     BranchExists,
     /// Falló `git worktree add` por otro motivo.
     WorktreeFailed,
-    /// No se pudo lanzar el proceso.
+    /// No se pudo lanzar el proceso (de prueba). Para el adaptador ACP: `AdapterMissing` o
+    /// `AdapterSpawnFailed`.
     SpawnFailed,
     /// Error del supervisor (p. ej. al escribir la salida).
     Internal,
+    /// ACP: el proceso terminó o cerró su salida antes de responder.
+    AgentDisconnected,
+    /// ACP: JSON o JSON-RPC no válido, o una respuesta con forma inesperada (incluido
+    /// `stopReason: cancelled` sin que la app pidiera cancelar).
+    AgentProtocolError,
+    /// ACP: `initialize` respondió con una versión de protocolo distinta de la 1.
+    AgentVersionUnsupported,
+    /// ACP: el agente exige autenticarse (la app nunca autentica por su cuenta).
+    AgentAuthRequired,
+    /// ACP: no hay un modo que pida permiso antes de actuar, o no se pudo fijar.
+    AgentModeUnavailable,
+    /// ACP: `stopReason: refusal`.
+    AgentRefused,
+    /// ACP: `stopReason: max_tokens` o `max_turn_requests`.
+    AgentLimitReached,
+    /// ACP: error JSON-RPC a una petición de la app durante la negociación (el mensaje del
+    /// agente va recortado al registro, nunca al motivo).
+    AgentRequestFailed,
+    /// ACP: error JSON-RPC a `session/prompt` (el turno no terminó).
+    AgentTurnFailed,
+    /// ACP: el adaptador configurado no existe o no se puede ejecutar (o no hay ruta).
+    AdapterMissing,
+    /// ACP: el adaptador existe pero no se pudo lanzar por otro motivo (el detalle va al
+    /// registro del intento).
+    AdapterSpawnFailed,
 }
 
 impl RunFailure {
@@ -152,10 +199,38 @@ impl RunFailure {
             Self::WorktreeFailed => {
                 "No se pudo crear el worktree del intento. Consulta el registro del intento."
             }
-            Self::SpawnFailed => "No se pudo lanzar el proceso de prueba.",
+            Self::SpawnFailed => "No se pudo lanzar el proceso.",
+            Self::AdapterSpawnFailed => {
+                "No se pudo lanzar el adaptador de Claude Code configurado. Consulta el registro \
+                 del intento."
+            }
             Self::Internal => {
                 "El supervisor detuvo el intento por un error interno. Consulta el registro del \
                  intento."
+            }
+            Self::AgentDisconnected => "El agente se desconectó antes de terminar.",
+            Self::AgentProtocolError => "El agente envió una respuesta ACP no válida.",
+            Self::AgentVersionUnsupported => {
+                "El agente no habla una versión de ACP compatible (se requiere la 1)."
+            }
+            Self::AgentAuthRequired => {
+                "El agente necesita iniciar sesión: abre Claude Code en una terminal y usa /login."
+            }
+            Self::AgentModeUnavailable => {
+                "El agente no permite fijar un modo que pida permiso antes de actuar: no se \
+                 ejecuta."
+            }
+            Self::AgentRefused => "El agente rechazó la tarea.",
+            Self::AgentLimitReached => "El agente alcanzó su límite de tokens o de turnos.",
+            Self::AgentRequestFailed => {
+                "El agente devolvió un error al negociar la sesión. Consulta el registro del \
+                 intento."
+            }
+            Self::AgentTurnFailed => {
+                "El agente devolvió un error durante el turno. Consulta el registro del intento."
+            }
+            Self::AdapterMissing => {
+                "No se encontró el adaptador de Claude Code configurado o no es ejecutable."
             }
         }
     }
@@ -167,6 +242,11 @@ pub enum RunOutcome {
     /// El proceso terminó con este código: 0 → `completed` (no acepta la historia ni la
     /// mueve); otro → `failed` («Terminó con código n.»).
     Exited { code: i32 },
+    /// ACP: el agente respondió `stopReason: end_turn` → `completed` («El agente terminó su
+    /// turno.»). No acepta la historia ni la mueve; es lo que el agente reporta, no una
+    /// verificación. Después el supervisor cierra el adaptador y mata su árbol: su código de
+    /// salida ya no dice nada del resultado.
+    AgentEndedTurn,
     /// Lo terminó una señal que no envió el supervisor → `failed`.
     Signaled { signal: Option<i32> },
     /// Superó el tiempo máximo y el supervisor mató su árbol → `failed`.
@@ -261,14 +341,14 @@ pub async fn begin_dispatch(
         .write(move |conn| {
             Box::pin(async move {
                 let now = clock.now_ms();
-                let request: Option<(i64, String, String)> = sqlx::query_as(
-                    "SELECT id, repository_id, scenario FROM run_start_requests \
+                let request: Option<(i64, String, String, Option<String>)> = sqlx::query_as(
+                    "SELECT id, repository_id, executor, scenario FROM run_start_requests \
                      WHERE run_id = ? AND voided_at_ms IS NULL AND dispatched_at_ms IS NULL",
                 )
                 .bind(&run_id)
                 .fetch_optional(&mut *conn)
                 .await?;
-                let Some((request_id, repository_id, scenario)) = request else {
+                let Some((request_id, repository_id, executor, scenario)) = request else {
                     return Ok(DispatchOutcome::Stale);
                 };
                 let run = match require_run_any(conn, &run_id).await {
@@ -298,10 +378,11 @@ pub async fn begin_dispatch(
                 // A partir de aquí la petición está consumida: un error persistente no puede
                 // dejarla pendiente (bloquearía la cola FIFO), así que el intento falla. Solo
                 // un error transitorio de la base devuelve `Err` (y deshace todo).
-                match prepare(conn, &clock, &run, &repository_id, &scenario, now).await {
+                let executor = (executor.as_str(), scenario.as_deref());
+                match prepare(conn, &clock, &run, &repository_id, executor, now).await {
                     Ok(Prepared::Ready(dispatch)) => {
                         transition(conn, &run, RunState::Preparing, None, now).await?;
-                        Ok(DispatchOutcome::Ready(dispatch))
+                        Ok(DispatchOutcome::Ready(*dispatch))
                     }
                     Ok(Prepared::Rejected(reason)) => reject(conn, &run, &reason, now).await,
                     Err(error) if is_transient(&error) => Err(error),
@@ -313,7 +394,7 @@ pub async fn begin_dispatch(
 }
 
 enum Prepared {
-    Ready(Dispatch),
+    Ready(Box<Dispatch>),
     Rejected(String),
 }
 
@@ -323,9 +404,10 @@ async fn prepare(
     store: &Store,
     run: &RunSummary,
     repository_id: &str,
-    scenario: &str,
+    (executor, scenario): (&str, Option<&str>),
     now: i64,
 ) -> Result<Prepared, CoreError> {
+    let executor = RunExecutor::from_columns(executor, scenario)?;
     let story = load_story(conn, &run.project_id, &run.story_id)
         .await?
         .ok_or(CoreError::NotFound { entity: "Historia" })?;
@@ -344,7 +426,25 @@ async fn prepare(
         Err(failure) => return Ok(Prepared::Rejected(failure.reason().to_owned())),
     };
     let settings = load_settings(conn).await?;
-    Ok(Prepared::Ready(Dispatch {
+    let executor = match executor {
+        RunExecutor::TestProcess { scenario } => DispatchExecutor::TestProcess(scenario),
+        RunExecutor::ClaudeAcp => {
+            // La persona pudo quitar la ruta después de pedir el inicio.
+            let Some(path) = settings.claude_acp_path else {
+                return Ok(Prepared::Rejected(
+                    RunFailure::AdapterMissing.reason().to_owned(),
+                ));
+            };
+            DispatchExecutor::ClaudeAcp {
+                adapter_path: PathBuf::from(path),
+                instructions: agent_instructions(
+                    &load_snapshot(conn, &run.id).await?,
+                    repository_id,
+                ),
+            }
+        }
+    };
+    Ok(Prepared::Ready(Box::new(Dispatch {
         worktree_path: plan.worktree_path,
         branch: plan.branch,
         run_id: run.id.clone(),
@@ -355,9 +455,9 @@ async fn prepare(
         repository_id: repository_id.to_owned(),
         repository_path: plan.repository_path,
         base_commit: plan.base_commit,
-        scenario: TestScenario::parse(scenario)?,
+        executor,
         timeout_minutes: settings.timeout_minutes,
-    }))
+    })))
 }
 
 /// Errores que desaparecen al reintentar: base ocupada o bloqueada (`SQLITE_BUSY`,
@@ -554,6 +654,10 @@ pub async fn finish_run(
                 let now = clock.now_ms();
                 let run = require_run_any(conn, &run_id).await?;
                 let (to, reason) = match outcome {
+                    RunOutcome::AgentEndedTurn => (
+                        RunState::Completed,
+                        "El agente terminó su turno.".to_owned(),
+                    ),
                     RunOutcome::Exited { code: 0 } => {
                         (RunState::Completed, "Terminó con código 0.".to_owned())
                     }

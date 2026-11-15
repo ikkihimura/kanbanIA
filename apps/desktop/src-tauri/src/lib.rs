@@ -97,6 +97,7 @@ pub fn register_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
             commands::runs::remove_run_worktree,
             commands::runs::get_run_settings,
             commands::runs::update_run_settings,
+            commands::runs::check_acp_adapter,
         ])
 }
 

@@ -252,7 +252,8 @@ describe("RunsPanel", () => {
     expect(
       within(third).getByRole("button", { name: "Iniciar… el intento #3" }),
     ).toBeInTheDocument();
-    expect(third).toHaveTextContent("Proceso de prueba (sin IA)");
+    // El ejecutor se elige al iniciar: la lista no da uno por supuesto.
+    expect(third).not.toHaveTextContent("Proceso de prueba (sin IA)");
     expect(
       within(third).getByRole("button", { name: "Cancelar intento…" }),
     ).toBeInTheDocument();

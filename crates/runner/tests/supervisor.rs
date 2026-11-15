@@ -221,7 +221,7 @@ impl Env {
                 project_id: self.project.id.clone(),
                 run_id: run.id.clone(),
                 repository_id: None,
-                scenario,
+                executor: kanbania_core::features::runs::RunExecutor::TestProcess { scenario },
             },
         )
         .await
@@ -314,6 +314,7 @@ impl Env {
                 expected_revision: current.revision,
                 max_concurrency: max,
                 timeout_minutes: current.timeout_minutes,
+                claude_acp_path: current.claude_acp_path,
             },
         )
         .await

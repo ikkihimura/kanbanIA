@@ -15,8 +15,8 @@ import { formatDateTime } from "../../shared/ui/format";
 import { PrepareRunForm } from "./PrepareRunForm";
 import { RunDetailView, type DetailFocus } from "./RunDetailView";
 import {
-  TEST_PROCESS_LABEL,
   canStartRun,
+  executorLabel,
   formatCost,
   formatTokens,
   isActiveRun,
@@ -27,11 +27,11 @@ import {
 import { useRunChanges } from "./useRunChanges";
 
 /**
- * HU-018: el único ejecutor es un proceso de prueba incluido (la IA llega con HU-019). Se dice
- * siempre, para no dar a entender que trabaja un agente.
+ * HU-018/019: al iniciar se elige el ejecutor, un proceso de prueba incluido (sin IA) o Claude
+ * Code vía ACP. Se dice siempre, para no dar a entender que trabaja un agente sin elegirlo.
  */
 export const RUNNER_NOTICE =
-  "Todavía no trabaja ningún agente: «Iniciar» lanza un proceso de prueba (sin IA) en un worktree propio para probar la supervisión. Que termine bien no acepta la historia.";
+  "«Iniciar» lanza, en un worktree propio, el ejecutor que elijas: un proceso de prueba (sin IA) para probar la supervisión o Claude Code (ACP) si configuraste su adaptador. Que un intento termine bien no acepta la historia.";
 
 /** Cuándo se detendrá un intento con la cancelación pedida (sin prometer plazos falsos). */
 function cancelEta(state: RunState): string {
@@ -365,7 +365,6 @@ export function RunsPanel({
                             {`el intento #${String(run.number)}`}
                           </span>
                         </button>
-                        <span className="badge">{TEST_PROCESS_LABEL}</span>
                       </>
                     )}
                     {isActiveRun(run.state) && !isCancelPending(run) && (
@@ -452,7 +451,7 @@ export function RunsPanel({
                       ¿Cancelar el intento #{run.number}?{" "}
                       {run.state === "queued"
                         ? "Quedará como «Cancelado» y no se podrá reanudar;"
-                        : "Se detendrán el proceso de prueba y sus procesos hijos; quedará como «Cancelado» cuando se detengan y no se podrá reanudar;"}{" "}
+                        : "Se detendrán el proceso y sus procesos hijos; quedará como «Cancelado» cuando se detengan y no se podrá reanudar;"}{" "}
                       su instantánea y sus eventos se conservan. Podrás preparar
                       otro intento.
                     </p>
@@ -500,9 +499,9 @@ export function RunsPanel({
             refreshSignal={detailEpoch}
             focusOnLoad={selected.focus}
             onClose={closeDetail}
-            onStarted={(run) => {
+            onStarted={(run, executor) => {
               setMessage(
-                `Intento #${String(run.number)}: inicio pedido con el proceso de prueba (sin IA). Espera turno en la cola.`,
+                `Intento #${String(run.number)}: inicio pedido con ${executor.kind === "claudeAcp" ? executorLabel(executor) : "el proceso de prueba (sin IA)"}. Espera turno en la cola.`,
               );
               reloadRuns();
             }}

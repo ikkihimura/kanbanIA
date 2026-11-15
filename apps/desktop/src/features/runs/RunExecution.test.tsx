@@ -1,5 +1,5 @@
-// HU-018: iniciar con el proceso de prueba, estados, cancelación solicitada, worktree, salida,
-// avisos `run-change` y configuración de ejecuciones.
+// HU-018/019: iniciar con el proceso de prueba o Claude Code (ACP), estados, cancelación
+// solicitada, worktree, salida, sesión del agente, avisos `run-change` y configuración.
 import {
   act,
   fireEvent,
@@ -14,6 +14,7 @@ import type { ErrorPayload } from "../../contracts/generated/ErrorPayload";
 import type { RunChange } from "../../contracts/generated/RunChange";
 import type { RunDetail } from "../../contracts/generated/RunDetail";
 import type { RunOutputView } from "../../contracts/generated/RunOutputView";
+import type { RunSettings } from "../../contracts/generated/RunSettings";
 import type { RunSummary } from "../../contracts/generated/RunSummary";
 import type { RunWorktree } from "../../contracts/generated/RunWorktree";
 import type { SnapshotRepository } from "../../contracts/generated/SnapshotRepository";
@@ -40,6 +41,7 @@ vi.mock("../../shared/ipc/commands", async (importOriginal) => ({
   removeRunWorktree: vi.fn(),
   getRunSettings: vi.fn(),
   updateRunSettings: vi.fn(),
+  checkAcpAdapter: vi.fn(),
   onRunChange: vi.fn(),
   setUnsavedChanges: vi.fn(),
 }));
@@ -182,6 +184,16 @@ const relations: StoryRelations = {
   pendingPrerequisites: 0,
 };
 
+function settings(overrides: Partial<RunSettings> = {}): RunSettings {
+  return {
+    maxConcurrency: 2,
+    timeoutMinutes: 30,
+    claudeAcpPath: null,
+    revision: 1,
+    ...overrides,
+  };
+}
+
 function validation(field: string, message: string): ErrorPayload {
   return { code: "validation", message, recoverable: true, field };
 }
@@ -222,6 +234,7 @@ beforeEach(() => {
     skippedCorrupt: 0,
     earlierDropped: false,
   });
+  mocked.getRunSettings.mockResolvedValue(settings());
 });
 
 afterEach(() => {
@@ -239,7 +252,7 @@ describe("Iniciar (proceso de prueba)", () => {
       detail(requested, {
         startRequest: {
           repositoryId: "g1",
-          scenario: "fail",
+          executor: { kind: "testProcess", scenario: "fail" },
           requestedAt: "2026-11-12T10:02:00Z",
           dispatchedAt: null,
           voidedAt: null,
@@ -249,21 +262,23 @@ describe("Iniciar (proceso de prueba)", () => {
     mocked.startRun.mockResolvedValue(requested);
     renderPanel();
 
-    // «Iniciar…» en la lista abre el detalle con el foco en el escenario.
+    // «Iniciar…» en la lista abre el detalle con el foco en el ejecutor elegido.
     const item = within(
       await screen.findByRole("list", { name: /^Intentos/ }),
     ).getByRole("listitem");
-    expect(item).toHaveTextContent("Proceso de prueba (sin IA)");
     await user.click(
       within(item).getByRole("button", { name: "Iniciar… el intento #1" }),
     );
-    const scenario = await screen.findByRole("group", {
+    const executors = await screen.findByRole("group", { name: "Ejecutor" });
+    // Opciones siempre visibles; por defecto y con el foco, el proceso de prueba.
+    expect(
+      within(executors).getByRole("radio", {
+        name: "Proceso de prueba (sin IA)",
+      }),
+    ).toHaveFocus();
+    const scenario = screen.getByRole("group", {
       name: "Escenario del proceso de prueba",
     });
-    // Opciones siempre visibles; el foco va a la elegida («Termina bien»).
-    expect(
-      within(scenario).getByRole("radio", { name: "Termina bien" }),
-    ).toHaveFocus();
     expect(
       within(scenario).getByRole("radio", { name: "Termina bien" }),
     ).toBeChecked();
@@ -301,7 +316,7 @@ describe("Iniciar (proceso de prueba)", () => {
       requestId: expect.any(String) as string,
       projectId: "p1",
       runId: "r1",
-      scenario: "fail",
+      executor: { kind: "testProcess", scenario: "fail" },
     });
     expect(
       await screen.findByText(
@@ -370,7 +385,10 @@ describe("Iniciar (proceso de prueba)", () => {
     ).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Iniciar" }));
     expect(mocked.startRun).toHaveBeenCalledWith(
-      expect.objectContaining({ repositoryId: "g3", scenario: "success" }),
+      expect.objectContaining({
+        repositoryId: "g3",
+        executor: { kind: "testProcess", scenario: "success" },
+      }),
     );
   });
 
@@ -532,7 +550,17 @@ describe("Estados del intento", () => {
   it("completado no acepta la historia: el detalle lo dice", async () => {
     const user = userEvent.setup();
     mocked.listStoryRuns.mockResolvedValue([finished]);
-    mocked.getRun.mockResolvedValue(detail(finished));
+    mocked.getRun.mockResolvedValue(
+      detail(finished, {
+        startRequest: {
+          repositoryId: "g1",
+          executor: { kind: "testProcess", scenario: "success" },
+          requestedAt: "2026-11-12T10:02:00Z",
+          dispatchedAt: "2026-11-12T10:02:01Z",
+          voidedAt: null,
+        },
+      }),
+    );
     renderPanel();
 
     const region = await openDetail(user);
@@ -554,7 +582,7 @@ describe("Estados del intento", () => {
       detail(summary(), {
         startRequest: {
           repositoryId: "g1",
-          scenario: "slow",
+          executor: { kind: "testProcess", scenario: "slow" },
           requestedAt: "2026-11-12T10:02:00Z",
           dispatchedAt: null,
           voidedAt: "2026-11-12T11:00:00Z",
@@ -645,7 +673,7 @@ describe("Estados del intento", () => {
     await user.click(screen.getByRole("button", { name: "Cancelar intento…" }));
     const dialog = screen.getByRole("alertdialog");
     expect(dialog).toHaveTextContent(
-      "Se detendrán el proceso de prueba y sus procesos hijos",
+      "Se detendrán el proceso y sus procesos hijos",
     );
     await user.click(
       within(dialog).getByRole("button", { name: "Cancelar intento" }),
@@ -1058,18 +1086,26 @@ describe("Worktree", () => {
 describe("Salida del proceso", () => {
   const output: RunOutputView = {
     lines: [
-      { atMs: 1, stream: "system", text: "Proceso iniciado", cut: false },
+      {
+        atMs: 1,
+        stream: "system",
+        text: "Proceso iniciado",
+        cut: false,
+        kind: null,
+      },
       {
         atMs: 2,
         stream: "stdout",
         text: '<script>alert("x")</script>',
         cut: false,
+        kind: null,
       },
       {
         atMs: 3,
         stream: "stderr",
         text: "**negrita** y [enlace](http://x)",
         cut: true,
+        kind: null,
       },
     ],
     skippedCorrupt: 2,
@@ -1093,9 +1129,9 @@ describe("Salida del proceso", () => {
         .getAllByRole("listitem")
         .map((li) => li.textContent),
     ).toEqual([
-      "[sistema] Proceso iniciado",
-      '[salida] <script>alert("x")</script>',
-      "[error] **negrita** y [enlace](http://x) [cortada]",
+      "[app] Proceso iniciado",
+      '[stdout] <script>alert("x")</script>',
+      "[stderr] **negrita** y [enlace](http://x) [cortada]",
     ]);
     expect(container.querySelector("script")).toBeNull();
     expect(lines.querySelector("strong, a, em")).toBeNull();
@@ -1133,6 +1169,7 @@ describe("Salida del proceso", () => {
         stream: "stdout" as const,
         text: `línea ${String(i)}`,
         cut: false,
+        kind: null,
       })),
       skippedCorrupt: 0,
       earlierDropped: false,
@@ -1274,20 +1311,14 @@ describe("Avisos run-change", () => {
 
 describe("Sistema → Ejecuciones", () => {
   beforeEach(() => {
-    mocked.getRunSettings.mockResolvedValue({
-      maxConcurrency: 2,
-      timeoutMinutes: 30,
-      revision: 1,
-    });
+    mocked.getRunSettings.mockResolvedValue(settings());
   });
 
   it("muestra los valores y la ayuda, valida los límites y guarda con expectedRevision", async () => {
     const user = userEvent.setup();
-    mocked.updateRunSettings.mockResolvedValue({
-      maxConcurrency: 3,
-      timeoutMinutes: 45,
-      revision: 2,
-    });
+    mocked.updateRunSettings.mockResolvedValue(
+      settings({ maxConcurrency: 3, timeoutMinutes: 45, revision: 2 }),
+    );
     render(<RunSettingsPanel />);
 
     expect(
@@ -1323,6 +1354,7 @@ describe("Sistema → Ejecuciones", () => {
       expectedRevision: 1,
       maxConcurrency: 3,
       timeoutMinutes: 45,
+      claudeAcpPath: null,
     });
     expect(
       await screen.findByText("✓ Configuración guardada."),
@@ -1343,13 +1375,13 @@ describe("Sistema → Ejecuciones", () => {
         code: "conflict",
         message: "La configuración cambió.",
         recoverable: true,
-        current: { maxConcurrency: 4, timeoutMinutes: 60, revision: 5 },
+        current: settings({
+          maxConcurrency: 4,
+          timeoutMinutes: 60,
+          revision: 5,
+        }),
       } satisfies ErrorPayload)
-      .mockResolvedValue({
-        maxConcurrency: 1,
-        timeoutMinutes: 30,
-        revision: 6,
-      });
+      .mockResolvedValue(settings({ maxConcurrency: 1, revision: 6 }));
     render(<RunSettingsPanel />);
 
     const concurrency = await screen.findByLabelText("Ejecuciones a la vez");
@@ -1358,7 +1390,7 @@ describe("Sistema → Ejecuciones", () => {
     await user.click(screen.getByRole("button", { name: "Guardar" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "La configuración cambió mientras la editabas. Ahora es: 4 a la vez y 60 min.",
+      "La configuración cambió mientras la editabas. Ahora es: 4 a la vez, 60 min y sin adaptador de Claude Code.",
     );
     // Lo escrito se conserva.
     expect(concurrency).toHaveValue(1);
@@ -1368,6 +1400,7 @@ describe("Sistema → Ejecuciones", () => {
       expectedRevision: 5,
       maxConcurrency: 1,
       timeoutMinutes: 30,
+      claudeAcpPath: null,
     });
     expect(
       await screen.findByText("✓ Configuración guardada."),
@@ -1398,11 +1431,9 @@ describe("Sistema → Ejecuciones", () => {
 
   it("con valores sin guardar avisa al cerrar, sin borrar el borrador de otro editor", async () => {
     const user = userEvent.setup();
-    mocked.updateRunSettings.mockResolvedValue({
-      maxConcurrency: 3,
-      timeoutMinutes: 30,
-      revision: 2,
-    });
+    mocked.updateRunSettings.mockResolvedValue(
+      settings({ maxConcurrency: 3, revision: 2 }),
+    );
     // Imita al editor de historias con un borrador abierto.
     function OtherEditor({ dirty }: { dirty: boolean }) {
       useUnsavedChangesGuard(dirty);
@@ -1455,5 +1486,531 @@ describe("Sistema → Ejecuciones", () => {
     ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Reintentar" }));
     expect(await screen.findByLabelText("Ejecuciones a la vez")).toHaveValue(2);
+  });
+});
+
+// --- HU-019: Claude Code vía ACP ---
+
+const ACP_PATH = "/Users/ana/bin/claude-agent-acp";
+
+describe("Iniciar con Claude Code (ACP)", () => {
+  it("sin adaptador configurado, la opción está deshabilitada y explica dónde configurarlo", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+
+    const region = await openDetail(user);
+    const executors = await within(region).findByRole("group", {
+      name: "Ejecutor",
+    });
+    const acp = within(executors).getByRole("radio", {
+      name: "Claude Code (ACP)",
+    });
+    await waitFor(() => {
+      expect(acp).toHaveAccessibleDescription(
+        /No disponible: no hay ningún adaptador de Claude Code configurado\. Indica la ruta de claude-agent-acp en «Sistema → Ejecuciones»/,
+      );
+    });
+    expect(acp).toBeDisabled();
+    expect(
+      within(executors).getByRole("radio", {
+        name: "Proceso de prueba (sin IA)",
+      }),
+    ).toBeChecked();
+    // El proceso de prueba sigue siendo elegible y muestra sus escenarios.
+    expect(
+      within(region).getByRole("group", {
+        name: "Escenario del proceso de prueba",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("si no se puede leer la configuración, lo dice y permite volver a leerla", async () => {
+    const user = userEvent.setup();
+    mocked.getRunSettings
+      .mockRejectedValueOnce({
+        code: "storage_unavailable",
+        message: "El almacenamiento no está disponible.",
+        recoverable: true,
+      } satisfies ErrorPayload)
+      .mockResolvedValue(settings({ claudeAcpPath: ACP_PATH }));
+    renderPanel();
+
+    const region = await openDetail(user);
+    const acp = await within(region).findByRole("radio", {
+      name: "Claude Code (ACP)",
+    });
+    await waitFor(() => {
+      expect(acp).toHaveAccessibleDescription(
+        /No disponible: no se pudo leer la configuración \(El almacenamiento no está disponible\.\)/,
+      );
+    });
+    await user.click(
+      within(region).getByRole("button", {
+        name: "Volver a leer la configuración",
+      }),
+    );
+    await waitFor(() => {
+      expect(acp).toBeEnabled();
+    });
+  });
+
+  it("con adaptador, elegir ACP oculta los escenarios, explica qué hace y envía claudeAcp", async () => {
+    const user = userEvent.setup();
+    mocked.getRunSettings.mockResolvedValue(
+      settings({ claudeAcpPath: ACP_PATH }),
+    );
+    mocked.startRun.mockResolvedValue(
+      summary({ startRequestedAt: "2026-11-12T10:02:00Z" }),
+    );
+    renderPanel();
+
+    const region = await openDetail(user);
+    const acp = await within(region).findByRole("radio", {
+      name: "Claude Code (ACP)",
+    });
+    await waitFor(() => {
+      expect(acp).toBeEnabled();
+    });
+    expect(acp).not.toHaveAccessibleDescription();
+    await user.click(acp);
+
+    const form = within(region).getByRole("form", {
+      name: "Iniciar el intento #1",
+    });
+    expect(
+      within(form).queryByRole("group", {
+        name: "Escenario del proceso de prueba",
+      }),
+    ).not.toBeInTheDocument();
+    expect(form).toHaveTextContent(
+      "Lanza Claude Code en el worktree con las instrucciones de la instantánea. El agente trabaja con tu sesión de Claude Code. Hasta HU-020 la app rechaza todas sus peticiones de permiso (editar, ejecutar…), así que normalmente solo podrá leer y responder.",
+    );
+    expect(form).not.toHaveTextContent("No trabaja ningún agente ni IA");
+    const submit = within(form).getByRole("button", { name: "Iniciar" });
+    expect(submit).toHaveAccessibleDescription("Claude Code (ACP)");
+
+    await user.click(submit);
+    expect(mocked.startRun).toHaveBeenCalledWith({
+      requestId: expect.any(String) as string,
+      projectId: "p1",
+      runId: "r1",
+      executor: { kind: "claudeAcp" },
+    });
+    expect(
+      await screen.findByText(
+        "✓ Intento #1: inicio pedido con Claude Code (ACP). Espera turno en la cola.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("volver al proceso de prueba envía su escenario", async () => {
+    const user = userEvent.setup();
+    mocked.getRunSettings.mockResolvedValue(
+      settings({ claudeAcpPath: ACP_PATH }),
+    );
+    mocked.startRun.mockResolvedValue(
+      summary({ startRequestedAt: "2026-11-12T10:02:00Z" }),
+    );
+    renderPanel();
+
+    const region = await openDetail(user);
+    const acp = await within(region).findByRole("radio", {
+      name: "Claude Code (ACP)",
+    });
+    await waitFor(() => {
+      expect(acp).toBeEnabled();
+    });
+    await user.click(acp);
+    await user.click(
+      within(region).getByRole("radio", { name: "Proceso de prueba (sin IA)" }),
+    );
+    await user.click(
+      within(region).getByRole("radio", { name: "Produce mucha salida" }),
+    );
+    await user.click(within(region).getByRole("button", { name: "Iniciar" }));
+    expect(mocked.startRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        executor: { kind: "testProcess", scenario: "flood" },
+      }),
+    );
+  });
+
+  it("un error del núcleo en el ejecutor aparece en el grupo", async () => {
+    const user = userEvent.setup();
+    mocked.getRunSettings.mockResolvedValue(
+      settings({ claudeAcpPath: ACP_PATH }),
+    );
+    const message =
+      "No hay ningún adaptador de Claude Code configurado: indica su ruta en Sistema → Ejecuciones.";
+    mocked.startRun.mockRejectedValue(validation("executor", message));
+    renderPanel();
+
+    const region = await openDetail(user);
+    const acp = await within(region).findByRole("radio", {
+      name: "Claude Code (ACP)",
+    });
+    await waitFor(() => {
+      expect(acp).toBeEnabled();
+    });
+    await user.click(acp);
+    await user.click(within(region).getByRole("button", { name: "Iniciar" }));
+
+    const error = await within(region).findByText(message);
+    expect(error).toHaveAttribute("role", "alert");
+    const group = within(region).getByRole("group", { name: "Ejecutor" });
+    expect(group).toContainElement(error);
+    expect(group.getAttribute("aria-describedby")).toBe(error.id);
+    expect(region).not.toHaveTextContent("No se pudo iniciar el intento");
+  });
+});
+
+describe("Detalle con Claude Code (ACP)", () => {
+  const ended = summary({
+    state: "completed",
+    endedAt: "2026-11-12T10:05:00Z",
+    endReason: "El agente terminó su turno.",
+  });
+  const acpDetail = detail(ended, {
+    startRequest: {
+      repositoryId: "g1",
+      executor: { kind: "claudeAcp" },
+      requestedAt: "2026-11-12T10:02:00Z",
+      dispatchedAt: "2026-11-12T10:02:01Z",
+      voidedAt: null,
+    },
+    events: [
+      {
+        sequence: 1,
+        at: "2026-11-12T10:00:00Z",
+        event: { kind: "state_changed", to: "queued", reason: null },
+      },
+      {
+        sequence: 2,
+        at: "2026-11-12T10:02:05Z",
+        event: {
+          kind: "acp_session",
+          protocolVersion: 1,
+          agentName: "@agentclientprotocol/claude-agent-acp",
+          agentTitle: "Claude <b>Agent</b>",
+          agentVersion: "0.107.0",
+          capabilities: [
+            "loadSession",
+            "image",
+            "embeddedContext",
+            "mcpHttp",
+            "mcpSse",
+            "modes",
+          ],
+          mode: "default",
+          promptSha256:
+            "0123456789abcccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          promptChars: 12345,
+        },
+      },
+    ],
+  });
+
+  it("muestra el ejecutor, la sesión reportada por el agente y no dice que no trabaje IA", async () => {
+    const user = userEvent.setup();
+    mocked.listStoryRuns.mockResolvedValue([ended]);
+    mocked.getRun.mockResolvedValue(acpDetail);
+    const { container } = renderPanel();
+
+    const region = await openDetail(user);
+    const execution = within(region).getByRole("region", { name: "Ejecución" });
+    expect(execution).toHaveTextContent("EjecutorClaude Code (ACP)");
+    expect(execution).not.toHaveTextContent("Escenario");
+    expect(region).not.toHaveTextContent("Ningún agente ni IA trabaja");
+    expect(region).toHaveTextContent(
+      "Ejecutor: Claude Code por ACP. Lo que aparece como «agente (reportado)» es lo que el agente dice, no algo comprobado por la app. Un intento completado no acepta la historia.",
+    );
+    expect(region).toHaveTextContent(
+      "(lo ejecuta Claude Code por ACP con las instrucciones de la instantánea).",
+    );
+
+    const session = within(region).getByRole("region", {
+      name: "Sesión del agente (reportado por el agente)",
+    });
+    // El texto del agente se muestra literal, sin interpretar HTML.
+    expect(session).toHaveTextContent("AgenteClaude <b>Agent</b> 0.107.0");
+    expect(container.querySelector("b")).toBeNull();
+    expect(session).toHaveTextContent("ProtocoloACP v1");
+    expect(session).toHaveTextContent(
+      "Modo fijado por la appManual: pide permiso",
+    );
+    expect(session).toHaveTextContent(
+      "Capacidadesretomar sesión, imágenes, contexto incrustado, MCP por HTTP, MCP por SSE, modos",
+    );
+    // Huella del texto enviado: abreviada a la vista, completa para lectores de pantalla.
+    expect(session).toHaveTextContent(
+      "Instrucciones enviadas por la app12.345 caracteres · SHA-256 0123456789ab… (huella completa: 0123456789abcccccccccccccccccccccccccccccccccccccccccccccccccccc)",
+    );
+    expect(
+      within(session).getByTitle(
+        "0123456789abcccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      ),
+    ).toHaveTextContent("0123456789ab…");
+    // Las instrucciones congeladas no se presentan como lo que recibió el agente.
+    expect(region).toHaveTextContent(
+      "Instrucciones congeladas en la instantánea. Con Claude Code (ACP) se envían las mismas, salvo la sección de repositorios",
+    );
+    expect(region).not.toHaveTextContent("lo que recibiría el agente");
+
+    const events = within(region).getByRole("list", {
+      name: "Eventos en orden",
+    });
+    expect(events).toHaveTextContent(
+      "Sesión del agente iniciada (reportado): Claude <b>Agent</b> 0.107.0 · ACP v1",
+    );
+  });
+
+  it("el proceso de prueba muestra su escenario y no la sesión del agente", async () => {
+    const user = userEvent.setup();
+    mocked.listStoryRuns.mockResolvedValue([finished]);
+    mocked.getRun.mockResolvedValue(
+      detail(finished, {
+        startRequest: {
+          repositoryId: "g1",
+          executor: { kind: "testProcess", scenario: "write" },
+          requestedAt: "2026-11-12T10:02:00Z",
+          dispatchedAt: "2026-11-12T10:02:01Z",
+          voidedAt: null,
+        },
+      }),
+    );
+    renderPanel();
+
+    const region = await openDetail(user);
+    const execution = within(region).getByRole("region", { name: "Ejecución" });
+    expect(execution).toHaveTextContent("EjecutorProceso de prueba (sin IA)");
+    expect(execution).toHaveTextContent(
+      "EscenarioModifica archivos del worktree",
+    );
+    expect(
+      within(region).queryByRole("region", {
+        name: "Sesión del agente (reportado por el agente)",
+      }),
+    ).not.toBeInTheDocument();
+    expect(region).not.toHaveTextContent("Claude Code por ACP");
+  });
+
+  it("sin petición de inicio, el ejecutor aún no está elegido", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    const region = await openDetail(user);
+    expect(
+      within(region).getByRole("region", { name: "Ejecución" }),
+    ).toHaveTextContent("EjecutorSe elige al iniciar");
+  });
+});
+
+describe("Salida con líneas del agente", () => {
+  it("cada línea del agente indica «agente (reportado)» y su tipo, en texto plano", async () => {
+    const user = userEvent.setup();
+    mocked.listStoryRuns.mockResolvedValue([finished]);
+    mocked.getRun.mockResolvedValue(detail(finished));
+    const agent = (
+      atMs: number,
+      kind: NonNullable<RunOutputView["lines"][number]["kind"]>,
+      text: string,
+    ): RunOutputView["lines"][number] => ({
+      atMs,
+      stream: "agent",
+      text,
+      cut: false,
+      kind,
+    });
+    mocked.getRunOutput.mockResolvedValue({
+      lines: [
+        agent(1, "message", "Hola <b>mundo</b>\n**sin** [Markdown](http://x)"),
+        agent(2, "thought", "(pensando… 120 caracteres)"),
+        agent(3, "tool", "Leer README.md · read · completed"),
+        agent(4, "plan", "Leer el README · pending"),
+        agent(5, "usage", "usado 1200 de 200000"),
+        agent(
+          6,
+          "permission",
+          "Permiso pedido para «Editar src/main.rs»: rechazado una vez por la política de la app (hasta HU-020 se rechazan todos).",
+        ),
+        agent(
+          8,
+          "permission",
+          "Permiso pedido para «Ejecutar npm test»: respondido como cancelado (se canceló el intento).",
+        ),
+        {
+          atMs: 7,
+          stream: "stderr",
+          text: "[session/create] ok",
+          cut: false,
+          kind: null,
+        },
+      ],
+      skippedCorrupt: 0,
+      earlierDropped: false,
+    });
+    const { container } = renderPanel();
+
+    const region = await openDetail(user);
+    const lines = await within(region).findByRole("region", {
+      name: "Líneas de salida",
+    });
+    const items = within(lines).getAllByRole("listitem");
+    expect(items.map((li) => li.textContent)).toEqual([
+      "[agente (reportado) · mensaje] Hola <b>mundo</b>\n**sin** [Markdown](http://x)",
+      "[agente (reportado) · pensamiento] (pensando… 120 caracteres)",
+      "[agente (reportado) · herramienta] Leer README.md · read · completed",
+      "[agente (reportado) · plan] Leer el README · pending",
+      "[agente (reportado) · uso] usado 1200 de 200000",
+      "[agente (reportado) · permiso] Permiso: Permiso pedido para «Editar src/main.rs»: rechazado una vez por la política de la app (hasta HU-020 se rechazan todos).",
+      "[agente (reportado) · permiso] Permiso: Permiso pedido para «Ejecutar npm test»: respondido como cancelado (se canceló el intento).",
+      "[stderr] [session/create] ok",
+    ]);
+    // Literal: ni HTML ni Markdown interpretados.
+    expect(container.querySelector("b")).toBeNull();
+    expect(lines.querySelector("a, em")).toBeNull();
+    // Solo la línea de permiso lleva la marca destacada (además del texto).
+    expect(lines.querySelectorAll("strong")).toHaveLength(2);
+    expect(items[5]).toHaveClass("run-output__line--permission");
+    expect(items[6]).toHaveClass("run-output__line--permission");
+    expect(items[7]).not.toHaveClass("run-output__line--permission");
+  });
+});
+
+describe("Sistema → Ejecuciones: adaptador de Claude Code", () => {
+  it("muestra la ruta guardada y la ayuda, y la envía siempre al guardar (vacía = null)", async () => {
+    const user = userEvent.setup();
+    mocked.getRunSettings.mockResolvedValue(
+      settings({ claudeAcpPath: ACP_PATH }),
+    );
+    mocked.updateRunSettings
+      .mockResolvedValueOnce(settings({ claudeAcpPath: null, revision: 2 }))
+      .mockResolvedValue(
+        settings({ claudeAcpPath: "/opt/claude-agent-acp", revision: 3 }),
+      );
+    render(<RunSettingsPanel />);
+
+    const path = await screen.findByLabelText("Adaptador de Claude Code (ACP)");
+    expect(path).toHaveValue(ACP_PATH);
+    expect(path).toHaveAccessibleDescription(
+      /La app no lo incluye ni lo instala\..*necesita node en el PATH.*desde Finder.*binario autónomo.*terminal.*puede consumir tu suscripción o tu saldo.*rechaza toda petición de permiso.*«Always ask».*no cargue tu configuración de Claude Code ni la del repositorio/,
+    );
+
+    // Cambiar otro campo también envía la ruta (si faltara, el núcleo la borraría).
+    const concurrency = screen.getByLabelText("Ejecuciones a la vez");
+    await user.clear(concurrency);
+    await user.type(concurrency, "3");
+    expect(mocked.setUnsavedChanges).toHaveBeenLastCalledWith(true);
+    await user.clear(path);
+    await user.click(screen.getByRole("button", { name: "Guardar" }));
+    expect(mocked.updateRunSettings).toHaveBeenLastCalledWith({
+      expectedRevision: 1,
+      maxConcurrency: 3,
+      timeoutMinutes: 30,
+      claudeAcpPath: null,
+    });
+    await screen.findByText("✓ Configuración guardada.");
+
+    await user.type(path, "  /opt/claude-agent-acp  ");
+    expect(mocked.setUnsavedChanges).toHaveBeenLastCalledWith(true);
+    await user.click(screen.getByRole("button", { name: "Guardar" }));
+    expect(mocked.updateRunSettings).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        expectedRevision: 2,
+        claudeAcpPath: "/opt/claude-agent-acp",
+      }),
+    );
+    await waitFor(() => {
+      expect(path).toHaveValue("/opt/claude-agent-acp");
+    });
+    expect(mocked.setUnsavedChanges).toHaveBeenLastCalledWith(false);
+  });
+
+  it("un error del núcleo en la ruta aparece junto al campo", async () => {
+    const user = userEvent.setup();
+    mocked.getRunSettings.mockResolvedValue(settings());
+    const message = "La ruta del adaptador debe ser absoluta.";
+    mocked.updateRunSettings.mockRejectedValue(
+      validation("claudeAcpPath", message),
+    );
+    render(<RunSettingsPanel />);
+
+    const path = await screen.findByLabelText("Adaptador de Claude Code (ACP)");
+    await user.type(path, "bin/claude-agent-acp");
+    await user.click(screen.getByRole("button", { name: "Guardar" }));
+    const error = await screen.findByText(message);
+    expect(path).toHaveAttribute("aria-invalid", "true");
+    expect(path.getAttribute("aria-describedby")).toContain(error.id);
+    expect(screen.queryByText(/No se pudo guardar/)).not.toBeInTheDocument();
+  });
+
+  it("«Comprobar adaptador» prueba la ruta escrita y muestra versión y capacidades", async () => {
+    const user = userEvent.setup();
+    mocked.getRunSettings.mockResolvedValue(settings());
+    mocked.checkAcpAdapter.mockResolvedValue({
+      protocolVersion: 1,
+      agentName: "@agentclientprotocol/claude-agent-acp",
+      agentTitle: "Claude Agent",
+      agentVersion: "0.107.0",
+      capabilities: ["loadSession", "image", "embeddedContext", "mcpHttp"],
+    });
+    render(<RunSettingsPanel />);
+
+    const path = await screen.findByLabelText("Adaptador de Claude Code (ACP)");
+    await user.type(path, ACP_PATH);
+    const button = screen.getByRole("button", { name: "Comprobar adaptador" });
+    await user.click(button);
+    expect(mocked.checkAcpAdapter).toHaveBeenCalledWith(ACP_PATH);
+    expect(
+      await screen.findByText(
+        "✓ Responde: Claude Agent 0.107.0 · ACP v1 · capacidades: retomar sesión, imágenes, contexto incrustado, MCP por HTTP",
+      ),
+    ).toBeInTheDocument();
+    expect(button).toHaveAccessibleDescription(/Responde: Claude Agent/);
+    // Comprobar no guarda.
+    expect(mocked.updateRunSettings).not.toHaveBeenCalled();
+
+    // Al editar la ruta, el resultado anterior desaparece.
+    await user.type(path, "x");
+    expect(screen.queryByText(/Responde:/)).not.toBeInTheDocument();
+  });
+
+  it("con el campo vacío no se puede comprobar y lo explica", async () => {
+    mocked.getRunSettings.mockResolvedValue(settings());
+    render(<RunSettingsPanel />);
+
+    await screen.findByLabelText("Adaptador de Claude Code (ACP)");
+    const button = screen.getByRole("button", { name: "Comprobar adaptador" });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAccessibleDescription(
+      "Escribe la ruta para comprobarla.",
+    );
+    expect(mocked.checkAcpAdapter).not.toHaveBeenCalled();
+  });
+
+  it("un fallo al comprobar se muestra con su motivo", async () => {
+    const user = userEvent.setup();
+    mocked.getRunSettings.mockResolvedValue(
+      settings({ claudeAcpPath: ACP_PATH }),
+    );
+    const message =
+      "La ruta del adaptador no existe o no es un archivo ejecutable.";
+    mocked.checkAcpAdapter.mockRejectedValue(
+      validation("claudeAcpPath", message),
+    );
+    render(<RunSettingsPanel />);
+
+    await screen.findByLabelText("Adaptador de Claude Code (ACP)");
+    const button = screen.getByRole("button", { name: "Comprobar adaptador" });
+    expect(button).toBeEnabled();
+    expect(
+      screen.queryByText("Escribe la ruta para comprobarla."),
+    ).not.toBeInTheDocument();
+    await user.click(button);
+    // La ruta mostrada (la guardada) es la que se comprueba.
+    expect(mocked.checkAcpAdapter).toHaveBeenCalledWith(ACP_PATH);
+    expect(
+      await screen.findByText(`No se pudo comprobar el adaptador: ${message}`),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Responde:/)).not.toBeInTheDocument();
   });
 });

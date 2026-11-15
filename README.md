@@ -1,6 +1,6 @@
 # Kanban IA
 
-Kanban desktop local para historias, épicas y agentes de IA. Estado: **MVP local (M2)**: planificación en el tablero y agentes por MCP, validado solo en macOS; no es una versión alfa distribuible. M3 en curso: cada historia puede «Preparar intento» con una instantánea inmutable e iniciarlo en un worktree propio con un proceso de prueba supervisado (sin IA todavía; ver «Ejecución supervisada»). Para completar un ciclo real (proyecto → agente por MCP → entrega → aceptación) y probar con el paquete de demostración, sigue la [guía local](docs/GUIA-LOCAL.md). Planificación en [`docs/`](docs/) y estado en [`docs/BACKLOG.md`](docs/BACKLOG.md).
+Kanban desktop local para historias, épicas y agentes de IA. Estado: **MVP local (M2)**: planificación en el tablero y agentes por MCP, validado solo en macOS; no es una versión alfa distribuible. M3 en curso: cada historia puede «Preparar intento» con una instantánea inmutable e iniciarlo en un worktree propio con un proceso de prueba supervisado o con Claude Code por ACP (ver «Ejecución supervisada» y «Claude Code por ACP»). Para completar un ciclo real (proyecto → agente por MCP → entrega → aceptación) y probar con el paquete de demostración, sigue la [guía local](docs/GUIA-LOCAL.md). Planificación en [`docs/`](docs/) y estado en [`docs/BACKLOG.md`](docs/BACKLOG.md).
 
 ## Requisitos
 
@@ -231,7 +231,7 @@ Si prefieres un `.mcp.json` de proyecto (que se versiona), **no pongas el token 
 
 ## Ejecución supervisada (HU-018, M3)
 
-Cada intento de una historia (HU-017) puede **iniciarse** desde su detalle. Aún no hay IA: el único ejecutor es un **proceso de prueba (sin IA)** con escenarios (termina bien, falla, tarda y crea hijos, modifica archivos, mucha salida, se cuelga) para comprobar la supervisión. HU-019 lo sustituirá por un adaptador ACP.
+Cada intento de una historia (HU-017) puede **iniciarse** desde su detalle con uno de dos ejecutores: el **proceso de prueba (sin IA)**, con escenarios (termina bien, falla, tarda y crea hijos, modifica archivos, mucha salida, se cuelga) para comprobar la supervisión, o **Claude Code por ACP** (HU-019, ver más abajo).
 
 - **Worktree por intento**: `<datos>/worktrees/<proyecto>/<intento>`, rama `kanbania/h<n>-i<n>-<8 hex>` creada desde el commit congelado en la instantánea. El repositorio original no se toca (nunca checkout, reset, clean ni stash). Git se lanza con argumentos explícitos, entorno limpio, sin terminal, `core.hooksPath` vacío (no se ejecutan hooks) y `core.fsmonitor=false`; sí se respeta el resto de tu configuración (p. ej. filtros LFS).
 - **Supervisor**: programa absoluto + argumentos, sin shell; entorno limpio sin `KANBANIA_*`; concurrencia y tiempo máximo en «Sistema» → «Ejecuciones» (por defecto 2 a la vez y 30 min). Cancelar o agotar el tiempo mata el árbol de procesos: grupo propio con SIGTERM → 5 s → SIGKILL (macOS) o Job Object con kill-on-close y sin ventana de consola (Windows).
@@ -242,6 +242,32 @@ Cada intento de una historia (HU-017) puede **iniciarse** desde su detalle. Aún
 - Dependencias: `process-wrap` 10.0.1 (Apache-2.0 OR MIT; grupo de procesos y Job Object) y `nix` 0.31.3 (MIT, solo Unix, `killpg`); ya estaban en el lockfile por `rmcp`.
 - Proceso de prueba a mano: `cargo run -p kanbania-runner --bin kanbania-test-process -- success` (o `<app> --kanbania-test-process success`). Pruebas: `cargo test -p kanbania-runner`.
 - Windows: solo se compila en local (`cargo clippy --target x86_64-pc-windows-msvc -p kanbania-runner --no-default-features --all-targets`); no se ha ejecutado.
+
+## Claude Code por ACP (HU-019, M3)
+
+La app es cliente ACP v1 ([Agent Client Protocol](https://agentclientprotocol.com/protocol/v1/)) y lanza Claude Code a través del adaptador [`@agentclientprotocol/claude-agent-acp`](https://www.npmjs.com/package/@agentclientprotocol/claude-agent-acp) (Apache-2.0). La app **no** lo incluye ni lo instala.
+
+| Herramienta | Versión verificada | Nota |
+| --- | --- | --- |
+| `@agentclientprotocol/claude-agent-acp` | 0.107.0 (2026-11-15) | Exige Node ≥ 22. Hay binarios autónomos en sus releases. |
+| Claude Code | sesión ya iniciada | La app no autentica ni pasa claves: usa tu sesión (suscripción o saldo). |
+
+1. Instálalo en una carpeta propia: `npm install @agentclientprotocol/claude-agent-acp@0.107.0` (o descarga el binario autónomo).
+2. En «Sistema» → «Ejecuciones», pega la ruta absoluta de `node_modules/.bin/claude-agent-acp` (o del binario), pulsa «Comprobar adaptador» (solo hace `initialize`; no gasta) y guarda.
+3. En el detalle de un intento, «Iniciar…» → «Claude Code (ACP)».
+
+Qué hace la app:
+- El agente trabaja en el worktree del intento (su `cwd`) con las instrucciones generadas de la instantánea (sin rutas absolutas); se registra su SHA-256.
+- Fija el modo `default` («pedir permiso»; el adaptador arranca en `auto`) y falla si no puede o si el agente lo cambia.
+- **Hasta HU-020 rechaza toda petición de permiso.** Ojo: en ese modo Claude Code ejecuta sin preguntar los comandos de **solo lectura** (`cat`, `git ls-files`…); lo que se impide es escribir o ejecutar con efectos.
+- Pide al adaptador no cargar tu configuración de Claude Code ni la del repositorio (`settingSources: []`): sin reglas `allow`, hooks ni `.mcp.json` del repo. Probablemente tampoco carga el `CLAUDE.md` del repositorio.
+- Entorno limpio: nunca pasa `KANBANIA_*`, `ANTHROPIC_*` ni `CLAUDE_*`.
+- Salida: «agente (reportado)» es lo que informa el agente (mensajes, herramientas, permisos, uso), no hechos comprobados; stderr del adaptador con correos y tokens ocultos. El coste que informa el agente se muestra en la salida, pero no se guarda como coste del intento.
+- Cancelar envía `session/cancel`, espera hasta 10 s y después mata el árbol de procesos.
+
+Limitaciones: el adaptador npm es un script de Node y necesita `node` en `PATH` (si abres la app desde Finder con nvm, no lo encuentra: abre la app desde la terminal o usa el binario autónomo); el aislamiento depende de una opción propia del adaptador (vuelve a comprobarlo al cambiar de versión); Windows sin ejecutar.
+
+Pruebas: contrato con el agente falso `cargo test -p kanbania-runner --test acp`. Pruebas reales (consumen tu suscripción; solo con autorización): `KANBANIA_ACP_REAL=/ruta/absoluta/claude-agent-acp cargo test -p kanbania-runner --test acp_real -- --ignored --nocapture`.
 
 ## Notas
 

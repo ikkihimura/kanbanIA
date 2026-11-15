@@ -124,7 +124,7 @@ fn runs_flow_through_ipc() {
         &app,
         "start_run",
         json!({ "input": {
-            "requestId": "st0", "projectId": pid, "runId": first["id"], "scenario": "success",
+            "requestId": "st0", "projectId": pid, "runId": first["id"], "executor": { "kind": "testProcess", "scenario": "success" },
         } }),
     )
     .unwrap_err();
@@ -366,7 +366,7 @@ fn runs_execute_through_the_host_supervisor() {
             "start_run",
             json!({ "input": {
                 "requestId": format!("st{n}"), "projectId": pid, "runId": run["id"],
-                "scenario": scenario,
+                "executor": { "kind": "testProcess", "scenario": scenario },
             } }),
         )
         .unwrap();
@@ -506,7 +506,7 @@ fn runs_execute_through_the_host_supervisor() {
         (
             "start_run",
             json!({ "input": {
-                "requestId": "st9", "projectId": other, "runId": run_ids[0], "scenario": "success",
+                "requestId": "st9", "projectId": other, "runId": run_ids[0], "executor": { "kind": "testProcess", "scenario": "success" },
             } }),
         ),
     ] {
@@ -598,7 +598,7 @@ fn restoring_suspends_the_supervisor_until_resumed() {
     invoke(
         &app,
         "start_run",
-        json!({ "input": { "requestId": "st", "projectId": pid, "runId": run["id"], "scenario": "slow" } }),
+        json!({ "input": { "requestId": "st", "projectId": pid, "runId": run["id"], "executor": { "kind": "testProcess", "scenario": "slow" } } }),
     )
     .unwrap();
     let started = std::time::Instant::now();
@@ -736,7 +736,9 @@ fn the_previous_session_is_recovered_even_if_the_supervisor_cannot_start() {
                 project_id: project_id.clone(),
                 run_id: run_id.clone(),
                 repository_id: None,
-                scenario: runs::TestScenario::Success,
+                executor: runs::RunExecutor::TestProcess {
+                    scenario: runs::TestScenario::Success,
+                },
             },
         ))
         .unwrap();
@@ -773,10 +775,126 @@ fn the_previous_session_is_recovered_even_if_the_supervisor_cannot_start() {
         &app,
         "start_run",
         json!({ "input": {
-            "requestId": "st-x", "projectId": pid, "runId": runs_by_title[1], "scenario": "success",
+            "requestId": "st-x", "projectId": pid, "runId": runs_by_title[1], "executor": { "kind": "testProcess", "scenario": "success" },
         } }),
     )
     .unwrap_err();
     assert_eq!(refused["code"], "validation");
     block_on(app.state::<StorageSlot>().close());
+}
+
+/// Adaptador ACP mínimo en shell (Unix): responde a `initialize` con la versión indicada y
+/// después duerme (la comprobación debe terminar su árbol). Incluye `_meta` con un correo que
+/// nunca debe llegar a la UI.
+#[cfg(unix)]
+fn fake_adapter(dir: &Path, name: &str, version: u32) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nread line\nid=$(printf '%s' \"$line\" | sed 's/.*\"id\":\\([0-9]*\\).*/\\1/')\n\
+             printf '{{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{{\"protocolVersion\":{version},\
+             \"agentInfo\":{{\"name\":\"adaptador-prueba\",\"title\":\"Adaptador de prueba\",\"version\":\"1.2.3\"}},\
+             \"authMethods\":[],\"agentCapabilities\":{{\"loadSession\":true,\"promptCapabilities\":{{\"image\":true}},\
+             \"_meta\":{{\"cuenta\":\"persona@example.invalid\"}}}}}}}}\\n' \"$id\"\nsleep 30\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[test]
+fn acp_adapter_check_through_ipc() {
+    let data = tempfile::tempdir().unwrap();
+    let app = build_app(data.path());
+
+    // Sin ruta y sin adaptador configurado.
+    let none = invoke(&app, "check_acp_adapter", json!({})).unwrap_err();
+    assert_eq!(none["code"], "validation");
+    assert!(
+        none["message"]
+            .as_str()
+            .unwrap()
+            .contains("No hay ningún adaptador configurado")
+    );
+    // Misma validación que la configuración: relativa o inexistente → `validation`, sin la
+    // ruta en el mensaje.
+    let relative = invoke(
+        &app,
+        "check_acp_adapter",
+        json!({ "path": "bin/claude-agent-acp" }),
+    )
+    .unwrap_err();
+    assert_eq!(relative["code"], "validation");
+    let missing_path = data.path().join("no existe");
+    let missing = invoke(
+        &app,
+        "check_acp_adapter",
+        json!({ "path": missing_path.to_str().unwrap() }),
+    )
+    .unwrap_err();
+    assert_eq!(missing["code"], "validation");
+    assert!(!missing.to_string().contains("no existe\""));
+
+    #[cfg(unix)]
+    {
+        let base = data.path().join("carpeta con espacios");
+        std::fs::create_dir(&base).unwrap();
+        let adapter = fake_adapter(&base, "adaptador de prueba", 1);
+        let started = std::time::Instant::now();
+        let check = invoke(
+            &app,
+            "check_acp_adapter",
+            json!({ "path": adapter.to_str().unwrap() }),
+        )
+        .unwrap();
+        // Solo `initialize`: no espera a que el adaptador termine (duerme 30 s).
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        assert_eq!(
+            check,
+            json!({
+                "protocolVersion": 1,
+                "agentName": "adaptador-prueba",
+                "agentTitle": "Adaptador de prueba",
+                "agentVersion": "1.2.3",
+                "capabilities": ["loadSession", "image"],
+            })
+        );
+        assert!(!check.to_string().contains("example.invalid"));
+
+        // Sin `path`, comprueba la ruta configurada.
+        let settings = invoke(&app, "get_run_settings", json!({})).unwrap();
+        invoke(
+            &app,
+            "update_run_settings",
+            json!({ "input": {
+                "expectedRevision": settings["revision"],
+                "maxConcurrency": settings["maxConcurrency"],
+                "timeoutMinutes": settings["timeoutMinutes"],
+                "claudeAcpPath": adapter.to_str().unwrap(),
+            } }),
+        )
+        .unwrap();
+        let configured = invoke(&app, "check_acp_adapter", json!({})).unwrap();
+        assert_eq!(configured["agentName"], "adaptador-prueba");
+
+        // Otra versión de ACP → `validation` con un mensaje fijo, sin la ruta.
+        let v2 = fake_adapter(&base, "adaptador v2", 2);
+        let error = invoke(
+            &app,
+            "check_acp_adapter",
+            json!({ "path": v2.to_str().unwrap() }),
+        )
+        .unwrap_err();
+        assert_eq!(error["code"], "validation");
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap()
+                .contains("versión de ACP compatible")
+        );
+        assert!(!error.to_string().contains("carpeta con espacios"));
+    }
 }

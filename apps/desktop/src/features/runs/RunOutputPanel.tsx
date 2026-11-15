@@ -3,7 +3,8 @@ import type { RunOutputView } from "../../contracts/generated/RunOutputView";
 import { getRunOutput } from "../../shared/ipc/commands";
 import { useRefreshSignal } from "../../shared/ipc/useAgentChanges";
 import { useIpcResource } from "../../shared/ipc/useIpcResource";
-import { STREAM_LABEL } from "./runFormat";
+import type { RunOutputLine } from "../../contracts/generated/RunOutputLine";
+import { OUTPUT_KIND_LABEL, STREAM_LABEL } from "./runFormat";
 
 /** Mientras el proceso corre, la salida se vuelve a leer con esta pausa. */
 export const OUTPUT_POLL_MS = 3000;
@@ -20,8 +21,9 @@ interface Props {
 }
 
 /**
- * Últimas líneas de salida del proceso (HU-018). El texto lo escribe el proceso: es dato no
- * confiable y se muestra siempre como texto plano (nunca Markdown ni HTML).
+ * Últimas líneas de salida del proceso (HU-018) y de lo que reporta el agente por ACP
+ * (HU-019). El texto lo escribe el proceso o el agente: es dato no confiable y se muestra
+ * siempre como texto plano (nunca Markdown ni HTML), con su origen en cada línea.
  */
 export function RunOutputPanel({
   projectId,
@@ -64,7 +66,9 @@ export function RunOutputPanel({
         </button>
       </div>
       <p className="field__hint">
-        Últimas líneas (como mucho 500), tal como las escribió el proceso.
+        Últimas líneas (como mucho 500), tal como llegaron. Cada una indica su
+        origen: «stdout» y «stderr» del proceso, «app» para lo que observó la
+        app y «agente (reportado)» para lo que dice el agente, sin comprobar.
         {live && " Se actualiza sola cada pocos segundos mientras corre."}
       </p>
 
@@ -137,11 +141,12 @@ function OutputBody({ output }: { output: RunOutputView }) {
               <li
                 // Las líneas no tienen id: la posición en esta lectura basta (lista de solo lectura).
                 key={`${String(line.atMs)}-${String(index)}`}
-                className={`run-output__line run-output__line--${line.stream}`}
+                className={lineClass(line)}
               >
-                <span className="run-output__stream">
-                  [{STREAM_LABEL[line.stream]}]
-                </span>{" "}
+                <span className="run-output__stream">[{lineOrigin(line)}]</span>{" "}
+                {line.kind === "permission" && (
+                  <strong className="run-output__flag">Permiso: </strong>
+                )}
                 <span className="run-output__text">{line.text}</span>
                 {line.cut && (
                   <span className="run-output__cut"> [cortada]</span>
@@ -153,4 +158,19 @@ function OutputBody({ output }: { output: RunOutputView }) {
       )}
     </>
   );
+}
+
+/** Origen en texto; en las líneas del agente, también el tipo («agente (reportado) · plan»). */
+function lineOrigin(line: RunOutputLine): string {
+  const origin = STREAM_LABEL[line.stream];
+  return line.stream === "agent" && line.kind !== null
+    ? `${origin} · ${OUTPUT_KIND_LABEL[line.kind]}`
+    : origin;
+}
+
+function lineClass(line: RunOutputLine): string {
+  const base = `run-output__line run-output__line--${line.stream}`;
+  return line.kind === "permission"
+    ? `${base} run-output__line--permission`
+    : base;
 }

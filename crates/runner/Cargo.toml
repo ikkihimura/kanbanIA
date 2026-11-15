@@ -17,6 +17,12 @@ name = "kanbania-test-process"
 path = "src/bin/kanbania-test-process.rs"
 test = false
 
+# Agente ACP falso solo para pruebas de contrato (HU-019): la app nunca lo lanza.
+[[bin]]
+name = "kanbania-fake-acp"
+path = "src/bin/kanbania-fake-acp/main.rs"
+test = false
+
 [dependencies]
 dunce = { workspace = true }
 kanbania-core = { workspace = true, optional = true }

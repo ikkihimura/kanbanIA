@@ -26,10 +26,10 @@ use kanbania_core::features::review::{
 };
 use kanbania_core::features::runs::{
     CancelRunInput, CreateRunInput, DispatchOutcome, InterruptCause, MAX_DETAIL_EVENTS,
-    RecordRunEventInput, RunEvent, RunFailure, RunOutcome, RunState, RunSummary, RunUsage,
-    SNAPSHOT_SCHEMA_VERSION, StartRunInput, SupervisorToken, TestScenario, begin_dispatch,
-    cancel_run, create_run, finish_run, get_run, interrupt_unverifiable_runs, list_story_runs,
-    mark_running, record_run_event, record_worktree, start_run,
+    RecordRunEventInput, RunEvent, RunExecutor, RunFailure, RunOutcome, RunState, RunSummary,
+    RunUsage, SNAPSHOT_SCHEMA_VERSION, StartRunInput, SupervisorToken, TestScenario,
+    begin_dispatch, cancel_run, create_run, finish_run, get_run, interrupt_unverifiable_runs,
+    list_story_runs, mark_running, record_run_event, record_worktree, start_run,
 };
 use kanbania_core::features::stories::{
     ArchiveStoryInput, CreateStoryInput, CriterionDraft, Priority, StoryDetail, StorySummary,
@@ -279,7 +279,9 @@ impl Board {
                             project_id: self.project.id.clone(),
                             run_id: run.id.clone(),
                             repository_id: None,
-                            scenario: TestScenario::Success,
+                            executor: RunExecutor::TestProcess {
+                                scenario: TestScenario::Success,
+                            },
                         },
                     )
                     .await

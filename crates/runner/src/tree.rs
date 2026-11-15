@@ -14,7 +14,7 @@ use std::process::ExitStatus;
 use std::time::Duration;
 
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
-use tokio::process::{ChildStderr, ChildStdout, Command};
+use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::time::timeout;
 #[cfg(unix)]
 use tokio::time::{Instant, sleep};
@@ -73,6 +73,10 @@ impl ProcessTree {
 
     pub(crate) fn pid(&self) -> Option<u32> {
         self.child.id()
+    }
+
+    pub(crate) fn take_stdin(&mut self) -> Option<ChildStdin> {
+        self.child.stdin().take()
     }
 
     pub(crate) fn take_stdout(&mut self) -> Option<ChildStdout> {

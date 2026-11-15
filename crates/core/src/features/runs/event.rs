@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use super::acp_session::AcpSessionInfo;
 use super::run::{RunState, RunSummary, RunUsage, append_event, require_run, validate_id};
 use super::supervisor::{SupervisorToken, ensure_token};
 use crate::error::CoreError;
@@ -11,8 +12,8 @@ use crate::platform::text::{contains_secret_like, has_invisible_formatting};
 pub const MAX_EVENT_PAYLOAD_BYTES: usize = 8 * 1024;
 const MAX_REASON_CHARS: usize = 200;
 
-/// Evento de un intento. Solo cambios de estado y uso: la salida voluminosa de procesos irá a
-/// JSONL rotado (HU-018), nunca aquí.
+/// Evento de un intento. Cambios de estado, uso y sesión ACP: la salida voluminosa de
+/// procesos va a JSONL rotado (HU-018), nunca aquí.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[ts(export)]
@@ -24,6 +25,9 @@ pub enum RunEvent {
     },
     /// Totales acumulados que informa el proveedor; lo que no informa queda `null`.
     UsageReported(RunUsage),
+    /// Sesión ACP negociada (HU-019): lo que el agente declaró y el modo fijado. Reportado por
+    /// el agente, no verificado. Solo lo registra `record_acp_session`.
+    AcpSession(AcpSessionInfo),
 }
 
 impl RunEvent {
@@ -31,6 +35,7 @@ impl RunEvent {
         match self {
             Self::StateChanged { .. } => "state_changed",
             Self::UsageReported(_) => "usage_reported",
+            Self::AcpSession(_) => "acp_session",
         }
     }
 
@@ -70,6 +75,7 @@ impl RunEvent {
                 }
                 Ok(self.clone())
             }
+            Self::AcpSession(info) => Ok(Self::AcpSession(info.normalized()?)),
         }
     }
 }
@@ -129,7 +135,8 @@ pub struct RecordedRunEvent {
 /// - una secuencia ya aplicada con otro contenido → `conflict` con el intento vigente (p. ej.
 ///   una persona canceló mientras tanto y ocupó esa secuencia);
 /// - un hueco (`sequence > lastSequence + 1`) o una secuencia < 1 → error de validación;
-/// - un `StateChanged` → `validation` (los cambios de estado los registra el núcleo).
+/// - un `StateChanged` o un `AcpSession` → `validation` (los cambios de estado los registra
+///   el núcleo; la sesión ACP, `record_acp_session`).
 ///
 /// API del núcleo para la fuente de eventos de ejecución: exige el [`SupervisorToken`] del
 /// almacén (HU-018; token de otro almacén → `forbidden`). No tiene comando Tauri ni ruta del
@@ -148,7 +155,7 @@ pub async fn record_run_event(
     }
     // Los cambios de estado solo los aplican las funciones del núcleo (crear, cancelar,
     // `begin_dispatch`, `finish_run`…), con sus reglas: la fuente externa solo informa uso.
-    if matches!(input.event, RunEvent::StateChanged { .. }) {
+    if !matches!(input.event, RunEvent::UsageReported(_)) {
         return Err(invalid(
             "event",
             "Los cambios de estado los registra el núcleo; aquí solo se admite uso.".into(),

@@ -7,8 +7,15 @@
 //!   aplica las peticiones de cancelación y despacha (FIFO) mientras haya hueco según
 //!   `max_concurrency`, leído en cada vuelta (bajarlo no detiene los que corren).
 //! - Por intento: `begin_dispatch` → `record_worktree` (antes de tocar el disco: si la app muere
-//!   en medio, el worktree nunca queda sin registrar) → `create_worktree` → lanzar el proceso de
-//!   prueba (sin IA) → `mark_running` → esperar → `finish_run`.
+//!   en medio, el worktree nunca queda sin registrar) → `create_worktree` → lanzar el ejecutor →
+//!   `mark_running` → esperar → `finish_run`.
+//! - Ejecutores: el proceso de prueba (sin IA, HU-018) y Claude Code vía ACP (HU-019): el
+//!   adaptador configurado se lanza en modo protocolo (sin argumentos, `cwd` = worktree) y,
+//!   ya en `running`, se negocia (`initialize`, `session/new`, modo `default`), se registra la
+//!   sesión (`record_acp_session`), se envían las instrucciones de la instantánea y se espera
+//!   el fin del turno. Fallo al lanzar → `AdapterMissing` (no existe) o
+//!   `AdapterSpawnFailed` (otro motivo). Cancelar, el tiempo máximo y el
+//!   apagado envían `session/cancel` y terminan el árbol tras una espera acotada.
 //! - Ante un error del núcleo no se reintenta a ciegas: se registra y la siguiente vuelta relee
 //!   el estado. Un error no detiene el bucle.
 //! - Apagado ([`Supervisor::shutdown`]): cancela todos los árboles, espera, marca `interrupted`
@@ -26,18 +33,21 @@ use std::time::Duration;
 
 use kanbania_core::error::CoreError;
 use kanbania_core::features::runs::{
-    self, Dispatch, DispatchOutcome, InterruptCause, RUN_OUTPUT_DIR, RunChange, RunFailure,
-    RunOutcome, RunOutputLine, RunOutputStream, RunOutputView, RunSummary, SupervisorToken,
-    WORKTREES_DIR,
+    self, AcpSessionInfo, Dispatch, DispatchExecutor, DispatchOutcome, InterruptCause,
+    RUN_OUTPUT_DIR, RunChange, RunFailure, RunOutcome, RunOutputKind, RunOutputLine,
+    RunOutputStream, RunOutputView, RunSummary, SupervisorToken, TestScenario, WORKTREES_DIR,
 };
 use kanbania_core::platform::storage::Store;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinSet;
 
-use crate::output::{MAX_TAIL_LINES, OutputLog, Stream, read_tail};
+use crate::acp::{
+    AcpClient, AcpFailure, AcpLimits, AcpStop, AgentDeclaration, CLAUDE_CODE_PROFILE, OpenedSession,
+};
+use crate::output::{AgentKind, MAX_TAIL_LINES, OutputLog, Stream, read_tail};
 use crate::process::{
-    CancelHandle, CancelToken, DEFAULT_GRACE, ProcessOutcome, ProcessSpec, RunningProcess,
-    cancel_pair,
+    CancelHandle, CancelToken, DEFAULT_GRACE, OutputSink, ProcessOutcome, ProcessSpec,
+    RunningProcess, SpawnErrorKind, cancel_pair,
 };
 use crate::test_process::RESERVED_FLAG;
 use crate::worktree::{
@@ -80,6 +90,11 @@ pub struct SupervisorConfig {
     /// más corto. El host nunca lo usa. El motivo registrado sigue diciendo los minutos de la
     /// configuración.
     pub timeout_override: Option<Duration>,
+    /// **Solo pruebas**: argumentos para el adaptador ACP (p. ej. el escenario del agente
+    /// falso). El host nunca los usa: el adaptador se lanza sin argumentos.
+    pub acp_args: Vec<OsString>,
+    /// Límites del cliente ACP (las pruebas los acortan).
+    pub acp_limits: AcpLimits,
 }
 
 impl SupervisorConfig {
@@ -94,6 +109,8 @@ impl SupervisorConfig {
             git_timeout: DEFAULT_GIT_TIMEOUT,
             git_program: PathBuf::from("git"),
             timeout_override: None,
+            acp_args: Vec::new(),
+            acp_limits: AcpLimits::default(),
         }
     }
 }
@@ -131,9 +148,18 @@ pub fn read_run_output(data_dir: &Path, run_id: &str) -> std::io::Result<RunOutp
                     Stream::Stdout => RunOutputStream::Stdout,
                     Stream::Stderr => RunOutputStream::Stderr,
                     Stream::System => RunOutputStream::System,
+                    Stream::Agent => RunOutputStream::Agent,
                 },
                 text: line.text,
                 cut: line.cut,
+                kind: line.kind.map(|kind| match kind {
+                    AgentKind::Message => RunOutputKind::Message,
+                    AgentKind::Thought => RunOutputKind::Thought,
+                    AgentKind::Tool => RunOutputKind::Tool,
+                    AgentKind::Plan => RunOutputKind::Plan,
+                    AgentKind::Usage => RunOutputKind::Usage,
+                    AgentKind::Permission => RunOutputKind::Permission,
+                }),
             })
             .collect(),
         skipped_corrupt: tail.skipped_corrupt,
@@ -198,7 +224,8 @@ struct Shared {
     config: SupervisorConfig,
     git: GitConfig,
     sink: ChangeSink,
-    shutting_down: AtomicBool,
+    /// También lo lee el cliente ACP para esperar menos al cancelar durante el apagado.
+    shutting_down: Arc<AtomicBool>,
 }
 
 impl Shared {
@@ -239,7 +266,7 @@ impl Supervisor {
             config,
             git,
             sink,
-            shutting_down: AtomicBool::new(false),
+            shutting_down: Arc::new(AtomicBool::new(false)),
         });
         let waker = SupervisorWaker(Arc::new(Notify::new()));
         let (stop, stopped) = watch::channel(None);
@@ -438,10 +465,16 @@ async fn execute(
             return;
         }
     };
-    log.write_system(&format!(
-        "Proceso de prueba (sin IA), escenario «{}». No es trabajo de un agente.",
-        dispatch.scenario.as_str()
-    ));
+    match &dispatch.executor {
+        DispatchExecutor::TestProcess(scenario) => log.write_system(&format!(
+            "Proceso de prueba (sin IA), escenario «{}». No es trabajo de un agente.",
+            scenario.as_str()
+        )),
+        DispatchExecutor::ClaudeAcp { .. } => log.write_system(
+            "Claude Code vía ACP. Lo que el agente informa se guarda como «agente (reportado)»: \
+             la app no lo comprueba. Permisos: se rechazan todos (hasta HU-020).",
+        ),
+    }
 
     // 1. Registrar el worktree antes de crearlo.
     if let Err(error) = runs::record_worktree(&shared.store, &shared.token, &run_id).await {
@@ -473,21 +506,76 @@ async fn execute(
         return;
     }
 
-    // 3. Lanzar el proceso de prueba en el worktree.
+    // 3. Lanzar el ejecutor en el worktree.
     let timeout = shared.config.timeout_override.unwrap_or_else(|| {
         Duration::from_secs(u64::try_from(dispatch.timeout_minutes.max(1)).unwrap_or(1) * 60)
     });
+    match dispatch.executor.clone() {
+        DispatchExecutor::TestProcess(scenario) => {
+            run_test_process(
+                &shared, &dispatch, log, created, timeout, scenario, &cancel, token,
+            )
+            .await;
+        }
+        DispatchExecutor::ClaudeAcp {
+            adapter_path,
+            instructions,
+        } => {
+            let launch = AcpLaunch {
+                adapter_path,
+                instructions,
+                worktree: created,
+                timeout,
+            };
+            run_claude_acp(&shared, &dispatch, log, launch, &cancel, token).await;
+        }
+    }
+}
+
+/// `preparing → running` tras lanzar. Si ya había una petición de cancelación, cancela en
+/// seguida. Devuelve `false` si no se pudo marcar (entonces se cancela y el intento falla).
+async fn enter_running(shared: &Shared, run_id: &str, cancel: &CancelHandle) -> bool {
+    match runs::mark_running(&shared.store, &shared.token, run_id).await {
+        Ok(run) => {
+            shared.notify(&run.id, &run.story_id);
+            if run.cancel_requested_at.is_some() {
+                cancel.cancel();
+            }
+            true
+        }
+        Err(error) => {
+            log_core("marcar en ejecución", &error);
+            // Sin `running` no hay salida válida: se mata el árbol y el intento falla.
+            cancel.cancel();
+            false
+        }
+    }
+}
+
+/// Proceso de prueba (sin IA, HU-018): sin cambios de comportamiento.
+#[allow(clippy::too_many_arguments)]
+async fn run_test_process(
+    shared: &Shared,
+    dispatch: &Dispatch,
+    log: OutputLog,
+    worktree: PathBuf,
+    timeout: Duration,
+    scenario: TestScenario,
+    cancel: &CancelHandle,
+    token: CancelToken,
+) {
     let mut args = shared.config.program_args.clone();
-    args.push(dispatch.scenario.as_str().into());
+    args.push(scenario.as_str().into());
     args.extend(shared.config.scenario_args.iter().cloned());
     let spec = ProcessSpec {
         program: shared.config.program.clone(),
         args,
-        cwd: created,
+        cwd: worktree,
         extra_env: Vec::new(),
         timeout,
         grace: shared.config.grace,
     };
+    let mut log = log;
     let _ = log.flush();
     let process = match RunningProcess::spawn(spec, log) {
         Ok(process) => process,
@@ -496,8 +584,8 @@ async fn execute(
             log.write_system(&format!("{} ({})", failure.error, failure.error.detail));
             let _ = log.flush();
             finish(
-                &shared,
-                &dispatch,
+                shared,
+                dispatch,
                 RunOutcome::Failed(RunFailure::SpawnFailed),
             )
             .await;
@@ -506,21 +594,7 @@ async fn execute(
     };
 
     // 4. `running`. Si ya había una petición de cancelación, se mata en seguida.
-    let mut not_running = false;
-    match runs::mark_running(&shared.store, &shared.token, &run_id).await {
-        Ok(run) => {
-            shared.notify(&run.id, &run.story_id);
-            if run.cancel_requested_at.is_some() {
-                cancel.cancel();
-            }
-        }
-        Err(error) => {
-            log_core("marcar en ejecución", &error);
-            // Sin `running` no hay salida válida: se mata el árbol y el intento falla.
-            not_running = true;
-            cancel.cancel();
-        }
-    }
+    let running = enter_running(shared, &dispatch.run_id, cancel).await;
 
     // 5. Esperar y cerrar.
     let (report, log) = process.wait(token).await;
@@ -533,12 +607,14 @@ async fn execute(
             minutes: dispatch.timeout_minutes,
         },
         ProcessOutcome::Cancelled => RunOutcome::Cancelled,
-        ProcessOutcome::WaitFailed => RunOutcome::Failed(RunFailure::Internal),
+        ProcessOutcome::Stopped | ProcessOutcome::WaitFailed => {
+            RunOutcome::Failed(RunFailure::Internal)
+        }
     };
-    let outcome = if not_running {
-        RunOutcome::Failed(RunFailure::Internal)
-    } else {
+    let outcome = if running {
         outcome
+    } else {
+        RunOutcome::Failed(RunFailure::Internal)
     };
     if let Some(mut log) = log {
         let stats = report.output;
@@ -549,7 +625,241 @@ async fn execute(
         ));
         let _ = log.finish();
     }
-    finish(&shared, &dispatch, outcome).await;
+    finish(shared, dispatch, outcome).await;
+}
+
+/// Lo que necesita el ejecutor ACP.
+struct AcpLaunch {
+    adapter_path: PathBuf,
+    instructions: String,
+    worktree: PathBuf,
+    timeout: Duration,
+}
+
+/// Cómo terminó la sesión ACP.
+enum SessionEnd {
+    Stop(AcpStop),
+    /// No se pudo registrar la sesión en el núcleo.
+    Internal,
+    /// El adaptador no llegó a ejecutarse (p. ej. le falta su intérprete).
+    Missing,
+}
+
+/// Claude Code vía ACP (HU-019).
+async fn run_claude_acp(
+    shared: &Shared,
+    dispatch: &Dispatch,
+    log: OutputLog,
+    launch: AcpLaunch,
+    cancel: &CancelHandle,
+    mut token: CancelToken,
+) {
+    let spec = ProcessSpec {
+        program: launch.adapter_path,
+        args: shared.config.acp_args.clone(),
+        cwd: launch.worktree.clone(),
+        extra_env: Vec::new(),
+        timeout: launch.timeout,
+        grace: shared.config.grace,
+    };
+    let mut log = log;
+    let _ = log.flush();
+    let (process, io) = match RunningProcess::spawn_protocol(spec, log) {
+        Ok(started) => started,
+        Err(failure) => {
+            let mut log = failure.log;
+            log.write_system(&format!(
+                "No se pudo lanzar el adaptador: {} ({})",
+                failure.error, failure.error.detail
+            ));
+            let _ = log.flush();
+            // No existe → «no se encontró»; cualquier otro fallo (permiso, ruta no válida…) →
+            // «no se pudo lanzar».
+            let failure = if failure.error.kind == SpawnErrorKind::NotFound {
+                RunFailure::AdapterMissing
+            } else {
+                RunFailure::AdapterSpawnFailed
+            };
+            finish(shared, dispatch, RunOutcome::Failed(failure)).await;
+            return;
+        }
+    };
+
+    // 4. `running` en cuanto el proceso existe; la sesión se negocia ya en ejecución.
+    let running = enter_running(shared, &dispatch.run_id, cancel).await;
+
+    // 5. Negociar, registrar la sesión, enviar las instrucciones y esperar el turno.
+    let limits = shared.config.acp_limits;
+    let deadline = process.deadline();
+    let mut client = AcpClient::new(io, limits, Some(shared.shutting_down.clone()));
+    let ended = acp_session(
+        shared,
+        dispatch,
+        &mut client,
+        &launch.worktree,
+        &launch.instructions,
+        &mut token,
+        deadline,
+    )
+    .await;
+    client.close_input();
+    drop(client);
+    // Tras un fin normal, el adaptador puede terminar solo al cerrar su stdin (y tras una
+    // desconexión, ya está terminando: así se conoce su código); en cualquier otro caso se
+    // termina el árbol en seguida (aviso, gracia, fuerza).
+    let wait_exit = if matches!(
+        ended,
+        Ok(()) | Err(SessionEnd::Stop(AcpStop::Failed(AcpFailure::Disconnected)))
+    ) {
+        limits.close_wait
+    } else {
+        Duration::ZERO
+    };
+    let (report, mut log) = process.close(wait_exit).await;
+
+    // Un script `#!/usr/bin/env node` sin `node` en el PATH sale con 127 sin hablar ACP: es un
+    // adaptador que no se puede ejecutar, no una desconexión del agente.
+    let ended = match ended {
+        Err(SessionEnd::Stop(AcpStop::Failed(AcpFailure::Disconnected)))
+            if report.outcome == (ProcessOutcome::Exited { code: 127 }) =>
+        {
+            if let Some(log) = log.as_mut() {
+                log.write_system(
+                    "El adaptador terminó con el código 127 sin responder: suele indicar que no \
+                     encuentra su intérprete (p. ej. `node` en el PATH con el que se abrió la app).",
+                );
+            }
+            Err(SessionEnd::Missing)
+        }
+        other => other,
+    };
+    let (outcome, summary) = match ended {
+        Ok(()) => (RunOutcome::AgentEndedTurn, "el agente terminó su turno"),
+        Err(SessionEnd::Stop(AcpStop::Cancelled)) => (RunOutcome::Cancelled, "cancelado"),
+        Err(SessionEnd::Stop(AcpStop::TimedOut)) => (
+            RunOutcome::TimedOut {
+                minutes: dispatch.timeout_minutes,
+            },
+            "tiempo máximo agotado",
+        ),
+        Err(SessionEnd::Stop(AcpStop::Failed(failure))) => (
+            RunOutcome::Failed(acp_failure(failure)),
+            "fallo de la sesión ACP",
+        ),
+        Err(SessionEnd::Internal) => (
+            RunOutcome::Failed(RunFailure::Internal),
+            "no se pudo registrar la sesión",
+        ),
+        Err(SessionEnd::Missing) => (
+            RunOutcome::Failed(RunFailure::AdapterMissing),
+            "el adaptador no se pudo ejecutar",
+        ),
+    };
+    let outcome = if running {
+        outcome
+    } else {
+        RunOutcome::Failed(RunFailure::Internal)
+    };
+    if let Some(mut log) = log {
+        let stats = report.output;
+        log.write_system(&format!(
+            "Fin de la sesión ACP: {summary}. Proceso del adaptador: {:?}. Líneas: {}; \
+             cortadas: {}; archivos descartados por rotación: {} ({} bytes).",
+            report.outcome, stats.lines, stats.cut_lines, stats.dropped_files, stats.dropped_bytes
+        ));
+        let _ = log.finish();
+    }
+    finish(shared, dispatch, outcome).await;
+}
+
+async fn acp_session(
+    shared: &Shared,
+    dispatch: &Dispatch,
+    client: &mut AcpClient,
+    worktree: &Path,
+    instructions: &str,
+    token: &mut CancelToken,
+    deadline: tokio::time::Instant,
+) -> Result<(), SessionEnd> {
+    let declared = client
+        .initialize(token, deadline)
+        .await
+        .map_err(SessionEnd::Stop)?;
+    let session = client
+        .open_session(worktree, &declared, &CLAUDE_CODE_PROFILE, token, deadline)
+        .await
+        .map_err(SessionEnd::Stop)?;
+    // La huella es la del texto exacto que va en `session/prompt` (`instructions`, sin cambios).
+    record_session(
+        shared,
+        dispatch,
+        &client.sink(),
+        &declared,
+        &session,
+        instructions,
+    )
+    .await?;
+    client
+        .prompt(instructions, token, deadline)
+        .await
+        .map_err(SessionEnd::Stop)
+}
+
+/// Registra una vez lo que el agente declaró (CA-1) con la huella del texto exacto que se
+/// enviará en `session/prompt`. El núcleo omite lo que no cumpla sus límites
+/// (`AcpSessionInfo::from_reported`); si omite algo, se anota en `sys` (sin el dato).
+async fn record_session(
+    shared: &Shared,
+    dispatch: &Dispatch,
+    sink: &OutputSink,
+    declared: &AgentDeclaration,
+    session: &OpenedSession,
+    prompt: &str,
+) -> Result<(), SessionEnd> {
+    let reported = AcpSessionInfo::from_reported(
+        declared.protocol_version,
+        declared.name.clone(),
+        declared.title.clone(),
+        declared.version.clone(),
+        session
+            .capabilities
+            .iter()
+            .map(|c| (*c).to_owned())
+            .collect(),
+        Some(session.mode.clone()),
+    );
+    if reported.identity_dropped || reported.mode_dropped || reported.dropped_capabilities > 0 {
+        sink.system(
+            "Parte de lo que declaró el agente no cumple los límites de la app y no se registra \
+             (identidad, modo o capacidades desconocidas).",
+        )
+        .await;
+    }
+    let info = reported.info.with_prompt(prompt);
+    match runs::record_acp_session(&shared.store, &shared.token, &dispatch.run_id, &info).await {
+        Ok(run) => {
+            shared.notify(&run.id, &run.story_id);
+            Ok(())
+        }
+        Err(error) => {
+            log_core("registrar la sesión del agente", &error);
+            Err(SessionEnd::Internal)
+        }
+    }
+}
+
+fn acp_failure(failure: AcpFailure) -> RunFailure {
+    match failure {
+        AcpFailure::Disconnected => RunFailure::AgentDisconnected,
+        AcpFailure::Protocol => RunFailure::AgentProtocolError,
+        AcpFailure::VersionUnsupported => RunFailure::AgentVersionUnsupported,
+        AcpFailure::AuthRequired => RunFailure::AgentAuthRequired,
+        AcpFailure::ModeUnavailable => RunFailure::AgentModeUnavailable,
+        AcpFailure::Refused => RunFailure::AgentRefused,
+        AcpFailure::LimitReached => RunFailure::AgentLimitReached,
+        AcpFailure::RequestFailed => RunFailure::AgentRequestFailed,
+        AcpFailure::TurnFailed => RunFailure::AgentTurnFailed,
+    }
 }
 
 /// Crea el worktree; si falla, registra el detalle y cierra el intento como `failed`.

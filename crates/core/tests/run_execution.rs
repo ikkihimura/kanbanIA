@@ -23,13 +23,14 @@ use kanbania_core::features::repositories::{
 };
 use kanbania_core::features::review::{SetBlockerInput, set_story_blocker};
 use kanbania_core::features::runs::{
-    CancelRunInput, CreateRunInput, DispatchOutcome, InterruptCause, RecordRunEventInput,
-    RecordWorktreeRemovalInput, RunEvent, RunFailure, RunOutcome, RunState, RunSummary,
-    StartRunInput, SupervisorToken, TestScenario, UpdateRunSettingsInput, WORKTREES_DIR,
-    WorktreeRemoval, begin_dispatch, cancel_run, create_run, discard_unused_worktree, finish_run,
-    get_run, get_run_settings, get_worktree_target, interrupt_unverifiable_runs, mark_running,
-    next_dispatchable, pending_cancellations, record_run_event, record_worktree,
-    record_worktree_removal, start_run, update_run_settings, void_start_requests,
+    CancelRunInput, CreateRunInput, DispatchExecutor, DispatchOutcome, InterruptCause,
+    RecordRunEventInput, RecordWorktreeRemovalInput, RunEvent, RunExecutor, RunFailure, RunOutcome,
+    RunState, RunSummary, StartRunInput, SupervisorToken, TestScenario, UpdateRunSettingsInput,
+    WORKTREES_DIR, WorktreeRemoval, begin_dispatch, cancel_run, create_run,
+    discard_unused_worktree, finish_run, get_run, get_run_settings, get_worktree_target,
+    interrupt_unverifiable_runs, mark_running, next_dispatchable, pending_cancellations,
+    record_run_event, record_worktree, record_worktree_removal, start_run, update_run_settings,
+    void_start_requests,
 };
 use kanbania_core::features::stories::{
     ArchiveStoryInput, CreateStoryInput, Priority, StorySummary, archive_story, create_story,
@@ -197,7 +198,7 @@ impl Board {
             project_id: self.project.id.clone(),
             run_id: run.id.clone(),
             repository_id: None,
-            scenario,
+            executor: RunExecutor::TestProcess { scenario },
         }
     }
 
@@ -329,7 +330,10 @@ async fn start_dispatch_and_finish_follow_the_state_machine() {
         format!("kanbania/h{}-i{}-{tail}", s.number, run.number)
     );
     assert_eq!(dispatch.base_commit, SHA_A);
-    assert_eq!(dispatch.scenario, TestScenario::Success);
+    assert_eq!(
+        dispatch.executor,
+        DispatchExecutor::TestProcess(TestScenario::Success)
+    );
     assert_eq!(dispatch.timeout_minutes, 30);
     assert!(dispatch.repository_path.ends_with("repo con espacios"));
     assert_eq!(
@@ -396,7 +400,12 @@ async fn start_dispatch_and_finish_follow_the_state_machine() {
 
     let detail = get_run(&b.store, &b.project.id, &run.id).await.unwrap();
     let request = detail.start_request.unwrap();
-    assert_eq!(request.scenario, TestScenario::Success);
+    assert_eq!(
+        request.executor,
+        RunExecutor::TestProcess {
+            scenario: TestScenario::Success
+        }
+    );
     assert!(request.dispatched_at.is_some());
     assert!(request.voided_at.is_none());
     assert_eq!(detail.worktree.unwrap(), worktree);
@@ -405,7 +414,7 @@ async fn start_dispatch_and_finish_follow_the_state_machine() {
         .iter()
         .filter_map(|e| match &e.event {
             RunEvent::StateChanged { to, .. } => Some(*to),
-            RunEvent::UsageReported(_) => None,
+            RunEvent::UsageReported(_) | RunEvent::AcpSession(_) => None,
         })
         .collect();
     assert_eq!(
@@ -434,7 +443,7 @@ async fn process_outcomes_produce_safe_core_reasons() {
         ),
         (
             RunOutcome::Failed(RunFailure::SpawnFailed),
-            "No se pudo lanzar el proceso de prueba.",
+            "No se pudo lanzar el proceso.",
         ),
     ];
     for (i, (outcome, reason)) in cases.into_iter().enumerate() {
@@ -538,7 +547,9 @@ async fn start_requires_a_frozen_repository_commit_and_is_idempotent() {
     assert_eq!(count, 1);
     // Mismo `requestId` con otro escenario: conflicto de idempotencia.
     let other = StartRunInput {
-        scenario: TestScenario::Fail,
+        executor: RunExecutor::TestProcess {
+            scenario: TestScenario::Fail,
+        },
         ..chosen.clone()
     };
     assert_eq!(
@@ -563,7 +574,10 @@ async fn start_requires_a_frozen_repository_commit_and_is_idempotent() {
     };
     assert_eq!(dispatch.repository_id, second_id);
     assert_eq!(dispatch.base_commit, SHA_B);
-    assert_eq!(dispatch.scenario, TestScenario::Write);
+    assert_eq!(
+        dispatch.executor,
+        DispatchExecutor::TestProcess(TestScenario::Write)
+    );
     // Ya no está en cola: iniciar es una transición no válida.
     assert_eq!(
         code(
@@ -976,6 +990,7 @@ async fn settings_have_defaults_limits_and_revision() {
         expected_revision,
         max_concurrency,
         timeout_minutes,
+        claude_acp_path: None,
     };
     for (input, name) in [
         (update(1, 0, 30), "maxConcurrency"),

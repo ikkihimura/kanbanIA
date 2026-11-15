@@ -6,7 +6,7 @@ use ts_rs::TS;
 use super::event::RunEvent;
 use super::run::{RunSummary, require_run, validate_id};
 use super::snapshot::RunSnapshot;
-use super::start::TestScenario;
+use super::start::RunExecutor;
 use super::worktree::{RunWorktree, load_worktree};
 use crate::error::CoreError;
 use crate::platform::clock::iso_from_ms;
@@ -32,8 +32,8 @@ pub struct RunEventRecord {
 #[ts(export)]
 pub struct RunStartRequest {
     pub repository_id: String,
-    /// Escenario del proceso de prueba (sin IA).
-    pub scenario: TestScenario,
+    /// Ejecutor elegido: proceso de prueba (sin IA, con su escenario) o Claude Code vía ACP.
+    pub executor: RunExecutor,
     pub requested_at: String,
     /// El supervisor lo despachó (salió de la cola).
     pub dispatched_at: Option<String>,
@@ -129,15 +129,22 @@ async fn load(
     })
 }
 
-/// Petición de inicio: repositorio, escenario, pedida, despachada, anulada.
-type StartRequestRow = (String, String, String, Option<String>, Option<String>);
+/// Petición de inicio: repositorio, ejecutor, escenario, pedida, despachada, anulada.
+type StartRequestRow = (
+    String,
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<String>,
+);
 
 async fn load_start_request(
     conn: &mut SqliteConnection,
     run_id: &str,
 ) -> Result<Option<RunStartRequest>, CoreError> {
     let row: Option<StartRequestRow> = sqlx::query_as(concat!(
-        "SELECT repository_id, scenario, ",
+        "SELECT repository_id, executor, scenario, ",
         iso_from_ms!("requested_at_ms"),
         ", ",
         iso_from_ms!("dispatched_at_ms"),
@@ -149,10 +156,10 @@ async fn load_start_request(
     .fetch_optional(&mut *conn)
     .await?;
     row.map(
-        |(repository_id, scenario, requested_at, dispatched_at, voided_at)| {
+        |(repository_id, executor, scenario, requested_at, dispatched_at, voided_at)| {
             Ok(RunStartRequest {
                 repository_id,
-                scenario: TestScenario::parse(&scenario)?,
+                executor: RunExecutor::from_columns(&executor, scenario.as_deref())?,
                 requested_at,
                 dispatched_at,
                 voided_at,

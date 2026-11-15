@@ -4,6 +4,7 @@ use ts_rs::TS;
 
 use super::run::{RunState, RunSummary, require_run, validate_id};
 use super::runnable::ensure_runnable;
+use super::settings::load_settings;
 use super::snapshot::{RunSnapshot, SnapshotRepository};
 use crate::error::CoreError;
 use crate::features::stories::load_story;
@@ -13,8 +14,8 @@ use crate::platform::storage::Store;
 
 const OPERATION: &str = "runs.start";
 
-/// Escenario del proceso de prueba incluido (sin IA) que lanza el supervisor en HU-018. Se
-/// pasa como argumento explícito al proceso; HU-019 lo sustituirá por el adaptador ACP.
+/// Escenario del proceso de prueba incluido (sin IA) que lanza el supervisor (HU-018). Se
+/// pasa como argumento explícito al proceso.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
@@ -67,6 +68,49 @@ impl TestScenario {
     }
 }
 
+/// Ejecutor elegido al pedir el inicio (HU-019). JSON con etiqueta `kind`:
+/// `{ "kind": "testProcess", "scenario": "success" }` o `{ "kind": "claudeAcp" }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[ts(export)]
+pub enum RunExecutor {
+    /// Proceso de prueba incluido (sin IA): nunca se presenta como trabajo de un agente.
+    TestProcess { scenario: TestScenario },
+    /// Claude Code vía ACP con el adaptador configurado en «Sistema → Ejecuciones».
+    ClaudeAcp,
+}
+
+impl RunExecutor {
+    /// Valor de la columna `executor` de `run_start_requests`.
+    pub(super) fn column(self) -> &'static str {
+        match self {
+            Self::TestProcess { .. } => "test_process",
+            Self::ClaudeAcp => "claude_acp",
+        }
+    }
+
+    /// Valor de la columna `scenario` (solo el proceso de prueba).
+    pub(super) fn scenario(self) -> Option<TestScenario> {
+        match self {
+            Self::TestProcess { scenario } => Some(scenario),
+            Self::ClaudeAcp => None,
+        }
+    }
+
+    /// Lee las columnas `executor` y `scenario` de una petición de inicio.
+    pub(super) fn from_columns(executor: &str, scenario: Option<&str>) -> Result<Self, CoreError> {
+        match (executor, scenario) {
+            ("test_process", Some(scenario)) => Ok(Self::TestProcess {
+                scenario: TestScenario::parse(scenario)?,
+            }),
+            ("claude_acp", None) => Ok(Self::ClaudeAcp),
+            _ => Err(CoreError::Database(sqlx::Error::Decode(
+                format!("ejecutor desconocido: {executor}").into(),
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -79,7 +123,7 @@ pub struct StartRunInput {
     /// tiene varios con commit; si solo hay uno, se usa ese.
     #[ts(optional)]
     pub repository_id: Option<String>,
-    pub scenario: TestScenario,
+    pub executor: RunExecutor,
 }
 
 #[derive(Serialize)]
@@ -88,16 +132,18 @@ struct Payload<'a> {
     project_id: &'a str,
     run_id: &'a str,
     repository_id: Option<&'a str>,
-    scenario: TestScenario,
+    executor: RunExecutor,
 }
 
-/// Pide iniciar un intento en cola con el proceso de prueba (sin IA). Solo personas, con
+/// Pide iniciar un intento en cola con el ejecutor elegido: el proceso de prueba (sin IA) o
+/// Claude Code vía ACP (HU-019). Solo personas, con
 /// `requestId` (reintentar devuelve el resultado original). Una transacción `BEGIN IMMEDIATE`
 /// que registra la petición de inicio; el intento sigue `queued` (`startRequestedAt`) hasta
 /// que el supervisor tenga hueco y lo despache, momento en que vuelve a evaluar
 /// `ensure_runnable`.
 ///
-/// Errores: intento de otro proyecto o inexistente → `not_found`; no está en cola →
+/// Errores: `claudeAcp` sin la ruta del adaptador configurada → `validation` (`executor`);
+/// intento de otro proyecto o inexistente → `not_found`; no está en cola →
 /// `invalid_run_transition`; ya tiene una petición pendiente → `validation` (`runId`);
 /// la instantánea no tiene ningún repositorio con commit, el indicado no está en ella o no
 /// tiene commit, hay varios y no se indicó, o ya no está vinculado al proyecto en la misma ruta
@@ -118,7 +164,7 @@ pub async fn start_run(
         project_id: &input.project_id,
         run_id: &input.run_id,
         repository_id: input.repository_id.as_deref(),
-        scenario: input.scenario,
+        executor: input.executor,
     };
     let (input, clock) = (input.clone(), store.clone());
     store
@@ -142,6 +188,16 @@ pub async fn start_run(
                         ),
                     });
                 }
+                if input.executor == RunExecutor::ClaudeAcp
+                    && load_settings(conn).await?.claude_acp_path.is_none()
+                {
+                    return Err(CoreError::Validation {
+                        field: "executor",
+                        reason: "Configura la ruta del adaptador de Claude Code en Sistema → \
+                                 Ejecuciones."
+                            .into(),
+                    });
+                }
                 let snapshot = load_snapshot(conn, &run.id).await?;
                 let repository = choose_repository(&snapshot, input.repository_id.as_deref())?;
                 if !is_repository_linked(conn, &run.project_id, repository).await? {
@@ -157,12 +213,13 @@ pub async fn start_run(
                     .ok_or(CoreError::NotFound { entity: "Historia" })?;
                 ensure_runnable(conn, &story, &run.agent_id, now).await?;
                 sqlx::query(
-                    "INSERT INTO run_start_requests (run_id, repository_id, scenario, \
-                     requested_at_ms) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO run_start_requests (run_id, repository_id, executor, scenario, \
+                     requested_at_ms) VALUES (?, ?, ?, ?, ?)",
                 )
                 .bind(&run.id)
                 .bind(&repository.id)
-                .bind(input.scenario.as_str())
+                .bind(input.executor.column())
+                .bind(input.executor.scenario().map(TestScenario::as_str))
                 .bind(now)
                 .execute(&mut *conn)
                 .await?;

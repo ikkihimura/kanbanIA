@@ -1,16 +1,30 @@
 import { useId, useRef, useState, type Ref } from "react";
+import type { RunExecutor } from "../../contracts/generated/RunExecutor";
 import type { RunSummary } from "../../contracts/generated/RunSummary";
 import type { SnapshotRepository } from "../../contracts/generated/SnapshotRepository";
 import type { StartRunInput } from "../../contracts/generated/StartRunInput";
 import type { TestScenario } from "../../contracts/generated/TestScenario";
 import {
+  getRunSettings,
   newRequestId,
   startRun,
   type UiError,
 } from "../../shared/ipc/commands";
+import {
+  useIpcResource,
+  type ResourceState,
+} from "../../shared/ipc/useIpcResource";
 import { useMutation } from "../../shared/ipc/useMutation";
 import { FieldError } from "../../shared/ui/FieldError";
-import { SCENARIOS, SCENARIO_LABEL, TEST_PROCESS_LABEL } from "./runFormat";
+import {
+  CLAUDE_ACP_LABEL,
+  SCENARIOS,
+  SCENARIO_LABEL,
+  TEST_PROCESS_LABEL,
+  executorLabel,
+} from "./runFormat";
+
+type ExecutorKind = RunExecutor["kind"];
 
 const NO_REPOSITORY_HINT =
   "Ningún repositorio de la instantánea tiene commit: vincula al proyecto un repositorio con commits y prepara otro intento.";
@@ -21,27 +35,35 @@ interface Props {
   runNumber: number;
   /** Repositorios congelados en la instantánea (solo los que tienen commit sirven). */
   repositories: SnapshotRepository[];
-  /** Referencia a la opción de escenario elegida, para llevar el foco desde la lista. */
-  scenarioRef?: Ref<HTMLInputElement>;
-  onStarted: (run: RunSummary) => void;
+  /** Referencia a la opción de ejecutor elegida, para llevar el foco desde la lista. */
+  focusRef?: Ref<HTMLInputElement>;
+  onStarted: (run: RunSummary, executor: RunExecutor) => void;
   /** El núcleo rechazó el inicio porque el intento ya cambió: hay que volver a leer. */
   onStale: () => void;
 }
 
 /**
- * Pedir el inicio de un intento en cola (HU-018) con el proceso de prueba incluido. El núcleo
- * es la autoridad: valida el escenario, el repositorio y que la historia siga ejecutable.
+ * Pedir el inicio de un intento en cola (HU-018/019) con el ejecutor elegido: el proceso de
+ * prueba incluido (sin IA) o Claude Code vía ACP. El núcleo es la autoridad: valida el
+ * ejecutor (ACP exige un adaptador configurado), el repositorio y que la historia siga
+ * ejecutable. La configuración solo sirve para explicar por qué ACP no está disponible.
  */
 export function StartRunForm({
   projectId,
   runId,
   runNumber,
   repositories,
-  scenarioRef,
+  focusRef,
   onStarted,
   onStale,
 }: Props) {
   const id = useId();
+  const settings = useIpcResource(getRunSettings);
+  const acpConfigured =
+    settings.state.status === "ready" &&
+    settings.state.data.claudeAcpPath !== null;
+  // Por defecto, el proceso de prueba: no lanza IA ni consume saldo sin elegirlo.
+  const [kind, setKind] = useState<ExecutorKind>("testProcess");
   const [scenario, setScenario] = useState<TestScenario>("success");
   const [repositoryId, setRepositoryId] = useState("");
   const [localError, setLocalError] = useState<UiError | null>(null);
@@ -59,10 +81,13 @@ export function StartRunForm({
   const choose = withCommit.length > 1;
 
   const error = localError ?? start.error;
-  const scenarioError = error?.field === "scenario" ? error : null;
+  const executorError =
+    error?.field === "executor" || error?.field === "scenario" ? error : null;
   const repositoryError = error?.field === "repositoryId" ? error : null;
   const generalError =
-    error && !scenarioError && !repositoryError ? error : null;
+    error && !executorError && !repositoryError ? error : null;
+  const executor: RunExecutor =
+    kind === "claudeAcp" ? { kind: "claudeAcp" } : { kind, scenario };
 
   async function handleSubmit() {
     if (choose && repositoryId === "") {
@@ -77,13 +102,13 @@ export function StartRunForm({
       requestId: requestId.current,
       projectId,
       runId,
-      scenario,
+      executor,
     };
     if (choose) input.repositoryId = repositoryId;
     const result = await start.mutate(input);
     if (result.ok) {
       // Se conserva el requestId: repetir el envío (doble pulsación) es la misma petición.
-      onStarted(result.value);
+      onStarted(result.value, executor);
     } else if (
       result.error.code === "invalid_run_transition" ||
       result.error.code === "not_found" ||
@@ -115,38 +140,96 @@ export function StartRunForm({
     >
       <p className="field__hint">
         Crea un worktree y una rama nuevos desde el commit congelado en la
-        instantánea y lanza en él un proceso de prueba incluido en la app. No
-        trabaja ningún agente ni IA: sirve para probar la supervisión. Tu
-        repositorio original no se modifica.
+        instantánea y lanza en él el ejecutor elegido. Tu repositorio original
+        no se modifica.
       </p>
 
       {/* Opciones siempre visibles (no un desplegable): con un desplegable que ya muestra
-          «Termina bien», era fácil no ver que había que elegir. */}
+          una opción, era fácil no ver que había que elegir. */}
       <fieldset
         className="field run-start__scenarios"
-        aria-describedby={scenarioError ? `${id}-scenario-error` : undefined}
+        aria-describedby={executorError ? `${id}-executor-error` : undefined}
       >
-        <legend className="run-start__label">
-          Escenario del proceso de prueba
-        </legend>
-        {SCENARIOS.map((s) => (
-          <label key={s} className="checkbox">
-            <input
-              type="radio"
-              name={`${id}-scenario`}
-              value={s}
-              ref={s === scenario ? scenarioRef : undefined}
-              checked={s === scenario}
-              onChange={() => {
-                setScenario(s);
-                touch();
-              }}
-            />
-            {SCENARIO_LABEL[s]}
-          </label>
-        ))}
-        <FieldError id={`${id}-scenario-error`} error={scenarioError} />
+        <legend className="run-start__label">Ejecutor</legend>
+        <label className="checkbox">
+          <input
+            type="radio"
+            name={`${id}-executor-kind`}
+            value="testProcess"
+            ref={kind === "testProcess" ? focusRef : undefined}
+            checked={kind === "testProcess"}
+            onChange={() => {
+              setKind("testProcess");
+              touch();
+            }}
+          />
+          {TEST_PROCESS_LABEL}
+        </label>
+        <label className="checkbox">
+          <input
+            type="radio"
+            name={`${id}-executor-kind`}
+            value="claudeAcp"
+            ref={kind === "claudeAcp" ? focusRef : undefined}
+            checked={kind === "claudeAcp"}
+            disabled={!acpConfigured}
+            aria-describedby={
+              acpConfigured ? undefined : `${id}-acp-unavailable`
+            }
+            onChange={() => {
+              setKind("claudeAcp");
+              touch();
+            }}
+          />
+          {CLAUDE_ACP_LABEL}
+        </label>
+        {!acpConfigured && (
+          <AcpUnavailable
+            id={`${id}-acp-unavailable`}
+            state={settings.state}
+            onRetry={() => {
+              settings.run();
+            }}
+          />
+        )}
+        <FieldError id={`${id}-executor-error`} error={executorError} />
       </fieldset>
+
+      {kind === "testProcess" ? (
+        <>
+          <p className="field__hint">
+            Lanza un proceso de prueba incluido en la app. No trabaja ningún
+            agente ni IA: sirve para probar la supervisión.
+          </p>
+          <fieldset className="field run-start__scenarios">
+            <legend className="run-start__label">
+              Escenario del proceso de prueba
+            </legend>
+            {SCENARIOS.map((s) => (
+              <label key={s} className="checkbox">
+                <input
+                  type="radio"
+                  name={`${id}-scenario`}
+                  value={s}
+                  checked={s === scenario}
+                  onChange={() => {
+                    setScenario(s);
+                    touch();
+                  }}
+                />
+                {SCENARIO_LABEL[s]}
+              </label>
+            ))}
+          </fieldset>
+        </>
+      ) : (
+        <p className="run-detail__info">
+          Lanza Claude Code en el worktree con las instrucciones de la
+          instantánea. El agente trabaja con tu sesión de Claude Code. Hasta
+          HU-020 la app rechaza todas sus peticiones de permiso (editar,
+          ejecutar…), así que normalmente solo podrá leer y responder.
+        </p>
+      )}
 
       {choose ? (
         <div className="field">
@@ -203,9 +286,47 @@ export function StartRunForm({
           Iniciar
         </button>
         <span id={`${id}-executor`} className="badge run-start__executor">
-          {TEST_PROCESS_LABEL}
+          {executorLabel(executor)}
         </span>
       </div>
     </form>
+  );
+}
+
+interface UnavailableProps {
+  id: string;
+  state: ResourceState<unknown>;
+  onRetry: () => void;
+}
+
+/** Por qué «Claude Code (ACP)» no se puede elegir, siempre en texto. */
+function AcpUnavailable({ id, state, onRetry }: UnavailableProps) {
+  if (state.status === "loading")
+    return (
+      <p id={id} className="field__hint">
+        Comprobando si hay un adaptador de Claude Code configurado…
+      </p>
+    );
+  if (state.status === "error")
+    return (
+      <div className="field__hint">
+        <p id={id}>
+          No disponible: no se pudo leer la configuración ({state.message}).
+        </p>
+        <button
+          type="button"
+          className="button button--secondary"
+          onClick={onRetry}
+        >
+          Volver a leer la configuración
+        </button>
+      </div>
+    );
+  return (
+    <p id={id} className="field__hint">
+      No disponible: no hay ningún adaptador de Claude Code configurado. Indica
+      la ruta de <code>claude-agent-acp</code> en «Sistema → Ejecuciones» (al
+      final de la ventana).
+    </p>
   );
 }

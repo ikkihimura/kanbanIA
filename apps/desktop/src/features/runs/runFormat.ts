@@ -1,4 +1,7 @@
+import type { AcpSessionInfo } from "../../contracts/generated/AcpSessionInfo";
 import type { RunEvent } from "../../contracts/generated/RunEvent";
+import type { RunExecutor } from "../../contracts/generated/RunExecutor";
+import type { RunOutputKind } from "../../contracts/generated/RunOutputKind";
 import type { RunOutputStream } from "../../contracts/generated/RunOutputStream";
 import type { RunState } from "../../contracts/generated/RunState";
 import type { RunSummary } from "../../contracts/generated/RunSummary";
@@ -63,10 +66,24 @@ export function canStartRun(
 }
 
 /**
- * Único ejecutor de HU-018. Se muestra siempre junto a «Iniciar» y en el detalle: nunca se
+ * Ejecutor de prueba de HU-018. Se muestra siempre junto a «Iniciar» y en el detalle: nunca se
  * da a entender que trabaja un agente.
  */
 export const TEST_PROCESS_LABEL = "Proceso de prueba (sin IA)";
+
+/** Ejecutor real de HU-019: Claude Code a través del adaptador ACP que configura la persona. */
+export const CLAUDE_ACP_LABEL = "Claude Code (ACP)";
+
+export function executorLabel(executor: RunExecutor): string {
+  return executor.kind === "claudeAcp" ? CLAUDE_ACP_LABEL : TEST_PROCESS_LABEL;
+}
+
+/** Ejecutor con su escenario, en una línea («Proceso de prueba (sin IA) · escenario …»). */
+export function describeExecutor(executor: RunExecutor): string {
+  return executor.kind === "claudeAcp"
+    ? CLAUDE_ACP_LABEL
+    : `${TEST_PROCESS_LABEL} · escenario «${SCENARIO_LABEL[executor.scenario]}»`;
+}
 
 export const SCENARIO_LABEL: Record<TestScenario, string> = {
   success: "Termina bien",
@@ -88,10 +105,55 @@ export const SCENARIOS: readonly TestScenario[] = [
 
 /** Etiqueta de cada línea de salida: el origen siempre en texto. */
 export const STREAM_LABEL: Record<RunOutputStream, string> = {
-  stdout: "salida",
-  stderr: "error",
-  system: "sistema",
+  stdout: "stdout",
+  stderr: "stderr",
+  system: "app",
+  agent: "agente (reportado)",
 };
+
+/** Tipo de una línea `agent` (lo que reporta el agente por ACP). */
+export const OUTPUT_KIND_LABEL: Record<RunOutputKind, string> = {
+  message: "mensaje",
+  thought: "pensamiento",
+  tool: "herramienta",
+  plan: "plan",
+  usage: "uso",
+  permission: "permiso",
+};
+
+/**
+ * Capacidades ACP declaradas por el agente, en español. Una clave desconocida se muestra tal
+ * cual (texto plano): el núcleo ya las limita a una lista conocida.
+ */
+export const ACP_CAPABILITY_LABEL: Record<string, string> = {
+  loadSession: "retomar sesión",
+  image: "imágenes",
+  audio: "audio",
+  embeddedContext: "contexto incrustado",
+  mcpHttp: "MCP por HTTP",
+  mcpSse: "MCP por SSE",
+  modes: "modos",
+};
+
+export function describeCapabilities(capabilities: readonly string[]): string {
+  if (capabilities.length === 0) return "ninguna declarada";
+  return capabilities.map((c) => ACP_CAPABILITY_LABEL[c] ?? c).join(", ");
+}
+
+/** Modo de sesión que fijó la app. `default` del adaptador de Claude Code pide permiso. */
+export function describeAgentMode(mode: string | null): string {
+  if (mode === null) return "ninguno fijado";
+  if (mode === "default") return "Manual: pide permiso";
+  return mode;
+}
+
+/** «<título o nombre> <versión>» de lo que declaró el agente; partes ausentes se omiten. */
+export function describeAgentIdentity(
+  info: Pick<AcpSessionInfo, "agentName" | "agentTitle" | "agentVersion">,
+): string {
+  const name = info.agentTitle ?? info.agentName ?? "Agente sin nombre";
+  return info.agentVersion === null ? name : `${name} ${info.agentVersion}`;
+}
 
 export const REMOVAL_LABEL: Record<WorktreeRemoval, string> = {
   clean: "Estaba limpio.",
@@ -140,5 +202,7 @@ export function describeRunEvent(event: RunEvent): string {
     const to = `Estado → ${RUN_STATE_LABEL[event.to]}`;
     return event.reason === null ? to : `${to}: ${event.reason}`;
   }
+  if (event.kind === "acp_session")
+    return `Sesión del agente iniciada (reportado): ${describeAgentIdentity(event)} · ACP v${String(event.protocolVersion)}`;
   return `Uso reportado (${describeUsage(event)})`;
 }

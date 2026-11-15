@@ -1,9 +1,20 @@
 //! Proceso supervisado: programa + argumentos explícitos (nunca un shell), `cwd` indicado,
-//! `stdin` nulo, entorno vacío más una lista permitida, árbol de procesos propio, límite de
-//! tiempo y cancelación. stdout y stderr van línea a línea a un [`OutputLog`].
+//! entorno vacío más una lista permitida, árbol de procesos propio, límite de tiempo y
+//! cancelación.
+//!
+//! Dos modos:
+//! - normal ([`RunningProcess::spawn`]): `stdin` nulo; stdout y stderr van línea a línea a un
+//!   [`OutputLog`]; [`RunningProcess::wait`] aplica el tiempo máximo y la cancelación;
+//! - protocolo ([`RunningProcess::spawn_protocol`], HU-019): stdin y stdout en tubería para
+//!   quien habla el protocolo (ACP), que los recibe en [`ProtocolIo`] junto con un
+//!   [`OutputSink`] para escribir en el mismo registro; stderr sigue yendo al registro (`err`),
+//!   con una redacción mínima de correos y prefijos de secretos (`redact`).
+//!   El tiempo máximo y la cancelación los aplica quien habla el protocolo (con
+//!   [`RunningProcess::deadline`]), que termina con [`RunningProcess::close`]. El entorno
+//!   añade las variables de adaptador; nunca `KANBANIA_*`, `ANTHROPIC_*` ni `CLAUDE_*`.
 //!
 //! Uso en dos fases, para que quien supervisa pueda registrar «en ejecución» justo después de
-//! lanzar: [`RunningProcess::spawn`] y luego [`RunningProcess::wait`].
+//! lanzar.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -11,13 +22,13 @@ use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::Command;
+use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 
-use crate::env::{allowed_env, valid_extra_name};
-use crate::output::{MAX_LINE_BYTES, OutputLog, OutputStats, Stream};
+use crate::env::{adapter_extra_env, allowed_env, is_adapter_forbidden, valid_extra_name};
+use crate::output::{AgentKind, MAX_LINE_BYTES, OutputLog, OutputStats, Stream};
 use crate::tree::ProcessTree;
 
 /// Gracia por defecto entre `SIGTERM` y `SIGKILL` (Unix).
@@ -57,6 +68,9 @@ pub enum ProcessOutcome {
     TimedOut,
     /// Se canceló y se terminó el árbol.
     Cancelled,
+    /// Modo protocolo: la raíz no terminó a tiempo tras cerrar el protocolo y el runner terminó
+    /// el árbol ([`RunningProcess::close`]).
+    Stopped,
     /// No se pudo esperar al proceso (error del sistema); el árbol se terminó.
     WaitFailed,
 }
@@ -141,18 +155,69 @@ impl CancelToken {
     }
 }
 
-/// Registro en vuelo de un lector al escritor.
+/// Registro en vuelo de un lector (o de un [`OutputSink`]) al escritor.
 struct Record {
     stream: Stream,
+    kind: Option<AgentKind>,
     bytes: Vec<u8>,
     cut_bytes: u64,
+}
+
+impl std::fmt::Debug for Record {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Record")
+    }
+}
+
+/// Escritura en el registro de un proceso en modo protocolo: líneas `agent` (normalizadas) y
+/// `sys`. Clonable. No mantiene vivo el registro: cuando el proceso se cierra, lo que se envíe
+/// se pierde sin error.
+#[derive(Debug, Clone)]
+pub struct OutputSink(mpsc::WeakSender<Record>);
+
+impl OutputSink {
+    /// Una línea `agent` (se recorta a [`MAX_LINE_BYTES`] y se marca `cut`).
+    pub async fn agent(&self, kind: AgentKind, text: &str) {
+        self.send(Stream::Agent, Some(kind), text).await;
+    }
+
+    /// Mensaje del runner: una línea `sys` por línea de texto.
+    pub async fn system(&self, text: &str) {
+        for line in text.lines() {
+            self.send(Stream::System, None, line).await;
+        }
+    }
+
+    async fn send(&self, stream: Stream, kind: Option<AgentKind>, text: &str) {
+        if let Some(sender) = self.0.upgrade() {
+            let _ = sender
+                .send(Record {
+                    stream,
+                    kind,
+                    bytes: text.as_bytes().to_vec(),
+                    cut_bytes: 0,
+                })
+                .await;
+        }
+    }
+}
+
+/// Tuberías del protocolo de un proceso lanzado en modo protocolo. Soltar `stdin` cierra la
+/// entrada del proceso.
+#[derive(Debug)]
+pub struct ProtocolIo {
+    pub stdin: ChildStdin,
+    pub stdout: ChildStdout,
+    pub sink: OutputSink,
 }
 
 /// Proceso lanzado, aún sin esperar.
 pub struct RunningProcess {
     tree: ProcessTree,
     readers: Vec<JoinHandle<()>>,
-    writer: JoinHandle<OutputLog>,
+    writer: JoinHandle<Option<OutputLog>>,
+    /// Mantiene vivo el escritor mientras haya proceso (los [`OutputSink`] son débiles).
+    keepalive: Option<mpsc::Sender<Record>>,
     timeout: Duration,
     grace: Duration,
     started: Instant,
@@ -166,70 +231,125 @@ impl std::fmt::Debug for RunningProcess {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Logged,
+    Protocol,
+}
+
 impl RunningProcess {
     /// Valida y lanza. Requiere un runtime de tokio. Si falla, devuelve el registro para que
     /// quien llama anote el detalle.
     pub fn spawn(spec: ProcessSpec, mut log: OutputLog) -> Result<Self, Box<SpawnFailure>> {
-        if let Err(detail) = validate(&spec) {
-            return Err(Box::new(SpawnFailure {
-                error: SpawnError {
-                    kind: SpawnErrorKind::InvalidSpec,
-                    detail,
-                },
-                log,
-            }));
-        }
-        let mut command = Command::new(&spec.program);
-        command
-            .args(&spec.args)
-            .current_dir(&spec.cwd)
-            .env_clear()
-            .envs(allowed_env())
-            .envs(spec.extra_env.iter().map(|(k, v)| (k, v)))
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut tree = match ProcessTree::spawn(command) {
-            Ok(tree) => tree,
-            Err(error) => {
-                let kind = match error.kind() {
-                    std::io::ErrorKind::NotFound => SpawnErrorKind::NotFound,
-                    std::io::ErrorKind::PermissionDenied => SpawnErrorKind::PermissionDenied,
-                    _ => SpawnErrorKind::Other,
-                };
-                log.write_system("No se pudo iniciar el proceso.");
-                let _ = log.flush();
-                return Err(Box::new(SpawnFailure {
-                    error: SpawnError {
-                        kind,
-                        detail: error.to_string(),
-                    },
-                    log,
-                }));
+        match launch(&spec, Mode::Logged) {
+            Ok(mut tree) => {
+                let stdout = tree.take_stdout();
+                Ok(Self::start(tree, stdout, Some(log), &spec, false).0)
             }
-        };
+            Err(error) => {
+                if error.kind != SpawnErrorKind::InvalidSpec {
+                    log.write_system("No se pudo iniciar el proceso.");
+                    let _ = log.flush();
+                }
+                Err(Box::new(SpawnFailure { error, log }))
+            }
+        }
+    }
+
+    /// Modo protocolo (HU-019): como [`RunningProcess::spawn`], pero stdin y stdout quedan en
+    /// tubería para quien habla el protocolo y el entorno añade las variables de adaptador.
+    /// stderr va al registro (`err`). El tiempo máximo y la cancelación los aplica quien llama
+    /// (ver [`RunningProcess::deadline`] y [`RunningProcess::close`]).
+    pub fn spawn_protocol(
+        spec: ProcessSpec,
+        mut log: OutputLog,
+    ) -> Result<(Self, ProtocolIo), Box<SpawnFailure>> {
+        match launch_protocol(&spec) {
+            Ok((tree, stdin, stdout)) => {
+                let (process, sink) = Self::start(tree, None, Some(log), &spec, true);
+                Ok((
+                    process,
+                    ProtocolIo {
+                        stdin,
+                        stdout,
+                        sink,
+                    },
+                ))
+            }
+            Err(error) => {
+                if error.kind != SpawnErrorKind::InvalidSpec {
+                    log.write_system("No se pudo iniciar el proceso.");
+                    let _ = log.flush();
+                }
+                Err(Box::new(SpawnFailure { error, log }))
+            }
+        }
+    }
+
+    /// Modo protocolo sin registro (p. ej. «Comprobar adaptador»): stderr se lee y se descarta,
+    /// y lo que se escriba en el [`OutputSink`] se pierde.
+    pub fn spawn_protocol_unlogged(spec: ProcessSpec) -> Result<(Self, ProtocolIo), SpawnError> {
+        let (tree, stdin, stdout) = launch_protocol(&spec)?;
+        let (process, sink) = Self::start(tree, None, None, &spec, true);
+        Ok((
+            process,
+            ProtocolIo {
+                stdin,
+                stdout,
+                sink,
+            },
+        ))
+    }
+
+    /// Arranca los lectores (stdout si se indica, y stderr) y el escritor de un árbol lanzado.
+    fn start(
+        mut tree: ProcessTree,
+        stdout: Option<ChildStdout>,
+        log: Option<OutputLog>,
+        spec: &ProcessSpec,
+        redact_stderr: bool,
+    ) -> (Self, OutputSink) {
         let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
         let mut readers = Vec::with_capacity(2);
-        if let Some(stdout) = tree.take_stdout() {
-            readers.push(tokio::spawn(pump(stdout, Stream::Stdout, sender.clone())));
+        if let Some(stdout) = stdout {
+            readers.push(tokio::spawn(pump(
+                stdout,
+                Stream::Stdout,
+                sender.clone(),
+                false,
+            )));
         }
         if let Some(stderr) = tree.take_stderr() {
-            readers.push(tokio::spawn(pump(stderr, Stream::Stderr, sender.clone())));
+            readers.push(tokio::spawn(pump(
+                stderr,
+                Stream::Stderr,
+                sender.clone(),
+                redact_stderr,
+            )));
         }
-        drop(sender);
+        let sink = OutputSink(sender.downgrade());
         let writer = tokio::task::spawn_blocking(move || write_records(log, receiver));
-        Ok(Self {
-            tree,
-            readers,
-            writer,
-            timeout: spec.timeout,
-            grace: spec.grace,
-            started: Instant::now(),
-        })
+        (
+            Self {
+                tree,
+                readers,
+                writer,
+                keepalive: Some(sender),
+                timeout: spec.timeout,
+                grace: spec.grace,
+                started: Instant::now(),
+            },
+            sink,
+        )
     }
 
     pub fn pid(&self) -> Option<u32> {
         self.tree.pid()
+    }
+
+    /// Hora límite del tiempo máximo (lanzamiento + `timeout`).
+    pub fn deadline(&self) -> Instant {
+        self.started + self.timeout
     }
 
     /// Espera a que termine, se agote el tiempo o se cancele; en los dos últimos casos termina
@@ -237,7 +357,7 @@ impl RunningProcess {
     /// descendientes que sigan vivos. Devuelve el informe y el registro (`None` si el hilo de
     /// escritura falló), para anotar el cierre.
     pub async fn wait(mut self, mut cancel: CancelToken) -> (ProcessReport, Option<OutputLog>) {
-        let deadline = self.started + self.timeout;
+        let deadline = self.deadline();
         let ended = tokio::select! {
             status = self.tree.wait_leader() => End::Exited(status),
             () = tokio::time::sleep_until(deadline) => End::TimedOut,
@@ -249,15 +369,39 @@ impl RunningProcess {
             End::TimedOut => (ProcessOutcome::TimedOut, self.grace),
             End::Cancelled => (ProcessOutcome::Cancelled, self.grace),
         };
+        self.finish(outcome, grace).await
+    }
+
+    /// Modo protocolo: tras cerrar el protocolo (quien llama ya soltó `stdin`), espera como
+    /// mucho `wait_exit` a que la raíz termine sola y después termina el árbol (aviso, gracia,
+    /// fuerza), también los descendientes que sigan vivos. Con `wait_exit` cero, termina en
+    /// seguida.
+    pub async fn close(mut self, wait_exit: Duration) -> (ProcessReport, Option<OutputLog>) {
+        let (outcome, grace) = match timeout(wait_exit, self.tree.wait_leader()).await {
+            Ok(Ok(status)) => (outcome_of(status), self.grace),
+            Ok(Err(_)) => (ProcessOutcome::WaitFailed, Duration::ZERO),
+            Err(_) => (ProcessOutcome::Stopped, self.grace),
+        };
+        self.finish(outcome, grace).await
+    }
+
+    async fn finish(
+        mut self,
+        outcome: ProcessOutcome,
+        grace: Duration,
+    ) -> (ProcessReport, Option<OutputLog>) {
         let tree_terminated = self.tree.terminate(grace).await;
 
         // Vaciar tuberías: con el árbol muerto llegan al final enseguida.
-        for mut reader in self.readers {
+        for mut reader in std::mem::take(&mut self.readers) {
             if timeout(DRAIN_LIMIT, &mut reader).await.is_err() {
                 reader.abort();
             }
         }
-        let log = self.writer.await.ok();
+        // Sin esta copia, el escritor termina en cuanto acaban los lectores (los `OutputSink`
+        // son débiles).
+        self.keepalive = None;
+        let log = (&mut self.writer).await.ok().flatten();
         let output = log.as_ref().map(OutputLog::stats).unwrap_or_default();
         let report = ProcessReport {
             outcome,
@@ -266,6 +410,54 @@ impl RunningProcess {
             elapsed: self.started.elapsed(),
         };
         (report, log)
+    }
+}
+
+/// Valida y lanza el árbol.
+fn launch(spec: &ProcessSpec, mode: Mode) -> Result<ProcessTree, SpawnError> {
+    validate(spec, mode).map_err(|detail| SpawnError {
+        kind: SpawnErrorKind::InvalidSpec,
+        detail,
+    })?;
+    let mut command = Command::new(&spec.program);
+    command
+        .args(&spec.args)
+        .current_dir(&spec.cwd)
+        .env_clear()
+        .envs(allowed_env());
+    if mode == Mode::Protocol {
+        command.envs(adapter_extra_env());
+    }
+    command
+        .envs(spec.extra_env.iter().map(|(k, v)| (k, v)))
+        .stdin(match mode {
+            Mode::Logged => Stdio::null(),
+            Mode::Protocol => Stdio::piped(),
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    ProcessTree::spawn(command).map_err(|error| SpawnError {
+        kind: match error.kind() {
+            std::io::ErrorKind::NotFound => SpawnErrorKind::NotFound,
+            std::io::ErrorKind::PermissionDenied => SpawnErrorKind::PermissionDenied,
+            _ => SpawnErrorKind::Other,
+        },
+        detail: error.to_string(),
+    })
+}
+
+/// Lanza en modo protocolo y toma stdin y stdout.
+fn launch_protocol(
+    spec: &ProcessSpec,
+) -> Result<(ProcessTree, ChildStdin, ChildStdout), SpawnError> {
+    let mut tree = launch(spec, Mode::Protocol)?;
+    match (tree.take_stdin(), tree.take_stdout()) {
+        (Some(stdin), Some(stdout)) => Ok((tree, stdin, stdout)),
+        // Soltar el árbol mata el proceso.
+        _ => Err(SpawnError {
+            kind: SpawnErrorKind::Other,
+            detail: "sin tuberías del protocolo".into(),
+        }),
     }
 }
 
@@ -289,7 +481,7 @@ fn outcome_of(status: ExitStatus) -> ProcessOutcome {
     ProcessOutcome::WaitFailed
 }
 
-fn validate(spec: &ProcessSpec) -> Result<(), String> {
+fn validate(spec: &ProcessSpec, mode: Mode) -> Result<(), String> {
     if !spec.program.is_absolute() {
         return Err("el programa debe ser una ruta absoluta".into());
     }
@@ -306,12 +498,25 @@ fn validate(spec: &ProcessSpec) -> Result<(), String> {
     {
         return Err(format!("variable de entorno no permitida: {name:?}"));
     }
+    if mode == Mode::Protocol
+        && let Some((name, _)) = spec
+            .extra_env
+            .iter()
+            .find(|(name, _)| is_adapter_forbidden(name))
+    {
+        return Err(format!("variable de entorno no permitida: {name:?}"));
+    }
     Ok(())
 }
 
 /// Lee una tubería y envía líneas de como mucho [`MAX_LINE_BYTES`] bytes; el exceso de cada
 /// línea se descarta (contado) sin acumularlo. Un `\r` final se quita.
-async fn pump(mut stream: impl AsyncRead + Unpin, kind: Stream, sender: mpsc::Sender<Record>) {
+async fn pump(
+    mut stream: impl AsyncRead + Unpin,
+    kind: Stream,
+    sender: mpsc::Sender<Record>,
+    redact: bool,
+) {
     let mut chunk = vec![0u8; READ_CHUNK];
     let mut line: Vec<u8> = Vec::with_capacity(256);
     let mut cut_bytes: u64 = 0;
@@ -343,7 +548,8 @@ async fn pump(mut stream: impl AsyncRead + Unpin, kind: Stream, sender: mpsc::Se
                 }
                 let record = Record {
                     stream: kind,
-                    bytes: std::mem::take(&mut line),
+                    kind: None,
+                    bytes: maybe_redact(std::mem::take(&mut line), redact),
                     cut_bytes: std::mem::take(&mut cut_bytes),
                 };
                 pending = false;
@@ -357,21 +563,37 @@ async fn pump(mut stream: impl AsyncRead + Unpin, kind: Stream, sender: mpsc::Se
         let _ = sender
             .send(Record {
                 stream: kind,
-                bytes: line,
+                kind: None,
+                bytes: maybe_redact(line, redact),
                 cut_bytes,
             })
             .await;
     }
 }
 
-/// Hilo de escritura: escribe cada registro y vuelca al disco cuando no queda nada en cola.
-fn write_records(mut log: OutputLog, mut receiver: mpsc::Receiver<Record>) -> OutputLog {
+fn maybe_redact(line: Vec<u8>, redact: bool) -> Vec<u8> {
+    if redact {
+        crate::redact::redact_line(&line)
+    } else {
+        line
+    }
+}
+
+/// Hilo de escritura: escribe cada registro y vuelca al disco cuando no queda nada en cola. Sin
+/// registro, los descarta.
+fn write_records(
+    mut log: Option<OutputLog>,
+    mut receiver: mpsc::Receiver<Record>,
+) -> Option<OutputLog> {
     while let Some(record) = receiver.blocking_recv() {
-        log.write_line(record.stream, &record.bytes, record.cut_bytes);
+        let Some(log) = log.as_mut() else { continue };
+        log.write_record(record.stream, record.kind, &record.bytes, record.cut_bytes);
         if receiver.is_empty() {
             let _ = log.flush();
         }
     }
-    let _ = log.flush();
+    if let Some(log) = log.as_mut() {
+        let _ = log.flush();
+    }
     log
 }

@@ -1217,6 +1217,34 @@ fieldset.run-start__scenarios legend {
   color: var(--color-warn);
 }
 
+.run-output__line--agent .run-output__stream {
+  color: var(--color-accent);
+}
+
+/* Línea de permiso: el texto «Permiso:» lo dice; el borde solo lo refuerza. */
+.run-output__line--permission {
+  padding-left: 6px;
+  border-left: 3px solid var(--color-warn);
+}
+
+.run-output__flag {
+  color: var(--color-warn);
+}
+
+.run-settings__help {
+  display: grid;
+  gap: 4px;
+}
+
+.run-settings__help p {
+  margin: 0;
+}
+
+.checkbox:has(input:disabled),
+.checkbox input:disabled {
+  cursor: not-allowed;
+}
+
 .run-output__cut {
   color: var(--color-muted);
   font-style: italic;

@@ -1,8 +1,10 @@
 //! Salida de un proceso en JSONL acotado y rotado (nunca en SQLite ni acumulada en memoria).
 //!
-//! Cada línea es un objeto `{"t":ms,"s":"out"|"err"|"sys","l":"texto"}` (+ `"cut":true` si se
-//! cortó). `sys` son mensajes del propio runner (p. ej. el detalle de un error de Git), nunca
-//! del proceso. Archivos `output-<n>.jsonl` con `n` creciente desde 1: se rota al superar
+//! Cada línea es un objeto `{"t":ms,"s":"out"|"err"|"sys"|"agent","l":"texto"}` (+ `"cut":true`
+//! si se cortó). `sys` son mensajes del propio runner (p. ej. el detalle de un error de Git),
+//! nunca del proceso. `agent` (HU-019) es lo que un agente **reporta** vía ACP, ya normalizado
+//! por el runner, con su tipo en `"k"` (`message`, `thought`, `tool`, `plan`, `usage`,
+//! `permission`); `out`/`err` son lo observado en stdout/stderr. Archivos `output-<n>.jsonl` con `n` creciente desde 1: se rota al superar
 //! [`MAX_FILE_BYTES`] y se conservan como mucho [`MAX_FILES`] (los más viejos se borran, y lo
 //! borrado se cuenta en [`OutputStats`]).
 //!
@@ -42,6 +44,27 @@ pub enum Stream {
     /// Mensaje del runner (no del proceso).
     #[serde(rename = "sys")]
     System,
+    /// Reportado por el agente vía ACP y normalizado por el runner (HU-019).
+    #[serde(rename = "agent")]
+    Agent,
+}
+
+/// Tipo de una línea `agent`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentKind {
+    /// Texto de un mensaje del agente.
+    Message,
+    /// «Pensando…» con la longitud, sin el contenido.
+    Thought,
+    /// Herramienta: título, tipo y estado (sin entrada ni contenido).
+    Tool,
+    /// Plan: entradas con su estado.
+    Plan,
+    /// Uso de contexto y coste tal como los informa el agente.
+    Usage,
+    /// Permiso pedido y la respuesta de la app.
+    Permission,
 }
 
 /// Una línea guardada.
@@ -57,6 +80,9 @@ pub struct OutputLine {
     pub text: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cut: bool,
+    /// Tipo de una línea `agent` (en las demás, ausente).
+    #[serde(rename = "k", default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<AgentKind>,
 }
 
 /// Recuento de lo escrito y lo descartado.
@@ -117,6 +143,26 @@ impl OutputLog {
     /// Escribe una línea (sin el salto final). `already_cut` = bytes que quien lee ya descartó
     /// por exceder [`MAX_LINE_BYTES`].
     pub fn write_line(&mut self, stream: Stream, bytes: &[u8], already_cut: u64) {
+        self.write_record(stream, None, bytes, already_cut);
+    }
+
+    /// Línea `agent` con su tipo. El texto es dato no confiable del agente.
+    pub fn write_agent(&mut self, kind: AgentKind, text: &str) {
+        self.write_record(Stream::Agent, Some(kind), text.as_bytes(), 0);
+    }
+
+    /// Escribe un registro (sin el salto final). Una línea `agent` sin tipo no se escribe.
+    pub(crate) fn write_record(
+        &mut self,
+        stream: Stream,
+        kind: Option<AgentKind>,
+        bytes: &[u8],
+        already_cut: u64,
+    ) {
+        let kind = if stream == Stream::Agent { kind } else { None };
+        if stream == Stream::Agent && kind.is_none() {
+            return;
+        }
         let text = String::from_utf8_lossy(bytes);
         let (text, extra_cut) = truncate_at_char(&text, MAX_LINE_BYTES);
         let cut_bytes = already_cut + extra_cut as u64;
@@ -125,6 +171,7 @@ impl OutputLog {
             stream,
             text: text.to_owned(),
             cut: cut_bytes > 0,
+            kind,
         };
         if cut_bytes > 0 {
             self.stats.cut_lines += 1;
@@ -334,7 +381,7 @@ fn file_path(dir: &Path, index: u64) -> PathBuf {
 }
 
 /// Recorta `text` a `max` bytes sin partir un carácter; devuelve los bytes quitados.
-fn truncate_at_char(text: &str, max: usize) -> (&str, usize) {
+pub(crate) fn truncate_at_char(text: &str, max: usize) -> (&str, usize) {
     if text.len() <= max {
         return (text, 0);
     }
@@ -402,6 +449,29 @@ mod tests {
 
         let missing = read_tail(&dir.path().join("no-existe"), 10).unwrap();
         assert!(missing.lines.is_empty());
+    }
+
+    #[test]
+    fn agent_lines_carry_their_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = OutputLog::create(dir.path()).unwrap();
+        log.write_agent(AgentKind::Tool, "Leer README.md");
+        log.write_line(Stream::Stderr, b"diagnostico", 0);
+        // Una línea `agent` sin tipo no se escribe; un tipo en otro origen se descarta.
+        log.write_record(Stream::Agent, None, b"sin tipo", 0);
+        log.write_record(Stream::System, Some(AgentKind::Message), b"sys", 0);
+        log.finish();
+        let raw = std::fs::read_to_string(dir.path().join("output-1.jsonl")).unwrap();
+        assert!(
+            raw.contains("\"s\":\"agent\",\"l\":\"Leer README.md\",\"k\":\"tool\""),
+            "{raw}"
+        );
+        let tail = read_tail(dir.path(), 10).unwrap();
+        assert_eq!(tail.lines.len(), 3);
+        assert_eq!(tail.lines[0].kind, Some(AgentKind::Tool));
+        assert_eq!(tail.lines[1].kind, None);
+        assert_eq!(tail.lines[2].stream, Stream::System);
+        assert_eq!(tail.lines[2].kind, None);
     }
 
     #[test]

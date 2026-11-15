@@ -18,6 +18,28 @@ pub enum RunOutputStream {
     Stderr,
     /// Mensaje del supervisor (no del proceso), p. ej. el detalle de un error de Git.
     System,
+    /// Reportado por el agente vía ACP (HU-019): lo que el agente **dice**, no algo observado
+    /// por la app. El tipo va en `RunOutputLine.kind`.
+    Agent,
+}
+
+/// Tipo de una línea `agent` (HU-019). Siempre `null` en los demás orígenes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum RunOutputKind {
+    /// Texto de un mensaje del agente (agrupado por mensaje o en trozos de hasta 4 KiB).
+    Message,
+    /// El agente estuvo «pensando»: solo la longitud, nunca el contenido.
+    Thought,
+    /// Llamada a una herramienta: título, tipo y estado (sin entrada ni contenido).
+    Tool,
+    /// Plan del agente: una entrada por línea de texto con su estado.
+    Plan,
+    /// Uso de contexto y coste tal como lo informa el agente.
+    Usage,
+    /// Permiso que pidió el agente y cómo lo respondió la app.
+    Permission,
 }
 
 /// Una línea de salida. `text` es dato no confiable: se muestra como texto plano, nunca como
@@ -33,6 +55,8 @@ pub struct RunOutputLine {
     pub text: String,
     /// La línea superaba 4 KiB y se cortó.
     pub cut: bool,
+    /// Tipo de una línea `agent`; `null` en los demás orígenes.
+    pub kind: Option<RunOutputKind>,
 }
 
 /// Últimas líneas de salida de un intento (como mucho 500), de la más vieja a la más nueva.

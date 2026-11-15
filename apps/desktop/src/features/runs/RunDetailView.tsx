@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useId, useRef, type RefObject } from "react";
+import type { AcpSessionInfo } from "../../contracts/generated/AcpSessionInfo";
 import type { RunDetail } from "../../contracts/generated/RunDetail";
+import type { RunExecutor } from "../../contracts/generated/RunExecutor";
 import type { RunSummary } from "../../contracts/generated/RunSummary";
 import type { SnapshotStoryRef } from "../../contracts/generated/SnapshotStoryRef";
 import { getRun } from "../../shared/ipc/commands";
@@ -14,9 +16,12 @@ import { RunOutputPanel } from "./RunOutputPanel";
 import {
   NOT_AVAILABLE,
   SCENARIO_LABEL,
-  TEST_PROCESS_LABEL,
   canStartRun,
+  describeAgentIdentity,
+  describeAgentMode,
+  describeCapabilities,
   describeRunEvent,
+  executorLabel,
   formatCost,
   formatTokens,
   isActiveRun,
@@ -42,7 +47,7 @@ interface Props {
   focusOnLoad: DetailFocus;
   onClose: () => void;
   /** Se pidió iniciar el intento: el panel recarga la lista y lo anuncia. */
-  onStarted: (run: RunSummary) => void;
+  onStarted: (run: RunSummary, executor: RunExecutor) => void;
   /** El intento cambió desde aquí (o el núcleo dijo que ya había cambiado). */
   onChanged: () => void;
 }
@@ -69,7 +74,7 @@ export function RunDetailView({
   useRefreshSignal(refreshSignal, reload);
 
   const titleRef = useRef<HTMLHeadingElement>(null);
-  const scenarioRef = useRef<HTMLInputElement>(null);
+  const startFocusRef = useRef<HTMLInputElement>(null);
   const focused = useRef(focusOnLoad === null);
   const focusTarget = useRef(focusOnLoad);
   useEffect(() => {
@@ -77,7 +82,7 @@ export function RunDetailView({
       focused.current = true;
       // Sin formulario de inicio (ya no está en cola), el foco va al encabezado.
       const target =
-        focusTarget.current === "start" ? scenarioRef.current : null;
+        focusTarget.current === "start" ? startFocusRef.current : null;
       (target ?? titleRef.current)?.focus();
     }
   }, [state.status]);
@@ -136,12 +141,12 @@ export function RunDetailView({
           detail={state.data}
           projectId={projectId}
           refreshSignal={refreshSignal}
-          scenarioRef={scenarioRef}
-          onStarted={(started) => {
+          startFocusRef={startFocusRef}
+          onStarted={(started, executor) => {
             // El formulario desaparece: el foco va al encabezado del detalle.
             titleRef.current?.focus();
             reload();
-            onStarted(started);
+            onStarted(started, executor);
           }}
           onChanged={() => {
             reload();
@@ -161,8 +166,8 @@ interface BodyProps {
   detail: RunDetail;
   projectId: string;
   refreshSignal: number;
-  scenarioRef: RefObject<HTMLInputElement | null>;
-  onStarted: (run: RunSummary) => void;
+  startFocusRef: RefObject<HTMLInputElement | null>;
+  onStarted: (run: RunSummary, executor: RunExecutor) => void;
   onChanged: () => void;
 }
 
@@ -170,7 +175,7 @@ function DetailBody({
   detail,
   projectId,
   refreshSignal,
-  scenarioRef,
+  startFocusRef,
   onStarted,
   onChanged,
 }: BodyProps) {
@@ -179,6 +184,9 @@ function DetailBody({
   const request = detail.startRequest;
   const requestRepo =
     request && snapshot.repositories.find((r) => r.id === request.repositoryId);
+  const executor = request?.executor ?? null;
+  const acp = executor?.kind === "claudeAcp";
+  const session = lastAgentSession(detail);
   const live =
     run.state === "preparing" ||
     run.state === "running" ||
@@ -189,8 +197,12 @@ function DetailBody({
         <span className={runStateBadgeClass(run.state)}>
           {runStatusLabel(run)}
         </span>{" "}
-        Agente asignado al intento: A-{run.agentNumber} {run.agentName} (no
-        participa: lo ejecuta el proceso de prueba).
+        Agente asignado al intento: A-{run.agentNumber} {run.agentName}
+        {executor === null
+          ? "."
+          : acp
+            ? " (lo ejecuta Claude Code por ACP con las instrucciones de la instantánea)."
+            : " (no participa: lo ejecuta el proceso de prueba)."}
         {run.endedAt !== null &&
           ` Terminado el ${formatDateTime(run.endedAt)}.`}
         {run.endReason !== null && ` Motivo: ${run.endReason}`}
@@ -207,12 +219,20 @@ function DetailBody({
         <dl className="facts facts--compact">
           <dt>Ejecutor</dt>
           <dd>
-            <span className="badge">{TEST_PROCESS_LABEL}</span>
+            {request ? (
+              <span className="badge">{executorLabel(request.executor)}</span>
+            ) : (
+              "Se elige al iniciar"
+            )}
           </dd>
           {request && (
             <>
-              <dt>Escenario</dt>
-              <dd>{SCENARIO_LABEL[request.scenario]}</dd>
+              {request.executor.kind === "testProcess" && (
+                <>
+                  <dt>Escenario</dt>
+                  <dd>{SCENARIO_LABEL[request.executor.scenario]}</dd>
+                </>
+              )}
               <dt>Repositorio</dt>
               <dd className="repo__path">
                 {requestRepo ? requestRepo.path : NOT_AVAILABLE}
@@ -236,10 +256,20 @@ function DetailBody({
             </>
           )}
         </dl>
-        <p className="field__hint">
-          Ningún agente ni IA trabaja en este intento: el ejecutor es un proceso
-          de prueba incluido en la app.
-        </p>
+        {executor?.kind === "testProcess" && (
+          <p className="field__hint">
+            Ningún agente ni IA trabaja en este intento: el ejecutor es un
+            proceso de prueba incluido en la app.
+          </p>
+        )}
+        {acp && (
+          <p className="field__hint">
+            Ejecutor: Claude Code por ACP. Lo que aparece como «agente
+            (reportado)» es lo que el agente dice, no algo comprobado por la
+            app. Un intento completado no acepta la historia.
+          </p>
+        )}
+        {session && <AgentSessionFacts session={session} />}
 
         {run.state === "queued" && run.startRequestedAt !== null && (
           <p className="run-detail__info" role="status">
@@ -267,8 +297,11 @@ function DetailBody({
         )}
         {run.state === "completed" && (
           <p className="run-detail__info">
-            El proceso terminó bien. No cambia la historia ni su columna:
-            aceptarla sigue siendo una decisión humana.
+            {acp
+              ? "El agente reportó el fin de su turno."
+              : "El proceso terminó bien."}{" "}
+            No cambia la historia ni su columna: aceptarla sigue siendo una
+            decisión humana.
           </p>
         )}
         {canStartRun(run) && (
@@ -277,7 +310,7 @@ function DetailBody({
             runId={run.id}
             runNumber={run.number}
             repositories={snapshot.repositories}
-            scenarioRef={scenarioRef}
+            focusRef={startFocusRef}
             onStarted={onStarted}
             onStale={onChanged}
           />
@@ -310,8 +343,7 @@ function DetailBody({
           )
         </h4>
         <p className="field__hint">
-          Es una copia de lo que recibiría el agente: editar la historia después
-          no la cambia.
+          Es una copia congelada: editar la historia después no la cambia.
         </p>
 
         <p className="item-list__name">
@@ -405,6 +437,12 @@ function DetailBody({
         )}
 
         <h5 className="run-detail__subtitle">Instrucciones generadas</h5>
+        <p className="field__hint">
+          Instrucciones congeladas en la instantánea. Con Claude Code (ACP) se
+          envían las mismas, salvo la sección de repositorios, que se sustituye
+          por la carpeta del worktree (sin rutas de tu disco); la huella del
+          texto enviado aparece en la sesión del agente.
+        </p>
         <MarkdownPreview source={snapshot.instructions} />
       </div>
 
@@ -441,5 +479,52 @@ function DetailBody({
         </ol>
       )}
     </div>
+  );
+}
+
+const count = new Intl.NumberFormat("es");
+
+/** Último evento `acp_session` del intento (la sesión ACP negociada), si lo hay. */
+function lastAgentSession(detail: RunDetail): AcpSessionInfo | null {
+  for (let i = detail.events.length - 1; i >= 0; i--) {
+    const event = detail.events[i]?.event;
+    if (event?.kind === "acp_session") return event;
+  }
+  return null;
+}
+
+/** Lo que declaró el agente al negociar la sesión. Texto plano: es dato no confiable. */
+function AgentSessionFacts({ session }: { session: AcpSessionInfo }) {
+  return (
+    <section aria-label="Sesión del agente (reportado por el agente)">
+      <h5 className="run-detail__subtitle">
+        Sesión del agente (reportado por el agente)
+      </h5>
+      <dl className="facts facts--compact">
+        <dt>Agente</dt>
+        <dd>{describeAgentIdentity(session)}</dd>
+        <dt>Protocolo</dt>
+        <dd>ACP v{session.protocolVersion}</dd>
+        <dt>Modo fijado por la app</dt>
+        <dd>{describeAgentMode(session.mode)}</dd>
+        <dt>Capacidades</dt>
+        <dd>{describeCapabilities(session.capabilities)}</dd>
+        {session.promptSha256 !== null && session.promptChars !== null && (
+          <>
+            <dt>Instrucciones enviadas por la app</dt>
+            <dd>
+              {count.format(session.promptChars)} caracteres · SHA-256{" "}
+              <span className="input--mono" title={session.promptSha256}>
+                {session.promptSha256.slice(0, 12)}…
+              </span>
+              <span className="visually-hidden">
+                {" "}
+                (huella completa: {session.promptSha256})
+              </span>
+            </dd>
+          </>
+        )}
+      </dl>
+    </section>
   );
 }

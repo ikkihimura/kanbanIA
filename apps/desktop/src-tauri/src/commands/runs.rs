@@ -1,15 +1,16 @@
-//! Intentos de ejecución desde la app (HU-017/HU-018). El actor es siempre la persona.
+//! Intentos de ejecución desde la app (HU-017/HU-018/HU-019). El actor es siempre la persona.
 //! Registrar eventos (`record_run_event`) y la API del supervisor no tienen comando. Iniciar,
 //! cancelar y cambiar la configuración despiertan al supervisor. Los errores de Git y de disco
 //! llegan a la UI con mensajes fijos y seguros (sin rutas ni salida de Git).
 
 use kanbania_core::error::{CoreError, ErrorPayload};
 use kanbania_core::features::runs::{
-    self, CancelRunInput, CreateRunInput, RecordWorktreeRemovalInput, RemoveRunWorktreeInput,
-    RunDetail, RunOutputView, RunSettings, RunSummary, RunWorktree, StartRunInput,
-    UpdateRunSettingsInput, WorktreeChanges, WorktreeRemoval,
+    self, AcpAdapterCheck, CancelRunInput, CreateRunInput, RecordWorktreeRemovalInput,
+    RemoveRunWorktreeInput, RunDetail, RunOutputView, RunSettings, RunSummary, RunWorktree,
+    StartRunInput, UpdateRunSettingsInput, WorktreeChanges, WorktreeRemoval,
 };
 use kanbania_core::platform::actor::Actor;
+use kanbania_runner::acp::probe_adapter;
 use kanbania_runner::supervisor::{git_config, read_run_output};
 use kanbania_runner::worktree::{
     DEFAULT_GIT_TIMEOUT, RemoveOutcome, WorktreeError, WorktreeErrorKind, remove_worktree,
@@ -70,8 +71,9 @@ pub async fn get_run(
         .map_err(|e| e.to_payload(None))
 }
 
-/// Pide iniciar un intento en cola con el proceso de prueba (sin IA). Sigue `queued` hasta que
-/// el supervisor tenga hueco.
+/// Pide iniciar un intento en cola con el ejecutor elegido (proceso de prueba sin IA o Claude
+/// Code vía ACP, que exige un adaptador configurado). Sigue `queued` hasta que el supervisor
+/// tenga hueco.
 #[tauri::command]
 pub async fn start_run(
     slot: State<'_, StorageSlot>,
@@ -213,6 +215,71 @@ pub async fn update_run_settings(
     // Más concurrencia puede dejar hueco para los que esperan.
     supervisor.wake();
     Ok(settings)
+}
+
+/// Límite de «Comprobar adaptador» (solo `initialize`).
+const ADAPTER_CHECK_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// «Comprobar adaptador» (HU-019): lanza el adaptador ACP con el mismo entorno que una
+/// ejecución, hace solo `initialize` (≤ 30 s), termina su árbol y devuelve lo que declaró
+/// (protocolo, nombre, título, versión y capacidades; sin `_meta` ni datos de cuenta). Con
+/// `path`, comprueba esa ruta antes de guardarla (mismas reglas que la configuración); sin
+/// ella, la configurada. No crea sesión ni envía instrucciones. Errores → `validation`
+/// (`claudeAcpPath`) con un mensaje fijo, sin rutas ni texto del adaptador. Nunca para agentes.
+#[tauri::command]
+pub async fn check_acp_adapter(
+    slot: State<'_, StorageSlot>,
+    path: Option<String>,
+) -> Result<AcpAdapterCheck, ErrorPayload> {
+    let requested = match path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        Some(path) => path.to_owned(),
+        None => {
+            let store = slot.store().await?;
+            runs::get_run_settings(&store)
+                .await
+                .map_err(|e| e.to_payload(None))?
+                .claude_acp_path
+                .ok_or_else(|| {
+                    adapter_invalid("No hay ningún adaptador configurado: indica su ruta.")
+                })?
+        }
+    };
+    let program = runs::check_adapter_path(&requested)
+        .await
+        .map_err(|e| e.to_payload(None))?;
+    let declared = probe_adapter(
+        program,
+        Vec::new(),
+        std::env::temp_dir(),
+        ADAPTER_CHECK_LIMIT,
+    )
+    .await
+    .map_err(|error| {
+        eprintln!("[runs] comprobación del adaptador fallida: {error:?}");
+        adapter_invalid(&error.to_string())
+    })?;
+    // El núcleo omite (no recorta) una identidad fuera de los límites y filtra las capacidades
+    // desconocidas.
+    AcpAdapterCheck::from_reported(
+        declared.protocol_version,
+        declared.name,
+        declared.title,
+        declared.version,
+        declared
+            .capabilities
+            .iter()
+            .map(|c| (*c).to_owned())
+            .collect(),
+    )
+    .map_err(|e| e.to_payload(None))
+}
+
+fn adapter_invalid(reason: &str) -> ErrorPayload {
+    CoreError::Validation {
+        field: "claudeAcpPath",
+        reason: reason.to_owned(),
+    }
+    .to_payload(None)
 }
 
 const SUPERVISOR_UNAVAILABLE: &str =

@@ -395,6 +395,19 @@ pub(super) async fn append_event(
             .execute(&mut *conn)
             .await
         }
+        // Dato reportado por el agente: no cambia estado ni uso, solo ocupa la secuencia.
+        RunEvent::AcpSession(_) => {
+            sqlx::query(
+                "UPDATE runs SET last_sequence = ?, updated_at_ms = ? \
+                 WHERE id = ? AND last_sequence = ?",
+            )
+            .bind(sequence)
+            .bind(now)
+            .bind(&run.id)
+            .bind(run.last_sequence)
+            .execute(&mut *conn)
+            .await
+        }
     };
     let updated = updated?.rows_affected();
     if updated == 0 {
