@@ -1,6 +1,5 @@
-//! Slice `runs`: intentos de ejecución de una historia por un agente (HU-017). Solo el modelo:
-//! todavía no hay ejecutor ni supervisor (HU-018/019), así que un intento nace en `queued` y
-//! se queda en cola hasta que una persona lo cancela.
+//! Slice `runs`: intentos de ejecución de una historia (HU-017) y su ejecución supervisada
+//! (HU-018). El ejecutor de HU-018 es un proceso de prueba (sin IA); HU-019 lo sustituye por ACP.
 //!
 //! - Instantánea inmutable: al crear el intento se congela en JSON (con su SHA-256) lo que
 //!   recibiría el agente: historia, criterios, épica, padre, prerequisitos, perfil del agente,
@@ -15,35 +14,64 @@
 //! - Eventos con secuencia 1..n sin huecos por intento (`record_run_event`): duplicado exacto
 //!   → no se aplica dos veces; misma secuencia con otro contenido → `conflict`; hueco → error.
 //! - Un solo intento activo por historia (índice único parcial + `run_active`).
-//! - Precondiciones en `ensure_runnable` (HU-018 la vuelve a evaluar al despachar).
-//! - Crear y cancelar exigen `Actor::Human` y son idempotentes por `requestId`. Aceptar o
-//!   archivar la historia cancela su intento activo (`cancel_story_runs`).
-//! - Nada de esto se expone a agentes (servicio local o MCP) en este hito.
+//! - Precondiciones en `ensure_runnable`: al crear, al pedir el inicio y al despachar.
+//! - Crear, iniciar y cancelar exigen `Actor::Human` y son idempotentes por `requestId`.
+//!   Cancelar (y aceptar o archivar la historia, `cancel_story_runs`) es directo en `queued` y
+//!   una petición que confirma el supervisor si hay proceso.
+//! - Ejecución (HU-018): `start_run` registra una petición de inicio; el supervisor
+//!   (`crates/runner`) usa la API de `supervisor`, protegida por `SupervisorToken`.
+//!   Configuración de concurrencia y tiempo máximo en `run_settings`. Worktrees registrados en
+//!   `run_worktrees` (rutas absolutas, nunca para agentes).
+//! - Nada de esto se expone a agentes (servicio local o MCP).
 
 mod cancel;
 mod close;
 mod create;
 mod event;
+mod execution_views;
 mod get;
 mod git_head;
 mod list;
 mod run;
 mod runnable;
+mod settings;
 mod snapshot;
+mod start;
+mod supervisor;
+mod worktree;
 
 pub use cancel::{CancelRunInput, cancel_run};
 pub use create::{CreateRunInput, MAX_NOTE_CHARS, create_run};
 pub use event::{
     MAX_EVENT_PAYLOAD_BYTES, RecordRunEventInput, RecordedRunEvent, RunEvent, record_run_event,
 };
-pub use get::{MAX_DETAIL_EVENTS, RunDetail, RunEventRecord, get_run};
+pub use execution_views::{
+    RUN_OUTPUT_DIR, RemoveRunWorktreeInput, RunChange, RunOutputLine, RunOutputStream,
+    RunOutputView, WorktreeChanges,
+};
+pub use get::{MAX_DETAIL_EVENTS, RunDetail, RunEventRecord, RunStartRequest, get_run};
 pub use list::list_story_runs;
 pub use run::{RunState, RunSummary, RunUsage};
+pub use settings::{
+    MAX_CONCURRENCY, MAX_TIMEOUT_MINUTES, MIN_CONCURRENCY, MIN_TIMEOUT_MINUTES, RunSettings,
+    UpdateRunSettingsInput, get_run_settings, update_run_settings,
+};
 pub use snapshot::{
     RunSnapshot, SNAPSHOT_SCHEMA_VERSION, SnapshotAgent, SnapshotColumn, SnapshotCriterion,
     SnapshotEpic, SnapshotRepository, SnapshotStory, SnapshotStoryRef,
 };
+pub use start::{StartRunInput, TestScenario, start_run};
+pub use supervisor::{
+    Dispatch, DispatchOutcome, InterruptCause, PendingCancellation, PendingStart, RunFailure,
+    RunOutcome, SupervisorToken, begin_dispatch, discard_unused_worktree, finish_run,
+    interrupt_unverifiable_runs, mark_running, next_dispatchable, pending_cancellations,
+    record_worktree, void_start_requests,
+};
+pub use worktree::{
+    RecordWorktreeRemovalInput, RunWorktree, WORKTREES_DIR, WorktreeRemoval, WorktreeTarget,
+    get_worktree_target, record_worktree_removal, worktrees_root,
+};
 
 pub(crate) use close::{StoryClosed, cancel_story_runs, interrupt_restored_runs};
-// HU-018 debe volver a evaluarla al despachar un intento en cola.
+// También la reevalúan `start_run` y `begin_dispatch`.
 pub(crate) use runnable::ensure_runnable;

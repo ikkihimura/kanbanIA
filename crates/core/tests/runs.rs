@@ -25,9 +25,11 @@ use kanbania_core::features::review::{
     return_delivery, set_story_blocker, submit_delivery,
 };
 use kanbania_core::features::runs::{
-    CancelRunInput, CreateRunInput, MAX_DETAIL_EVENTS, RecordRunEventInput, RunEvent, RunState,
-    RunSummary, RunUsage, SNAPSHOT_SCHEMA_VERSION, cancel_run, create_run, get_run,
-    list_story_runs, record_run_event,
+    CancelRunInput, CreateRunInput, DispatchOutcome, InterruptCause, MAX_DETAIL_EVENTS,
+    RecordRunEventInput, RunEvent, RunFailure, RunOutcome, RunState, RunSummary, RunUsage,
+    SNAPSHOT_SCHEMA_VERSION, StartRunInput, SupervisorToken, TestScenario, begin_dispatch,
+    cancel_run, create_run, finish_run, get_run, interrupt_unverifiable_runs, list_story_runs,
+    mark_running, record_run_event, record_worktree, start_run,
 };
 use kanbania_core::features::stories::{
     ArchiveStoryInput, CreateStoryInput, CriterionDraft, Priority, StoryDetail, StorySummary,
@@ -67,6 +69,14 @@ fn state(to: RunState) -> RunEvent {
     RunEvent::StateChanged { to, reason: None }
 }
 
+fn input_usage(tokens: i64) -> RunEvent {
+    RunEvent::UsageReported(RunUsage {
+        input_tokens: Some(tokens),
+        output_tokens: None,
+        cost_usd_micros: None,
+    })
+}
+
 struct Board {
     data: tempfile::TempDir,
     store: Store,
@@ -74,6 +84,8 @@ struct Board {
     project: Project,
     columns: Vec<Column>,
     agent: Agent,
+    /// Las pruebas hacen de supervisor (fuente de eventos).
+    token: SupervisorToken,
 }
 
 impl Board {
@@ -87,6 +99,7 @@ impl Board {
         let project = project(&store, "Proyecto").await;
         let columns = list_columns(&store, &project.id).await.unwrap();
         let agent = agent(&store, "Constructor").await;
+        let token = SupervisorToken::claim(&store).unwrap();
         Self {
             data,
             store,
@@ -94,7 +107,19 @@ impl Board {
             project,
             columns,
             agent,
+            token,
         }
+    }
+
+    /// Tablero con un repositorio (falso, solo archivos de `.git`) con commit: sus intentos se
+    /// pueden iniciar y despachar con la API del supervisor.
+    async fn with_repo() -> Self {
+        let b = Self::new().await;
+        let root = git_repo(b.data.path(), "repositorio");
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(root.join(".git/refs/heads/main"), format!("{SHA_A}\n")).unwrap();
+        link(&b, &root).await;
+        b
     }
 
     fn column(&self, category: ColumnCategory) -> String {
@@ -228,6 +253,7 @@ impl Board {
     ) -> Result<kanbania_core::features::runs::RecordedRunEvent, CoreError> {
         record_run_event(
             &self.store,
+            &self.token,
             &RecordRunEventInput {
                 project_id: self.project.id.clone(),
                 run_id: run.id.clone(),
@@ -238,17 +264,80 @@ impl Board {
         .await
     }
 
-    /// Aplica los estados en orden con la siguiente secuencia.
+    /// Lleva el intento por los estados indicados con la API del supervisor (los cambios de
+    /// estado no se pueden registrar como eventos). Requiere `Board::with_repo`.
+    /// `waiting_approval` no tiene vía en HU-018 (llegará con ACP).
     async fn drive(&self, run: &RunSummary, path: &[RunState]) -> RunSummary {
-        let mut current = run.clone();
         for to in path {
-            current = self
-                .record(&current, current.last_sequence + 1, state(*to))
-                .await
-                .unwrap()
-                .run;
+            match to {
+                RunState::Preparing => {
+                    start_run(
+                        &self.store,
+                        &Actor::Human,
+                        &StartRunInput {
+                            request_id: rid(),
+                            project_id: self.project.id.clone(),
+                            run_id: run.id.clone(),
+                            repository_id: None,
+                            scenario: TestScenario::Success,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    let outcome = begin_dispatch(&self.store, &self.token, &run.id)
+                        .await
+                        .unwrap();
+                    assert!(matches!(outcome, DispatchOutcome::Ready(_)), "{outcome:?}");
+                    record_worktree(&self.store, &self.token, &run.id)
+                        .await
+                        .unwrap();
+                }
+                RunState::Running => {
+                    mark_running(&self.store, &self.token, &run.id)
+                        .await
+                        .unwrap();
+                }
+                RunState::Completed => {
+                    finish_run(
+                        &self.store,
+                        &self.token,
+                        &run.id,
+                        RunOutcome::Exited { code: 0 },
+                    )
+                    .await
+                    .unwrap();
+                }
+                RunState::Failed => {
+                    finish_run(
+                        &self.store,
+                        &self.token,
+                        &run.id,
+                        RunOutcome::Failed(RunFailure::Internal),
+                    )
+                    .await
+                    .unwrap();
+                }
+                RunState::Cancelled => {
+                    self.cancel(run).await.unwrap();
+                }
+                RunState::Interrupted => {
+                    interrupt_unverifiable_runs(
+                        &self.store,
+                        &self.token,
+                        InterruptCause::AppRestarted,
+                    )
+                    .await
+                    .unwrap();
+                }
+                RunState::Queued | RunState::WaitingApproval => {
+                    unreachable!("sin vía para llegar a {to:?}")
+                }
+            }
         }
-        current
+        get_run(&self.store, &self.project.id, &run.id)
+            .await
+            .unwrap()
+            .run
     }
 
     async fn events(&self, run: &RunSummary) -> i64 {
@@ -519,32 +608,44 @@ async fn state_machine_accepts_exactly_the_documented_transitions() {
         (WaitingApproval, Cancelled),
         (WaitingApproval, Interrupted),
     ];
-    let path_to = |from: RunState| -> Vec<RunState> {
-        match from {
-            Queued => vec![],
-            Preparing => vec![Preparing],
-            Running => vec![Preparing, Running],
-            WaitingApproval => vec![Preparing, Running, WaitingApproval],
-            Completed => vec![Preparing, Running, Completed],
-            Failed => vec![Failed],
-            Cancelled => vec![Cancelled],
-            Interrupted => vec![Preparing, Interrupted],
-        }
-    };
-
-    let b = Board::new().await;
     let mut checked = 0;
     for from in RunState::ALL {
         for to in RunState::ALL {
             let expected = allowed.contains(&(from, to));
             assert_eq!(from.can_transition_to(to), expected, "{from:?} → {to:?}");
-            // Y a través de la entrada pública, sobre un intento real en `from`.
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 64);
+
+    // A través de la API pública del supervisor, sobre intentos reales en cada estado que
+    // HU-018 alcanza (`waiting_approval` llegará con ACP): `mark_running` → `running` y
+    // `finish_run` → `completed`/`failed` solo se aplican si la máquina lo admite.
+    let b = Board::with_repo().await;
+    let reachable: [(RunState, &[RunState]); 6] = [
+        (Preparing, &[Preparing]),
+        (Running, &[Preparing, Running]),
+        (Completed, &[Preparing, Running, Completed]),
+        (Failed, &[Preparing, Failed]),
+        (Cancelled, &[Cancelled]),
+        (Interrupted, &[Preparing, Interrupted]),
+    ];
+    for (from, path) in reachable {
+        for (to, outcome) in [
+            (Running, None),
+            (Completed, Some(RunOutcome::Exited { code: 0 })),
+            (Failed, Some(RunOutcome::Exited { code: 1 })),
+        ] {
             let s = b.assigned(&format!("{from:?}-{to:?}")).await;
-            let run = b.drive(&b.run(&s).await, &path_to(from)).await;
+            let run = b.drive(&b.run(&s).await, path).await;
             assert_eq!(run.state, from);
-            let result = b.record(&run, run.last_sequence + 1, state(to)).await;
+            let expected = from.can_transition_to(to);
+            let result = match outcome {
+                None => mark_running(&b.store, &b.token, &run.id).await,
+                Some(outcome) => finish_run(&b.store, &b.token, &run.id, outcome).await,
+            };
             if expected {
-                let after = result.unwrap().run;
+                let after = result.unwrap();
                 assert_eq!(after.state, to);
                 assert_eq!(after.ended_at.is_some(), to.is_terminal());
             } else {
@@ -557,46 +658,24 @@ async fn state_machine_accepts_exactly_the_documented_transitions() {
                 assert_eq!(unchanged.run.last_sequence, run.last_sequence);
                 assert_eq!(unchanged.run.state, from);
             }
-            checked += 1;
         }
     }
-    assert_eq!(checked, 64);
 }
 
 #[tokio::test]
 async fn full_lifecycle_records_reason_and_terminal_states_are_final() {
-    let b = Board::new().await;
+    let b = Board::with_repo().await;
     let s = b.assigned("Ciclo").await;
     let run = b.run(&s).await;
     let run = b
-        .drive(
-            &run,
-            &[
-                RunState::Preparing,
-                RunState::Running,
-                RunState::WaitingApproval,
-                RunState::Running,
-            ],
-        )
+        .drive(&run, &[RunState::Preparing, RunState::Running])
         .await;
     b.clock.advance(Duration::from_secs(90));
-    let done = b
-        .record(
-            &run,
-            6,
-            RunEvent::StateChanged {
-                to: RunState::Failed,
-                reason: Some("  El proceso terminó con código 1. ".into()),
-            },
-        )
+    let done = finish_run(&b.store, &b.token, &run.id, RunOutcome::Exited { code: 1 })
         .await
-        .unwrap()
-        .run;
+        .unwrap();
     assert_eq!(done.state, RunState::Failed);
-    assert_eq!(
-        done.end_reason.as_deref(),
-        Some("El proceso terminó con código 1.")
-    );
+    assert_eq!(done.end_reason.as_deref(), Some("Terminó con código 1."));
     assert!(
         done.ended_at
             .as_deref()
@@ -604,74 +683,78 @@ async fn full_lifecycle_records_reason_and_terminal_states_are_final() {
             .starts_with("2026-11-15T12:01:30")
     );
     assert_eq!(code(b.cancel(&done).await), ErrorCode::InvalidRunTransition);
-    // Motivos con controles, formato invisible o forma de credencial no se aceptan.
+    assert_eq!(
+        code(finish_run(&b.store, &b.token, &run.id, RunOutcome::Exited { code: 0 }).await),
+        ErrorCode::InvalidRunTransition
+    );
+    // Los cambios de estado nunca llegan como eventos de la fuente, con o sin motivo.
     let s2 = b.assigned("Motivos").await;
     let run2 = b.run(&s2).await;
-    for bad in ["a\nb", "oculto\u{200B}", "kbia_0123456789abcdef"] {
+    for reason in [
+        None,
+        Some("El proceso terminó."),
+        Some("kbia_0123456789abcdef"),
+    ] {
         let result = b
             .record(
                 &run2,
                 2,
                 RunEvent::StateChanged {
                     to: RunState::Failed,
-                    reason: Some(bad.into()),
+                    reason: reason.map(Into::into),
                 },
             )
             .await;
-        assert_eq!(field(result), "reason", "{bad:?}");
+        assert_eq!(field(result), "event", "{reason:?}");
     }
+    assert_eq!(b.events(&run2).await, 1);
 }
 
 #[tokio::test]
 async fn event_sequence_rejects_duplicates_gaps_and_rewrites() {
-    let b = Board::new().await;
+    let b = Board::with_repo().await;
     let s = b.assigned("Secuencia").await;
     let run = b.run(&s).await;
+    // Despachar ocupa la secuencia 2 (`preparing`).
+    let run = b.drive(&run, &[RunState::Preparing]).await;
+    assert_eq!(run.last_sequence, 2);
 
-    let first = b.record(&run, 2, state(RunState::Preparing)).await.unwrap();
+    let first = b.record(&run, 3, input_usage(100)).await.unwrap();
     assert!(first.applied);
     // El mismo evento otra vez (reintento del supervisor): no se aplica dos veces.
-    let again = b.record(&run, 2, state(RunState::Preparing)).await.unwrap();
+    let again = b.record(&run, 3, input_usage(100)).await.unwrap();
     assert!(!again.applied);
-    assert_eq!(again.run.last_sequence, 2);
-    assert_eq!(b.events(&run).await, 2);
-    // El evento inicial repetido también es un duplicado exacto.
-    assert!(
-        !b.record(&run, 1, state(RunState::Queued))
-            .await
-            .unwrap()
-            .applied
-    );
+    assert_eq!(again.run.last_sequence, 3);
+    assert_eq!(b.events(&run).await, 3);
 
     // Misma secuencia con otro contenido: conflicto con el estado vigente.
-    let conflict = b
-        .record(&run, 2, state(RunState::Failed))
-        .await
-        .unwrap_err();
+    let conflict = b.record(&run, 3, input_usage(200)).await.unwrap_err();
     assert_eq!(conflict.code(), ErrorCode::Conflict);
     let payload = conflict.to_payload(None);
     assert_eq!(payload.current.unwrap()["state"], "preparing");
     assert_eq!(
-        code(b.record(&run, 1, state(RunState::Cancelled)).await),
+        code(b.record(&run, 2, input_usage(100)).await),
         ErrorCode::Conflict
     );
     // Hueco y secuencias imposibles.
-    assert_eq!(
-        field(b.record(&run, 4, state(RunState::Running)).await),
-        "sequence"
-    );
-    assert_eq!(
-        field(b.record(&run, 0, state(RunState::Running)).await),
-        "sequence"
-    );
-    assert_eq!(b.events(&run).await, 2);
+    assert_eq!(field(b.record(&run, 5, input_usage(300)).await), "sequence");
+    assert_eq!(field(b.record(&run, 0, input_usage(300)).await), "sequence");
+    assert_eq!(b.events(&run).await, 3);
 
-    // Una cancelación de la persona ocupa la siguiente secuencia: el supervisor que llegue
-    // tarde con esa secuencia recibe conflicto.
-    let cancelled = b.cancel(&run).await.unwrap();
-    assert_eq!(cancelled.last_sequence, 3);
+    // Pedir la cancelación de un intento con proceso no ocupa secuencia: es una petición
+    // (HU-018) que el supervisor confirma con una transición del núcleo. Esa transición ocupa
+    // la siguiente secuencia: quien llegue tarde con ella recibe conflicto.
+    let requested = b.cancel(&run).await.unwrap();
+    assert_eq!(requested.state, RunState::Preparing);
+    assert_eq!(requested.last_sequence, 3);
+    assert!(requested.cancel_requested_at.is_some());
+    let cancelled = finish_run(&b.store, &b.token, &run.id, RunOutcome::Cancelled)
+        .await
+        .unwrap();
+    assert_eq!(cancelled.last_sequence, 4);
+    assert_eq!(cancelled.state, RunState::Cancelled);
     assert_eq!(
-        code(b.record(&run, 3, state(RunState::Running)).await),
+        code(b.record(&run, 4, input_usage(300)).await),
         ErrorCode::Conflict
     );
 
@@ -679,11 +762,12 @@ async fn event_sequence_rejects_duplicates_gaps_and_rewrites() {
     let other = project(&b.store, "Ajeno").await;
     let result = record_run_event(
         &b.store,
+        &b.token,
         &RecordRunEventInput {
             project_id: other.id.clone(),
             run_id: run.id.clone(),
-            sequence: 4,
-            event: state(RunState::Running),
+            sequence: 5,
+            event: input_usage(300),
         },
     )
     .await;
@@ -698,8 +782,8 @@ async fn concurrent_events_with_the_same_sequence_apply_once() {
 
     // Mismo contenido: uno aplica, el otro es duplicado.
     let (x, y) = tokio::join!(
-        b.record(&run, 2, state(RunState::Preparing)),
-        b.record(&run, 2, state(RunState::Preparing)),
+        b.record(&run, 2, input_usage(10)),
+        b.record(&run, 2, input_usage(10)),
     );
     let applied = [x.unwrap().applied, y.unwrap().applied];
     assert_eq!(applied.iter().filter(|a| **a).count(), 1);
@@ -707,8 +791,8 @@ async fn concurrent_events_with_the_same_sequence_apply_once() {
 
     // Distinto contenido: uno aplica y el otro recibe conflicto.
     let (x, y) = tokio::join!(
-        b.record(&run, 3, state(RunState::Running)),
-        b.record(&run, 3, state(RunState::Failed)),
+        b.record(&run, 3, input_usage(20)),
+        b.record(&run, 3, input_usage(30)),
     );
     let results = [x, y];
     assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
@@ -831,7 +915,7 @@ async fn create_and_cancel_are_idempotent_by_request_id() {
 
 #[tokio::test]
 async fn several_attempts_per_story_keep_stable_numbers_and_one_active() {
-    let b = Board::new().await;
+    let b = Board::with_repo().await;
     let s = b.assigned("Varias veces").await;
     let first = b.run(&s).await;
 
@@ -1095,7 +1179,9 @@ async fn other_projects_are_not_found_and_agents_are_forbidden() {
 
 #[tokio::test]
 async fn accepting_or_archiving_cancels_the_active_attempt() {
-    let b = Board::new().await;
+    let b = Board::with_repo().await;
+    // Con proceso (HU-018): aceptar registra una petición de cancelación con su motivo; el
+    // intento sigue en su estado hasta que el supervisor mata el árbol y lo confirma.
     let accepted = b.assigned("Se acepta").await;
     let run = b.run(&accepted).await;
     let run = b
@@ -1103,13 +1189,21 @@ async fn accepting_or_archiving_cancels_the_active_attempt() {
         .await;
     b.accept(&accepted.id).await;
     let detail = get_run(&b.store, &b.project.id, &run.id).await.unwrap();
-    assert_eq!(detail.run.state, RunState::Cancelled);
+    assert_eq!(detail.run.state, RunState::Running);
+    assert!(detail.run.cancel_requested_at.is_some());
     assert_eq!(
-        detail.run.end_reason.as_deref(),
+        detail.cancel_reason.as_deref(),
         Some("La historia se aceptó.")
     );
-    assert_eq!(detail.events.last().unwrap().sequence, 4);
+    assert_eq!(detail.run.last_sequence, 3);
+    let done = finish_run(&b.store, &b.token, &run.id, RunOutcome::Cancelled)
+        .await
+        .unwrap();
+    assert_eq!(done.state, RunState::Cancelled);
+    assert_eq!(done.end_reason.as_deref(), Some("La historia se aceptó."));
+    assert_eq!(done.last_sequence, 4);
 
+    // En cola (sin proceso): archivar lo cancela directamente.
     let archived = b.assigned("Se archiva").await;
     let run = b.run(&archived).await;
     let current = get_story(&b.store, &b.project.id, &archived.id)
@@ -1131,13 +1225,12 @@ async fn accepting_or_archiving_cancels_the_active_attempt() {
         detail.run.end_reason.as_deref(),
         Some("La historia se archivó.")
     );
-    // Un intento ya terminado no se toca.
     assert_eq!(detail.run.last_sequence, 2);
 }
 
 #[tokio::test]
 async fn restoring_a_backup_marks_its_active_attempts_interrupted() {
-    let b = Board::new().await;
+    let b = Board::with_repo().await;
     let queued = b.assigned("En cola").await;
     let queued_run = b.run(&queued).await;
     let running = b.assigned("En ejecución").await;
@@ -1478,10 +1571,10 @@ async fn late_usage_is_accepted_but_totals_never_decrease() {
     // Iguales o mayores, y campos sin informar, sí.
     b.record(&run, 5, usage(Some(800), None)).await.unwrap();
     assert_eq!(b.events(&run).await, 5);
-    // Un cambio de estado tras el final sigue siendo inválido.
+    // Un cambio de estado nunca llega como evento de la fuente.
     assert_eq!(
-        code(b.record(&run, 6, state(RunState::Running)).await),
-        ErrorCode::InvalidRunTransition
+        field(b.record(&run, 6, state(RunState::Running)).await),
+        "event"
     );
 }
 

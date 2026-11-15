@@ -1,6 +1,6 @@
 # Kanban IA
 
-Kanban desktop local para historias, épicas y agentes de IA. Estado: **MVP local (M2)**: planificación en el tablero y agentes por MCP, validado solo en macOS; no es una versión alfa distribuible. M3 en curso: cada historia puede «Preparar intento» con una instantánea inmutable, pero aún no hay ejecutor (el intento queda en cola). Para completar un ciclo real (proyecto → agente por MCP → entrega → aceptación) y probar con el paquete de demostración, sigue la [guía local](docs/GUIA-LOCAL.md). Planificación en [`docs/`](docs/) y estado en [`docs/BACKLOG.md`](docs/BACKLOG.md).
+Kanban desktop local para historias, épicas y agentes de IA. Estado: **MVP local (M2)**: planificación en el tablero y agentes por MCP, validado solo en macOS; no es una versión alfa distribuible. M3 en curso: cada historia puede «Preparar intento» con una instantánea inmutable e iniciarlo en un worktree propio con un proceso de prueba supervisado (sin IA todavía; ver «Ejecución supervisada»). Para completar un ciclo real (proyecto → agente por MCP → entrega → aceptación) y probar con el paquete de demostración, sigue la [guía local](docs/GUIA-LOCAL.md). Planificación en [`docs/`](docs/) y estado en [`docs/BACKLOG.md`](docs/BACKLOG.md).
 
 ## Requisitos
 
@@ -9,6 +9,7 @@ Kanban desktop local para historias, épicas y agentes de IA. Estado: **MVP loca
 | Rust | 1.99.1 | Fijado en `rust-toolchain.toml`; rustup lo instala automáticamente. Instalar rustup desde https://rustup.rs |
 | Node.js | 22.16.0 (`.nvmrc`) | Vite 8 exige `^20.19.0 \|\| >=22.12.0` |
 | npm | 11.4.2 | Gestor del monorepo (workspaces); usar `npm ci` con el lockfile |
+| Git | 2.50.0 (mínimo 2.36) | Solo para ejecutar intentos (HU-018): worktrees con `git worktree`; `list --porcelain -z` exige 2.36 ([2.35](https://git-scm.com/docs/git-worktree/2.35.0) frente a [2.36](https://git-scm.com/docs/git-worktree/2.36.0)). La app no comprueba la versión. |
 
 Requisitos de sistema de Tauri 2 (https://v2.tauri.app/start/prerequisites/):
 
@@ -227,6 +228,20 @@ Si prefieres un `.mcp.json` de proyecto (que se versiona), **no pongas el token 
 - Compila el binario que vayas a usar con `-p kanbania-mcp`: así no enlaza el núcleo ni SQLite (`cargo tree -p kanbania-mcp -e normal -i libsqlite3-sys` debe salir vacío). En una compilación de todo el workspace, las features se unifican y podría enlazarlos, aunque el código del MCP nunca abre la base.
 - El contenido de las historias (títulos, descripciones, criterios, motivos de bloqueo, que pueden venir de otros agentes) se sirve tal cual: la integración no lo filtra. Es dato, no instrucciones; el cliente MCP debe seguir pidiendo permiso para herramientas con efectos.
 - `list_ready_stories` pagina hasta 10 000 historias; si hay más, `truncated` es `true`.
+
+## Ejecución supervisada (HU-018, M3)
+
+Cada intento de una historia (HU-017) puede **iniciarse** desde su detalle. Aún no hay IA: el único ejecutor es un **proceso de prueba (sin IA)** con escenarios (termina bien, falla, tarda y crea hijos, modifica archivos, mucha salida, se cuelga) para comprobar la supervisión. HU-019 lo sustituirá por un adaptador ACP.
+
+- **Worktree por intento**: `<datos>/worktrees/<proyecto>/<intento>`, rama `kanbania/h<n>-i<n>-<8 hex>` creada desde el commit congelado en la instantánea. El repositorio original no se toca (nunca checkout, reset, clean ni stash). Git se lanza con argumentos explícitos, entorno limpio, sin terminal, `core.hooksPath` vacío (no se ejecutan hooks) y `core.fsmonitor=false`; sí se respeta el resto de tu configuración (p. ej. filtros LFS).
+- **Supervisor**: programa absoluto + argumentos, sin shell; entorno limpio sin `KANBANIA_*`; concurrencia y tiempo máximo en «Sistema» → «Ejecuciones» (por defecto 2 a la vez y 30 min). Cancelar o agotar el tiempo mata el árbol de procesos: grupo propio con SIGTERM → 5 s → SIGKILL (macOS) o Job Object con kill-on-close y sin ventana de consola (Windows).
+- **Salida**: JSONL en `<datos>/runs/<intento>/` (líneas ≤ 4 KiB, archivos de 1 MiB, máx. 4); la app muestra las últimas 500 líneas como texto plano.
+- **Reinicio**: lo que estaba en marcha queda «Interrumpido» y las peticiones sin despachar se anulan; nada arranca solo. Si la app muere de golpe, los procesos pueden seguir vivos en macOS.
+- **Eliminar un worktree** (solo intentos terminados): con cambios, con archivos ignorados por Git (`.env`, compilados…) o con commits fuera de cualquier rama, exige «Descartar … y eliminar». La rama se conserva siempre.
+- **Repositorio vinculado:** iniciar un intento exige que el repositorio de su instantánea siga vinculado al proyecto en la misma ruta (se vuelve a comprobar al salir de la cola). Si lo desvinculas o lo reubicas, prepara un intento nuevo.
+- Dependencias: `process-wrap` 10.0.1 (Apache-2.0 OR MIT; grupo de procesos y Job Object) y `nix` 0.31.3 (MIT, solo Unix, `killpg`); ya estaban en el lockfile por `rmcp`.
+- Proceso de prueba a mano: `cargo run -p kanbania-runner --bin kanbania-test-process -- success` (o `<app> --kanbania-test-process success`). Pruebas: `cargo test -p kanbania-runner`.
+- Windows: solo se compila en local (`cargo clippy --target x86_64-pc-windows-msvc -p kanbania-runner --no-default-features --all-targets`); no se ha ejecutado.
 
 ## Notas
 

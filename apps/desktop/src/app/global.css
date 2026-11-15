@@ -1150,6 +1150,78 @@ textarea {
   gap: 2px;
 }
 
+/* ---------- ejecución supervisada (HU-018) ---------- */
+
+.run-execution,
+.run-worktree,
+.run-output {
+  display: grid;
+  gap: 8px;
+}
+
+.run-start {
+  margin-top: 4px;
+  padding: 12px;
+  border: 2px dashed var(--color-border);
+}
+
+.run-start__label {
+  font-weight: 600;
+}
+
+fieldset.run-start__scenarios legend {
+  font-size: 1rem;
+  color: var(--color-text);
+}
+
+.run-start__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.run-detail__info {
+  padding: 8px 12px;
+  border: 2px solid var(--color-border);
+}
+
+.run-output__scroll {
+  max-height: 24rem;
+  overflow: auto;
+  padding: 8px 12px;
+  background: var(--color-bg);
+  border: 2px solid var(--color-border);
+}
+
+.run-output__lines {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+/* Texto plano tal cual: se conservan espacios y saltos, y se corta en cualquier punto. */
+.run-output__line {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.run-output__stream {
+  color: var(--color-muted);
+}
+
+.run-output__line--stderr .run-output__stream {
+  color: var(--color-warn);
+}
+
+.run-output__cut {
+  color: var(--color-muted);
+  font-style: italic;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .shell__cursor {
     animation: none;

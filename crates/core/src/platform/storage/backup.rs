@@ -41,9 +41,10 @@ const WAL_FILE: &str = "kanbania.sqlite3-wal";
 pub const MAX_KEPT: usize = 10;
 
 /// Lo que una copia no contiene. Se guarda en el manifiesto y se muestra en la app.
-const EXCLUDES: [&str; 3] = [
+const EXCLUDES: [&str; 4] = [
     "El contenido de los repositorios vinculados (solo se guardan sus rutas).",
-    "Registros de ejecuciones de agentes: llegarán en M3 y se guardarán fuera de la base.",
+    "La salida de los intentos (registros JSONL en «runs/», fuera de la base).",
+    "Los worktrees de los intentos (carpetas en «worktrees/»; sus ramas están en el repositorio).",
     "Las carpetas exportadas en Markdown: son una exportación de la planificación, no una copia.",
 ];
 
@@ -605,14 +606,31 @@ pub async fn restore_backup_waiting(
     }
 }
 
-async fn restore_locked(
-    data_dir: &Path,
-    source: &Path,
-    manifest: &Manifest,
-    work: &Path,
-    protect: Option<&str>,
-) -> Result<RestoreOutcome, CoreError> {
-    // 1. Copia de trabajo verificada contra el manifiesto (el origen puede cambiar después).
+/// Comprueba una copia sin tocar el almacén (no hace falta cerrarlo): manifiesto, hashes,
+/// integridad, claves foráneas y esquema compatible. Es la misma verificación con la que empieza
+/// `restore_backup` (que la repite con el almacén cerrado): sirve para no detener nada (p. ej.
+/// los procesos de los intentos) por una carpeta que no es una copia válida. Devuelve la versión
+/// de esquema de la copia.
+pub async fn verify_backup(data_dir: &Path, source: &Path) -> Result<i64, CoreError> {
+    let manifest = read_manifest(source)?;
+    let work = work_dir(data_dir, "verify")?;
+    let result = async {
+        copy_verified(source, &manifest, &work)?;
+        let mut conn = connect(&work.join(DATABASE_FILE))
+            .await
+            .map_err(|_| invalid("La copia no es una base SQLite válida."))?;
+        let version = check_copy(&mut conn, &work).await;
+        conn.close().await.ok();
+        version
+    }
+    .await;
+    let _ = std::fs::remove_dir_all(&work);
+    result
+}
+
+/// Copia los archivos del manifiesto a `work` y comprueba tamaño y SHA-256 (el origen puede
+/// cambiar después).
+fn copy_verified(source: &Path, manifest: &Manifest, work: &Path) -> Result<(), CoreError> {
     for file in &manifest.files {
         let from = source.join(&file.name);
         let meta = std::fs::symlink_metadata(&from)
@@ -629,6 +647,49 @@ async fn restore_locked(
             ));
         }
     }
+    Ok(())
+}
+
+/// Integridad, claves foráneas y esquema compatible de la base copiada.
+async fn check_copy(conn: &mut SqliteConnection, work: &Path) -> Result<i64, CoreError> {
+    let integrity: Vec<String> = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(|_| invalid("La copia no es una base SQLite válida."))?;
+    if integrity != ["ok"] {
+        return Err(invalid(
+            "La copia está dañada (falla la comprobación de integridad).",
+        ));
+    }
+    let broken: Vec<(String,)> = sqlx::query_as("PRAGMA foreign_key_check")
+        .fetch_all(&mut *conn)
+        .await?;
+    if !broken.is_empty() {
+        return Err(invalid("La copia tiene referencias rotas entre tablas."));
+    }
+    let version = match schema_version_of(conn).await {
+        Ok(Some(v)) => v,
+        Ok(None) => return Err(invalid("La copia no es una base de Kanban IA.")),
+        Err(CoreError::NewerSchema(v)) => {
+            return Err(invalid(format!(
+                "La copia es de una versión más reciente de la app (esquema {v})."
+            )));
+        }
+        Err(other) => return Err(other),
+    };
+    verify_schema(conn, work, version).await?;
+    Ok(version)
+}
+
+async fn restore_locked(
+    data_dir: &Path,
+    source: &Path,
+    manifest: &Manifest,
+    work: &Path,
+    protect: Option<&str>,
+) -> Result<RestoreOutcome, CoreError> {
+    // 1. Copia de trabajo verificada contra el manifiesto.
+    copy_verified(source, manifest, work)?;
 
     // 2. Integridad, claves foráneas y esquema compatible. Se consolida en un solo archivo.
     let staging = data_dir.join(format!("{DATABASE_FILE}.restoring"));
@@ -638,32 +699,7 @@ async fn restore_locked(
             .await
             .map_err(|_| invalid("La copia no es una base SQLite válida."))?;
         let checks = async {
-            let integrity: Vec<String> = sqlx::query_scalar("PRAGMA integrity_check")
-                .fetch_all(&mut conn)
-                .await
-                .map_err(|_| invalid("La copia no es una base SQLite válida."))?;
-            if integrity != ["ok"] {
-                return Err(invalid(
-                    "La copia está dañada (falla la comprobación de integridad).",
-                ));
-            }
-            let broken: Vec<(String,)> = sqlx::query_as("PRAGMA foreign_key_check")
-                .fetch_all(&mut conn)
-                .await?;
-            if !broken.is_empty() {
-                return Err(invalid("La copia tiene referencias rotas entre tablas."));
-            }
-            let version = match schema_version_of(&mut conn).await {
-                Ok(Some(v)) => v,
-                Ok(None) => return Err(invalid("La copia no es una base de Kanban IA.")),
-                Err(CoreError::NewerSchema(v)) => {
-                    return Err(invalid(format!(
-                        "La copia es de una versión más reciente de la app (esquema {v})."
-                    )));
-                }
-                Err(other) => return Err(other),
-            };
-            verify_schema(&mut conn, work, version).await?;
+            let version = check_copy(&mut conn, work).await?;
             // Una copia antigua no reactiva credenciales revocadas después (ver `access`).
             let current = data_dir.join(DATABASE_FILE);
             let mut current_conn = if current.exists() {
@@ -681,7 +717,7 @@ async fn restore_locked(
             // Ningún intento activo de la copia se da por bueno (ver `runs`).
             interrupt_restored_runs(&mut conn, SystemClock.now_ms()).await?;
             vacuum_into(&mut conn, &staging).await?;
-            Ok(version)
+            Ok::<_, CoreError>(version)
         }
         .await;
         conn.close().await.ok();

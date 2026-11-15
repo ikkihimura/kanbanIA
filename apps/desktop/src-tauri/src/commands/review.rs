@@ -10,6 +10,7 @@ use kanbania_core::features::stories::StorySummary;
 use kanbania_core::platform::actor::Actor;
 use tauri::State;
 
+use crate::run_supervisor::RunSupervisorSlot;
 use crate::storage::StorageSlot;
 
 #[tauri::command]
@@ -60,12 +61,16 @@ pub async fn return_delivery(
 #[tauri::command]
 pub async fn accept_story(
     slot: State<'_, StorageSlot>,
+    runs: State<'_, RunSupervisorSlot>,
     input: AcceptStoryInput,
 ) -> Result<StorySummary, ErrorPayload> {
     let store = slot.store().await?;
-    review::accept_story(&store, &Actor::Human, &input)
+    let accepted = review::accept_story(&store, &Actor::Human, &input)
         .await
-        .map_err(|e| e.to_payload(None))
+        .map_err(|e| e.to_payload(None))?;
+    // Aceptar pide cancelar el intento activo: que el supervisor mate su proceso ya.
+    runs.wake();
+    Ok(accepted)
 }
 
 #[tauri::command]

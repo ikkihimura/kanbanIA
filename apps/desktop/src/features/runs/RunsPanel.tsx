@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
+import type { RunState } from "../../contracts/generated/RunState";
 import type { RunSummary } from "../../contracts/generated/RunSummary";
 import {
   cancelRun,
@@ -12,18 +13,34 @@ import { useIpcResource } from "../../shared/ipc/useIpcResource";
 import { useMutation } from "../../shared/ipc/useMutation";
 import { formatDateTime } from "../../shared/ui/format";
 import { PrepareRunForm } from "./PrepareRunForm";
-import { RunDetailView } from "./RunDetailView";
+import { RunDetailView, type DetailFocus } from "./RunDetailView";
 import {
-  RUN_STATE_LABEL,
+  TEST_PROCESS_LABEL,
+  canStartRun,
   formatCost,
   formatTokens,
   isActiveRun,
+  isCancelPending,
   runStateBadgeClass,
+  runStatusLabel,
 } from "./runFormat";
+import { useRunChanges } from "./useRunChanges";
 
-/** Sin ejecutor (HU-018/019), un intento preparado se queda en cola: se dice, no se simula. */
-export const NO_RUNNER_NOTICE =
-  "Aún no hay ejecutor: el intento queda en cola hasta que llegue la ejecución de agentes (M3).";
+/**
+ * HU-018: el único ejecutor es un proceso de prueba incluido (la IA llega con HU-019). Se dice
+ * siempre, para no dar a entender que trabaja un agente.
+ */
+export const RUNNER_NOTICE =
+  "Todavía no trabaja ningún agente: «Iniciar» lanza un proceso de prueba (sin IA) en un worktree propio para probar la supervisión. Que termine bien no acepta la historia.";
+
+/** Cuándo se detendrá un intento con la cancelación pedida (sin prometer plazos falsos). */
+function cancelEta(state: RunState): string {
+  if (state === "preparing")
+    return "se detendrá cuando termine el paso de preparación en curso (crear el worktree puede tardar).";
+  if (state === "running")
+    return "se detendrán el proceso y sus hijos en unos segundos.";
+  return "se detendrá en cuanto el supervisor lo atienda.";
+}
 
 interface Props {
   projectId: string;
@@ -62,7 +79,9 @@ export function RunsPanel({
 
   const [selected, setSelected] = useState<{
     runId: string;
-    focus: boolean;
+    focus: DetailFocus;
+    /** Cambia para volver a montar el detalle (p. ej. «Iniciar…» con el detalle ya abierto). */
+    nonce: number;
   } | null>(null);
   const [detailEpoch, setDetailEpoch] = useState(0);
   const [message, setMessage] = useState("");
@@ -74,6 +93,7 @@ export function RunsPanel({
   const titleRef = useRef<HTMLHeadingElement>(null);
   const confirmCancelRef = useRef<HTMLButtonElement>(null);
   const detailButtons = useRef(new Map<string, HTMLButtonElement>());
+  const startButtons = useRef(new Map<string, HTMLButtonElement>());
   const cancelButtons = useRef(new Map<string, HTMLButtonElement>());
 
   useEffect(() => {
@@ -93,18 +113,70 @@ export function RunsPanel({
   useRefreshSignal(refreshSignal, reloadAll);
 
   const list = runs.state.status === "ready" ? runs.state.data : null;
+
+  // Avisos del supervisor (HU-018): si tocan esta historia o uno de sus intentos, la lista y
+  // el detalle abierto vuelven a leer del núcleo.
+  const listRef = useRef(list);
+  useEffect(() => {
+    listRef.current = list;
+  }, [list]);
+  // Si el intento de la confirmación de cancelar ya no está activo (terminó por otra vía y
+  // llegó con un aviso o una recarga), la confirmación se cierra y el foco va al título.
+  const resetCanceller = canceller.reset;
+  const staleConfirm =
+    confirm !== null &&
+    list !== null &&
+    !list.some((r) => r.id === confirm.id && isActiveRun(r.state));
+  // Ajuste durante el render (no en un efecto): se cierra antes de pintarse.
+  const [focusTitle, setFocusTitle] = useState(0);
+  if (staleConfirm) {
+    setConfirm(null);
+    resetCanceller();
+    setMessage(
+      `El intento #${String(confirm.number)} ya terminó: no hace falta cancelarlo.`,
+    );
+    setFocusTitle((n) => n + 1);
+  }
+  useEffect(() => {
+    if (focusTitle > 0) titleRef.current?.focus();
+  }, [focusTitle]);
+
+  useRunChanges((change) => {
+    const known = listRef.current ?? [];
+    const touches =
+      change.storyIds.includes(storyId) ||
+      change.runIds.some((runId) => known.some((r) => r.id === runId));
+    if (!touches) return;
+    reloadRuns();
+    setDetailEpoch((n) => n + 1);
+  });
   const activeRun = list?.find((r) => isActiveRun(r.state)) ?? null;
 
   function toggleDetail(runId: string) {
     setSelected((current) =>
-      current?.runId === runId ? null : { runId, focus: true },
+      current?.runId === runId
+        ? null
+        : { runId, focus: "title", nonce: (current?.nonce ?? 0) + 1 },
     );
+  }
+
+  function openStart(runId: string) {
+    setMessage("");
+    setSelected((current) => ({
+      runId,
+      focus: "start",
+      nonce: (current?.nonce ?? 0) + 1,
+    }));
   }
 
   function closeDetail() {
     const runId = selected?.runId;
+    const fromStart = selected?.focus === "start";
     setSelected(null);
-    const button = runId ? detailButtons.current.get(runId) : undefined;
+    const button = runId
+      ? ((fromStart ? startButtons.current.get(runId) : undefined) ??
+        detailButtons.current.get(runId))
+      : undefined;
     (button ?? titleRef.current)?.focus();
   }
 
@@ -134,7 +206,12 @@ export function RunsPanel({
       setConfirm(null);
       // El botón «Cancelar intento» desaparece: el foco va al título de la sección.
       titleRef.current?.focus();
-      setMessage(`Intento #${String(result.value.number)} cancelado.`);
+      const number = String(result.value.number);
+      setMessage(
+        isActiveRun(result.value.state)
+          ? `Cancelación solicitada para el intento #${number}: ${cancelEta(result.value.state)}`
+          : `Intento #${number} cancelado.`,
+      );
       reloadRuns();
       setDetailEpoch((n) => n + 1);
     } else if (result.error.code === "invalid_run_transition") {
@@ -158,7 +235,7 @@ export function RunsPanel({
         Cada intento guarda una copia de la historia y de las instrucciones que
         recibiría el agente. Solo puede haber un intento activo a la vez.
       </p>
-      <p className="run-notice">{NO_RUNNER_NOTICE}</p>
+      <p className="run-notice">{RUNNER_NOTICE}</p>
 
       <p role="status" className="relations__saved">
         {message && `✓ ${message}`}
@@ -176,16 +253,24 @@ export function RunsPanel({
           agents={agents.state.status === "ready" ? agents.state.data : null}
           activeRun={activeRun}
           onShowRun={(runId) => {
-            setSelected({ runId, focus: true });
+            setSelected((current) => ({
+              runId,
+              focus: "title",
+              nonce: (current?.nonce ?? 0) + 1,
+            }));
           }}
           onRunActive={reloadRuns}
           onDirtyChange={onDirtyChange}
           onCreated={(run) => {
             setMessage(
-              `Intento #${String(run.number)} preparado: queda en cola (aún no hay ejecutor).`,
+              `Intento #${String(run.number)} preparado: queda en cola hasta que lo inicies.`,
             );
             reloadRuns();
-            setSelected({ runId: run.id, focus: false });
+            setSelected((current) => ({
+              runId: run.id,
+              focus: null,
+              nonce: (current?.nonce ?? 0) + 1,
+            }));
             setDetailEpoch((n) => n + 1);
           }}
         />
@@ -240,7 +325,7 @@ export function RunsPanel({
                   <span>
                     <strong>Intento #{run.number}</strong>{" "}
                     <span className={runStateBadgeClass(run.state)}>
-                      {RUN_STATE_LABEL[run.state]}
+                      {runStatusLabel(run)}
                     </span>
                   </span>
                   <span className="repo__actions">
@@ -262,7 +347,28 @@ export function RunsPanel({
                         {`del intento #${String(run.number)}`}
                       </span>
                     </button>
-                    {isActiveRun(run.state) && (
+                    {canStartRun(run) && (
+                      <>
+                        <button
+                          type="button"
+                          className="button"
+                          ref={(el) => {
+                            if (el) startButtons.current.set(run.id, el);
+                            else startButtons.current.delete(run.id);
+                          }}
+                          onClick={() => {
+                            openStart(run.id);
+                          }}
+                        >
+                          Iniciar…{" "}
+                          <span className="visually-hidden">
+                            {`el intento #${String(run.number)}`}
+                          </span>
+                        </button>
+                        <span className="badge">{TEST_PROCESS_LABEL}</span>
+                      </>
+                    )}
+                    {isActiveRun(run.state) && !isCancelPending(run) && (
                       <button
                         type="button"
                         className="button button--secondary"
@@ -314,13 +420,25 @@ export function RunsPanel({
                   <dt>Coste</dt>
                   <dd>{formatCost(run.usage.costUsdMicros)}</dd>
                 </dl>
-                {run.state === "queued" && (
+                {canStartRun(run) && (
                   <p className="field__hint">
-                    En cola: nadie lo está ejecutando todavía.
+                    En cola: no se ha iniciado. Nada arranca solo.
+                  </p>
+                )}
+                {run.state === "queued" && run.startRequestedAt !== null && (
+                  <p className="field__hint">
+                    Esperando turno: arrancará cuando haya hueco según el límite
+                    de ejecuciones a la vez.
+                  </p>
+                )}
+                {isCancelPending(run) && (
+                  <p className="field__hint">
+                    Cancelación solicitada: se está deteniendo el proceso y sus
+                    procesos hijos.
                   </p>
                 )}
 
-                {confirm?.id === run.id && (
+                {confirm?.id === run.id && !staleConfirm && (
                   <div
                     className="repo__confirm"
                     role="alertdialog"
@@ -331,9 +449,12 @@ export function RunsPanel({
                     }}
                   >
                     <p id={`${id}-confirm`}>
-                      ¿Cancelar el intento #{run.number}? Quedará como
-                      «Cancelado» y no se podrá reanudar; su instantánea y sus
-                      eventos se conservan. Podrás preparar otro intento.
+                      ¿Cancelar el intento #{run.number}?{" "}
+                      {run.state === "queued"
+                        ? "Quedará como «Cancelado» y no se podrá reanudar;"
+                        : "Se detendrán el proceso de prueba y sus procesos hijos; quedará como «Cancelado» cuando se detengan y no se podrá reanudar;"}{" "}
+                      su instantánea y sus eventos se conservan. Podrás preparar
+                      otro intento.
                     </p>
                     {canceller.error && (
                       <p className="field__error" role="alert">
@@ -373,12 +494,19 @@ export function RunsPanel({
       {selected && (
         <div id={`${id}-detail`}>
           <RunDetailView
-            key={selected.runId}
+            key={`${selected.runId}-${String(selected.nonce)}`}
             projectId={projectId}
             runId={selected.runId}
             refreshSignal={detailEpoch}
             focusOnLoad={selected.focus}
             onClose={closeDetail}
+            onStarted={(run) => {
+              setMessage(
+                `Intento #${String(run.number)}: inicio pedido con el proceso de prueba (sin IA). Espera turno en la cola.`,
+              );
+              reloadRuns();
+            }}
+            onChanged={reloadRuns}
           />
         </div>
       )}

@@ -1,6 +1,10 @@
 import type { RunEvent } from "../../contracts/generated/RunEvent";
+import type { RunOutputStream } from "../../contracts/generated/RunOutputStream";
 import type { RunState } from "../../contracts/generated/RunState";
+import type { RunSummary } from "../../contracts/generated/RunSummary";
 import type { RunUsage } from "../../contracts/generated/RunUsage";
+import type { TestScenario } from "../../contracts/generated/TestScenario";
+import type { WorktreeRemoval } from "../../contracts/generated/WorktreeRemoval";
 
 /** Estado en texto: el color de la insignia solo lo refuerza. */
 export const RUN_STATE_LABEL: Record<RunState, string> = {
@@ -25,6 +29,75 @@ const TERMINAL: ReadonlySet<RunState> = new Set<RunState>([
 export function isActiveRun(state: RunState): boolean {
   return !TERMINAL.has(state);
 }
+
+/**
+ * Estado visible de un intento: distingue lo que el estado solo no dice (una petición de
+ * inicio esperando turno o una cancelación pedida que el supervisor aún no ha atendido).
+ */
+export function runStatusLabel(
+  run: Pick<RunSummary, "state" | "startRequestedAt" | "cancelRequestedAt">,
+): string {
+  if (isActiveRun(run.state) && run.cancelRequestedAt !== null)
+    return "Cancelación solicitada";
+  if (run.state === "queued" && run.startRequestedAt !== null)
+    return "En cola · esperando turno";
+  return RUN_STATE_LABEL[run.state];
+}
+
+/** Hay una cancelación pedida que el supervisor aún no ha atendido. */
+export function isCancelPending(
+  run: Pick<RunSummary, "state" | "cancelRequestedAt">,
+): boolean {
+  return isActiveRun(run.state) && run.cancelRequestedAt !== null;
+}
+
+/** En cola sin petición de inicio vigente: se puede iniciar. */
+export function canStartRun(
+  run: Pick<RunSummary, "state" | "startRequestedAt" | "cancelRequestedAt">,
+): boolean {
+  return (
+    run.state === "queued" &&
+    run.startRequestedAt === null &&
+    run.cancelRequestedAt === null
+  );
+}
+
+/**
+ * Único ejecutor de HU-018. Se muestra siempre junto a «Iniciar» y en el detalle: nunca se
+ * da a entender que trabaja un agente.
+ */
+export const TEST_PROCESS_LABEL = "Proceso de prueba (sin IA)";
+
+export const SCENARIO_LABEL: Record<TestScenario, string> = {
+  success: "Termina bien",
+  fail: "Falla (termina con error)",
+  slow: "Tarda y crea procesos hijos (unos 10 min)",
+  write: "Modifica archivos del worktree",
+  flood: "Produce mucha salida",
+  hang: "Se queda colgado (hasta el tiempo máximo)",
+};
+
+export const SCENARIOS: readonly TestScenario[] = [
+  "success",
+  "fail",
+  "slow",
+  "write",
+  "flood",
+  "hang",
+];
+
+/** Etiqueta de cada línea de salida: el origen siempre en texto. */
+export const STREAM_LABEL: Record<RunOutputStream, string> = {
+  stdout: "salida",
+  stderr: "error",
+  system: "sistema",
+};
+
+export const REMOVAL_LABEL: Record<WorktreeRemoval, string> = {
+  clean: "Estaba limpio.",
+  discarded: "Se descartaron sus cambios sin confirmar.",
+  missing: "La carpeta ya no existía.",
+};
 
 export function runStateBadgeClass(state: RunState): string {
   if (state === "completed") return "badge badge--ok";

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { AppInfoPanel } from "../features/app-info/AppInfoPanel";
 import { BackupPanel } from "../features/backup/BackupPanel";
+import { RunSettingsPanel } from "../features/runs/RunSettingsPanel";
 import { CloseConfirmDialog } from "./CloseConfirmDialog";
 import { Workspace } from "../features/projects/Workspace";
 import { StoragePanel } from "../features/storage-status/StoragePanel";
@@ -63,6 +64,7 @@ export function App() {
           <div className="shell__panels">
             <StoragePanel {...storage} />
             <BackupPanel canCreate {...backupProps} />
+            <RunSettingsPanel key={generation} />
             <AppInfoPanel />
           </div>
         </details>

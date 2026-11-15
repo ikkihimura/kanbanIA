@@ -8,7 +8,7 @@ import type { RunDetail } from "../../contracts/generated/RunDetail";
 import type { RunSummary } from "../../contracts/generated/RunSummary";
 import type { StoryRelations } from "../../contracts/generated/StoryRelations";
 import * as commands from "../../shared/ipc/commands";
-import { RunsPanel } from "./RunsPanel";
+import { RUNNER_NOTICE, RunsPanel } from "./RunsPanel";
 
 // Solo se simulan las llamadas IPC; errores y helpers son los reales.
 vi.mock("../../shared/ipc/commands", async (importOriginal) => ({
@@ -91,6 +91,8 @@ function summary(overrides: Partial<RunSummary> = {}): RunSummary {
     usage: NO_USAGE,
     lastSequence: 1,
     snapshotSha256: "ab".repeat(32),
+    startRequestedAt: null,
+    cancelRequestedAt: null,
     ...overrides,
   };
 }
@@ -167,6 +169,9 @@ function detail(overrides: Partial<RunDetail> = {}): RunDetail {
       },
     ],
     eventsTruncated: false,
+    startRequest: null,
+    cancelReason: null,
+    worktree: null,
     ...overrides,
   };
 }
@@ -201,18 +206,16 @@ beforeEach(() => {
 });
 
 describe("RunsPanel", () => {
-  it("sin intentos lo dice y avisa de que aún no hay ejecutor", async () => {
+  it("sin intentos lo dice y avisa de que el ejecutor es un proceso de prueba sin IA", async () => {
     renderPanel();
 
     expect(
       await screen.findByText("Esta historia no tiene intentos todavía."),
     ).toBeInTheDocument();
     expect(mocked.listStoryRuns).toHaveBeenCalledWith("p1", "s1");
-    expect(
-      screen.getByText(
-        "Aún no hay ejecutor: el intento queda en cola hasta que llegue la ejecución de agentes (M3).",
-      ),
-    ).toBeInTheDocument();
+    expect(screen.getByText(RUNNER_NOTICE)).toBeInTheDocument();
+    expect(RUNNER_NOTICE).toContain("proceso de prueba (sin IA)");
+    expect(RUNNER_NOTICE).toContain("no acepta la historia");
   });
 
   it("muestra cada intento por separado, con su estado en texto", async () => {
@@ -245,7 +248,11 @@ describe("RunsPanel", () => {
     expect(third).toHaveTextContent("Intento #3");
     expect(within(third).getByText("En cola")).toBeInTheDocument();
     expect(third).toHaveTextContent("A-3 Jean Claude");
-    expect(third).toHaveTextContent("nadie lo está ejecutando");
+    expect(third).toHaveTextContent("En cola: no se ha iniciado.");
+    expect(
+      within(third).getByRole("button", { name: "Iniciar… el intento #3" }),
+    ).toBeInTheDocument();
+    expect(third).toHaveTextContent("Proceso de prueba (sin IA)");
     expect(
       within(third).getByRole("button", { name: "Cancelar intento…" }),
     ).toBeInTheDocument();
@@ -348,7 +355,7 @@ describe("RunsPanel", () => {
     expect(input).not.toHaveProperty("agentId");
     expect(
       await screen.findByText(
-        /Intento #1 preparado: queda en cola \(aún no hay ejecutor\)\./,
+        /Intento #1 preparado: queda en cola hasta que lo inicies\./,
       ),
     ).toBeInTheDocument();
     expect(note).toHaveValue("");

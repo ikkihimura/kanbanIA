@@ -9,6 +9,7 @@ use kanbania_core::platform::storage::{
 };
 use tauri::{AppHandle, Runtime, State};
 
+use crate::run_supervisor::RunSupervisorSlot;
 use crate::service::start_local_service;
 use crate::storage::StorageSlot;
 
@@ -53,6 +54,7 @@ pub async fn save_backup_to_folder(
 pub async fn restore_backup<R: Runtime>(
     handle: AppHandle<R>,
     slot: State<'_, StorageSlot>,
+    runs: State<'_, RunSupervisorSlot>,
     source: RestoreSource,
 ) -> Result<RestoreOutcome, ErrorPayload> {
     let path = match source {
@@ -71,8 +73,17 @@ pub async fn restore_backup<R: Runtime>(
             path
         }
     };
+    // Primero se comprueba la copia (sin cerrar nada): una carpeta no válida no detiene los
+    // procesos de los intentos. `restore` la vuelve a comprobar con el almacén cerrado.
+    storage::verify_backup(slot.data_dir(), &path)
+        .await
+        .map_err(|e| e.to_payload(None))?;
+    // Antes de sustituir la base: matar los procesos de los intentos y soltar el almacén. Hasta
+    // `resume`, nada (ni un reintento) vuelve a arrancar el supervisor.
+    runs.pause_for_restore().await;
     let outcome = slot.restore(&path).await;
     // Restaurar sin almacenamiento previo puede dejarlo disponible por primera vez.
     start_local_service(&handle).await;
+    runs.resume(&handle).await;
     outcome
 }

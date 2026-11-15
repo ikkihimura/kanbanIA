@@ -29,4 +29,14 @@ lastSequence: number,
 /**
  * SHA-256 de la instantánea guardada (permite comprobar que no cambió).
  */
-snapshotSha256: string, };
+snapshotSha256: string, 
+/**
+ * Hora de la petición de inicio pendiente (HU-018): el intento espera hueco en la cola.
+ * `null` si no hay petición o ya se despachó o anuló.
+ */
+startRequestedAt: string | null, 
+/**
+ * Hora de la petición de cancelación (HU-018): el supervisor aún no ha parado el proceso.
+ * Se conserva cuando el intento termina.
+ */
+cancelRequestedAt: string | null, };

@@ -15,6 +15,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use sqlx::migrate::{MigrateError, Migrator};
@@ -25,7 +26,7 @@ use sqlx::{Sqlite, SqliteConnection, Transaction};
 
 pub use backup::{
     BackupInfo, BackupKind, MAX_KEPT, RestoreOutcome, RestoreSource, backup_path, list_backups,
-    restore_backup, restore_backup_waiting, save_backup_copy,
+    restore_backup, restore_backup_waiting, save_backup_copy, verify_backup,
 };
 pub use status::StorageStatus;
 
@@ -57,6 +58,9 @@ pub struct Store {
     database_path: PathBuf,
     _lock: Arc<DataDirLock>,
     clock: Arc<dyn Clock>,
+    /// Hay un supervisor de ejecuciones activo sobre este almacén (ver
+    /// `features::runs::SupervisorToken`). Compartido por los clones.
+    supervisor: Arc<AtomicBool>,
 }
 
 impl Store {
@@ -88,6 +92,7 @@ impl Store {
             database_path,
             _lock: Arc::new(lock),
             clock: Arc::new(SystemClock),
+            supervisor: Arc::new(AtomicBool::new(false)),
         };
 
         let mut backup = None;
@@ -169,6 +174,16 @@ impl Store {
     /// Hora del reloj del almacén, en milisegundos Unix.
     pub fn now_ms(&self) -> i64 {
         self.clock.now_ms()
+    }
+
+    /// Marca del supervisor de ejecuciones de este almacén (y de sus clones).
+    pub(crate) fn supervisor_flag(&self) -> &Arc<AtomicBool> {
+        &self.supervisor
+    }
+
+    /// Directorio de datos (carpeta de la base).
+    pub(crate) fn data_dir(&self) -> Option<&Path> {
+        self.database_path.parent()
     }
 
     pub fn database_path(&self) -> &Path {
@@ -512,5 +527,126 @@ mod tests {
         .execute(store.reader())
         .await
         .unwrap();
+    }
+
+    /// La restauración retoca la copia **antes de migrarla**. Una copia en la 0011 (sin las
+    /// tablas de la 0012) con un intento en cola se restaura y, tras migrar, queda
+    /// `interrupted` con su evento.
+    #[tokio::test]
+    async fn restoring_a_schema_11_copy_interrupts_its_runs_before_migrating() {
+        use crate::features::projects::{CreateProjectInput, create_project};
+        use crate::features::stories::{CreateStoryInput, create_story};
+        use crate::features::team::{AgentFields, AvatarSpec, CreateAgentInput, create_agent};
+
+        let migrations = tempfile::tempdir().unwrap();
+        let real = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        for entry in std::fs::read_dir(real).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().into_string().unwrap();
+            if name.as_str() < "0012" {
+                std::fs::copy(entry.path(), migrations.path().join(&name)).unwrap();
+            }
+        }
+        let v11 = Migrator::new(migrations.path()).await.unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let store = Store::open_with(data.path(), &v11).await.unwrap();
+        assert_eq!(store.schema_version().await.unwrap(), 11);
+        let project = create_project(
+            &store,
+            "ui",
+            &CreateProjectInput {
+                request_id: "p".into(),
+                name: "P".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let agent = create_agent(
+            &store,
+            "ui",
+            &CreateAgentInput {
+                request_id: "a".into(),
+                fields: AgentFields {
+                    name: "Bot".into(),
+                    role: String::new(),
+                    provider: String::new(),
+                    model: String::new(),
+                    capabilities: vec![],
+                    avatar: AvatarSpec::DEFAULT_AGENT,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let story = create_story(
+            &store,
+            "ui",
+            &CreateStoryInput {
+                request_id: "s".into(),
+                project_id: project.id.clone(),
+                title: "S".into(),
+                column_id: None,
+                priority: None,
+            },
+        )
+        .await
+        .unwrap();
+        // Intento en cola tal como lo dejaba la versión de la 0011 (sin sus funciones actuales,
+        // que ya leen columnas de la 0012).
+        let (project_id, story_id, agent_id) = (project.id.clone(), story.id.clone(), agent.id);
+        store
+            .write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "INSERT INTO runs (id, project_id, story_id, number, agent_id, state, \
+                         snapshot, snapshot_sha256, last_sequence, created_at_ms, updated_at_ms) \
+                         VALUES ('run-11', ?, ?, 1, ?, 'queued', '{}', ?, 1, 1, 1)",
+                    )
+                    .bind(&project_id)
+                    .bind(&story_id)
+                    .bind(&agent_id)
+                    .bind("0".repeat(64))
+                    .execute(&mut *conn)
+                    .await?;
+                    sqlx::query(
+                        "INSERT INTO run_events (run_id, sequence, kind, payload, at_ms) VALUES \
+                         ('run-11', 1, 'state_changed', \
+                          '{\"kind\":\"state_changed\",\"to\":\"queued\",\"reason\":null}', 1)",
+                    )
+                    .execute(&mut *conn)
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let backup = store.create_backup(BackupKind::Manual).await.unwrap();
+        assert_eq!(backup.schema_version, Some(11));
+        store.close().await;
+        drop(store);
+
+        let outcome = restore_backup(data.path(), &backup_path(data.path(), &backup.id).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(outcome.restored_schema_version, 11);
+        let store = Store::open(data.path()).await.unwrap();
+        assert_eq!(
+            store.schema_version().await.unwrap(),
+            latest_schema_version()
+        );
+        let (state, reason, last): (String, Option<String>, i64) =
+            sqlx::query_as("SELECT state, end_reason, last_sequence FROM runs WHERE id = 'run-11'")
+                .fetch_one(store.reader())
+                .await
+                .unwrap();
+        assert_eq!(state, "interrupted");
+        assert!(reason.unwrap().contains("restauró una copia"));
+        assert_eq!(last, 2);
+        let events: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM run_events WHERE run_id = 'run-11'")
+                .fetch_one(store.reader())
+                .await
+                .unwrap();
+        assert_eq!(events, 2);
     }
 }

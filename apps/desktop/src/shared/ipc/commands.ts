@@ -17,6 +17,14 @@ import type { CancelRunInput } from "../../contracts/generated/CancelRunInput";
 import type { CreateRunInput } from "../../contracts/generated/CreateRunInput";
 import type { RunDetail } from "../../contracts/generated/RunDetail";
 import type { RunSummary } from "../../contracts/generated/RunSummary";
+import type { RemoveRunWorktreeInput } from "../../contracts/generated/RemoveRunWorktreeInput";
+import type { RunChange } from "../../contracts/generated/RunChange";
+import type { RunOutputView } from "../../contracts/generated/RunOutputView";
+import type { RunSettings } from "../../contracts/generated/RunSettings";
+import type { RunWorktree } from "../../contracts/generated/RunWorktree";
+import type { StartRunInput } from "../../contracts/generated/StartRunInput";
+import type { UpdateRunSettingsInput } from "../../contracts/generated/UpdateRunSettingsInput";
+import type { WorktreeChanges } from "../../contracts/generated/WorktreeChanges";
 import type { BackupInfo } from "../../contracts/generated/BackupInfo";
 import type { RestoreOutcome } from "../../contracts/generated/RestoreOutcome";
 import type { RestoreSource } from "../../contracts/generated/RestoreSource";
@@ -346,6 +354,86 @@ export function listStoryRuns(
 /** Detalle de un intento: resumen, instantánea congelada y últimos eventos. */
 export function getRun(projectId: string, runId: string): Promise<RunDetail> {
   return call("get_run", { projectId, runId });
+}
+
+// --- ejecución supervisada (HU-018) ---
+
+/**
+ * Pide iniciar un intento en cola con el proceso de prueba (sin IA). Sigue `queued` hasta que
+ * el supervisor tenga hueco. Mantén el mismo `requestId` al reintentar el mismo envío.
+ */
+export function startRun(input: StartRunInput): Promise<RunSummary> {
+  return call("start_run", { input });
+}
+
+/**
+ * Últimas líneas (≤ 500) de la salida de un intento. El texto es dato no confiable: muéstralo
+ * como texto plano, nunca como Markdown ni HTML.
+ */
+export function getRunOutput(
+  projectId: string,
+  runId: string,
+): Promise<RunOutputView> {
+  return call("get_run_output", { projectId, runId });
+}
+
+/** Cambios del worktree de un intento terminado (`missing` si la carpeta ya no existe). */
+export function getWorktreeChanges(
+  projectId: string,
+  runId: string,
+): Promise<WorktreeChanges> {
+  return call("get_worktree_changes", { projectId, runId });
+}
+
+/**
+ * Elimina el worktree de un intento terminado. Sin `force`, uno con cambios devuelve
+ * `validation` (campo `force`); `force: true` es «Descartar cambios y eliminar». La rama se
+ * conserva siempre.
+ */
+export function removeRunWorktree(
+  input: RemoveRunWorktreeInput,
+): Promise<RunWorktree> {
+  return call("remove_run_worktree", { input });
+}
+
+export function getRunSettings(): Promise<RunSettings> {
+  return call("get_run_settings");
+}
+
+/** Revisión obsoleta → `conflict` con la configuración vigente. */
+export function updateRunSettings(
+  input: UpdateRunSettingsInput,
+): Promise<RunSettings> {
+  return call("update_run_settings", { input });
+}
+
+/** Nombre del evento emitido por el host (`RUN_CHANGE_EVENT` en run_supervisor.rs). */
+export const RUN_CHANGE_EVENT = "run-change";
+
+/** Comprueba la forma del aviso antes de usarlo: un evento mal formado se ignora. */
+export function isRunChange(value: unknown): value is RunChange {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    Array.isArray(candidate.runIds) &&
+    candidate.runIds.every((id) => typeof id === "string") &&
+    Array.isArray(candidate.storyIds) &&
+    candidate.storyIds.every((id) => typeof id === "string")
+  );
+}
+
+/**
+ * Escucha los avisos del supervisor (despachar, iniciar, terminar, interrumpir…). Solo sirven
+ * para recargar: el núcleo sigue siendo la autoridad. Devuelve la función para dejar de
+ * escuchar.
+ */
+export async function onRunChange(
+  handler: (change: RunChange) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => undefined;
+  return listen<unknown>(RUN_CHANGE_EVENT, (event) => {
+    if (isRunChange(event.payload)) handler(event.payload);
+  });
 }
 
 /** Nombre del evento emitido por el host (`CONFIRM_CLOSE_EVENT` en exit_guard.rs). */

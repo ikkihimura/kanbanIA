@@ -155,6 +155,14 @@ pub struct RunSummary {
     pub last_sequence: i64,
     /// SHA-256 de la instantánea guardada (permite comprobar que no cambió).
     pub snapshot_sha256: String,
+    /// Hora de la petición de inicio pendiente (HU-018): el intento espera hueco en la cola.
+    /// `null` si no hay petición o ya se despachó o anuló.
+    #[serde(default)]
+    pub start_requested_at: Option<String>,
+    /// Hora de la petición de cancelación (HU-018): el supervisor aún no ha parado el proceso.
+    /// Se conserva cuando el intento termina.
+    #[serde(default)]
+    pub cancel_requested_at: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -176,6 +184,8 @@ struct RunRow {
     cost_usd_micros: Option<i64>,
     last_sequence: i64,
     snapshot_sha256: String,
+    start_requested_at: Option<String>,
+    cancel_requested_at: Option<String>,
 }
 
 impl TryFrom<RunRow> for RunSummary {
@@ -202,6 +212,8 @@ impl TryFrom<RunRow> for RunSummary {
             },
             last_sequence: row.last_sequence,
             snapshot_sha256: row.snapshot_sha256,
+            start_requested_at: row.start_requested_at,
+            cancel_requested_at: row.cancel_requested_at,
         })
     }
 }
@@ -218,7 +230,12 @@ macro_rules! select_run {
             " AS updated_at, ",
             iso_from_ms!("r.ended_at_ms"),
             " AS ended_at, r.end_reason, r.input_tokens, r.output_tokens, r.cost_usd_micros, \
-             r.last_sequence, r.snapshot_sha256 \
+             r.last_sequence, r.snapshot_sha256, (SELECT ",
+            iso_from_ms!("q.requested_at_ms"),
+            " FROM run_start_requests q WHERE q.run_id = r.id AND q.voided_at_ms IS NULL \
+             AND q.dispatched_at_ms IS NULL AND r.state = 'queued') AS start_requested_at, ",
+            iso_from_ms!("r.cancel_requested_at_ms"),
+            " AS cancel_requested_at \
              FROM runs r JOIN agents a ON a.id = r.agent_id ",
             $tail
         )
@@ -276,6 +293,47 @@ pub(super) async fn active_run_number(
     .bind(story_id)
     .fetch_optional(&mut *conn)
     .await?)
+}
+
+/// Intento por id, sin acotar al proyecto. Solo para el supervisor y el núcleo: las entradas de
+/// personas usan `require_run` con su proyecto.
+pub(super) async fn require_run_any(
+    conn: &mut SqliteConnection,
+    run_id: &str,
+) -> Result<RunSummary, CoreError> {
+    let row: Option<RunRow> = sqlx::query_as(select_run!("WHERE r.id = ?"))
+        .bind(run_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+    row.map(RunSummary::try_from)
+        .transpose()?
+        .ok_or(CoreError::NotFound { entity: ENTITY })
+}
+
+/// Cambia de estado con su evento (siguiente secuencia), en la transacción de quien llama.
+pub(super) async fn transition(
+    conn: &mut SqliteConnection,
+    run: &RunSummary,
+    to: RunState,
+    reason: Option<&str>,
+    now: i64,
+) -> Result<(), CoreError> {
+    let event = RunEvent::StateChanged {
+        to,
+        reason: reason.map(short_reason),
+    };
+    append_event(conn, run, &event, now).await
+}
+
+/// Motivo de como mucho `MAX_REASON_CHARS` caracteres (lo exige la base).
+pub(super) fn short_reason(reason: &str) -> String {
+    const MAX_REASON_CHARS: usize = 200;
+    if reason.chars().count() <= MAX_REASON_CHARS {
+        return reason.to_owned();
+    }
+    let mut cut: String = reason.chars().take(MAX_REASON_CHARS - 1).collect();
+    cut.push('…');
+    cut
 }
 
 pub(super) fn validate_id(field: &'static str, id: &str) -> Result<(), CoreError> {

@@ -70,7 +70,9 @@ describe("BackupPanel", () => {
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/Registros de ejecuciones de agentes/),
+      screen.getByText(
+        /La salida de los procesos y los worktrees de los intentos/,
+      ),
     ).toBeInTheDocument();
   });
 
@@ -118,6 +120,10 @@ describe("BackupPanel", () => {
     const confirm = screen.getByRole("alertdialog", {
       name: /Se reemplazarán todos los datos actuales/,
     });
+    // Avisa de que restaurar detiene los intentos en marcha.
+    expect(confirm).toHaveTextContent(
+      "Los procesos de los intentos en marcha se detienen, y en los datos restaurados todo intento activo (también los que estaban en cola) queda como «Interrumpido».",
+    );
     // El foco entra en la confirmación (en la opción segura) y vuelve al cerrarla.
     const cancel = within(confirm).getByRole("button", { name: "Cancelar" });
     expect(cancel).toHaveFocus();

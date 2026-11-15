@@ -5,12 +5,16 @@ mod commands;
 mod exit_guard;
 #[cfg(target_os = "macos")]
 mod menu;
+mod run_supervisor;
 mod service;
 mod storage;
 
 use std::path::PathBuf;
 
 pub use exit_guard::{CONFIRM_CLOSE_EVENT, ExitGuard};
+pub use run_supervisor::{
+    RUN_CHANGE_EVENT, RunSupervisorSlot, TestProcessProgram, start_run_supervisor,
+};
 pub use service::{ServiceSlot, start_local_service};
 pub use storage::StorageSlot;
 use tauri::{App, AppHandle, Builder, Emitter, Manager, RunEvent, Runtime, WindowEvent};
@@ -20,6 +24,7 @@ pub fn register_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
     builder
         .manage(ExitGuard::default())
         .manage(ServiceSlot::default())
+        .manage(RunSupervisorSlot::default())
         .invoke_handler(tauri::generate_handler![
             commands::exit::set_unsaved_changes,
             commands::exit::discard_and_close,
@@ -86,15 +91,37 @@ pub fn register_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
             commands::runs::cancel_run,
             commands::runs::list_story_runs,
             commands::runs::get_run,
+            commands::runs::start_run,
+            commands::runs::get_run_output,
+            commands::runs::get_worktree_changes,
+            commands::runs::remove_run_worktree,
+            commands::runs::get_run_settings,
+            commands::runs::update_run_settings,
         ])
 }
 
 fn resolve_data_dir<R: Runtime>(app: &App<R>) -> tauri::Result<PathBuf> {
     match std::env::var_os(storage::DATA_DIR_ENV) {
-        Some(dir) => Ok(PathBuf::from(dir)),
+        Some(dir) => {
+            // Las rutas de worktrees y salida de intentos se derivan de aquí: una relativa
+            // dependería del directorio actual. Se rechaza en vez de adivinar.
+            let dir = PathBuf::from(dir);
+            if dir.is_absolute() {
+                Ok(dir)
+            } else {
+                Err(tauri::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    DATA_DIR_NOT_ABSOLUTE,
+                )))
+            }
+        }
         None => app.path().app_data_dir(),
     }
 }
+
+/// Mensaje si `KANBANIA_DATA_DIR` no es absoluta (la app no arranca).
+const DATA_DIR_NOT_ABSOLUTE: &str =
+    "KANBANIA_DATA_DIR debe ser una ruta absoluta (p. ej. /Users/tu-usuario/kanbania-pruebas).";
 
 /// Cancela el cierre y pide confirmación a la UI si hay cambios sin guardar.
 fn should_block_and_ask<R: Runtime>(handle: &AppHandle<R>) -> bool {
@@ -127,6 +154,9 @@ pub fn run() {
             app.manage(slot);
             // Solo si esta instancia posee el almacén (una segunda instancia no lo arranca).
             tauri::async_runtime::block_on(start_local_service(app.handle()));
+            // Igual: solo con el almacén propio. Antes del primer despacho interrumpe lo que
+            // quedó activo y anula las peticiones de inicio pendientes.
+            tauri::async_runtime::block_on(start_run_supervisor(app.handle()));
             Ok(())
         })
         .build(tauri::generate_context!());
@@ -158,6 +188,10 @@ pub fn run() {
             }
         }
         RunEvent::Exit => {
+            // Primero los procesos (y marcar `interrupted`), con el almacén aún abierto.
+            if let Some(runs) = handle.try_state::<RunSupervisorSlot>() {
+                tauri::async_runtime::block_on(runs.stop());
+            }
             if let Some(service) = handle.try_state::<ServiceSlot>() {
                 tauri::async_runtime::block_on(service.stop());
             }

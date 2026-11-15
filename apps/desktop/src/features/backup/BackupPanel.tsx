@@ -22,7 +22,7 @@ const KIND_LABEL: Record<BackupKind, string> = {
 /** Lo que una copia no incluye (CA-3): resumen de los `excludes` del manifiesto del núcleo. */
 const NOT_INCLUDED = [
   "El contenido de los repositorios vinculados (solo sus rutas).",
-  "Registros de ejecuciones de agentes: llegarán más adelante y no forman parte de estas copias.",
+  "La salida de los procesos y los worktrees de los intentos (carpetas del directorio de datos). Los intentos sí se incluyen, con su estado.",
   "La exportación Markdown no es una copia de seguridad: solo lleva la planificación.",
 ];
 
@@ -206,7 +206,9 @@ export function BackupPanel({ canCreate, onRestoring, onFinished }: Props) {
             ¿Restaurar {confirm.label}? Se reemplazarán <strong>todos</strong>{" "}
             los datos actuales. Antes se guarda automáticamente una copia del
             estado actual para poder deshacerlo. Los cambios sin guardar de
-            cualquier editor se perderán.
+            cualquier editor se perderán. Los procesos de los intentos en marcha
+            se detienen, y en los datos restaurados todo intento activo (también
+            los que estaban en cola) queda como «Interrumpido».
           </p>
           {restorer.error && (
             <p className="field__error" role="alert">

@@ -9,7 +9,7 @@ use kanbania_core::features::projects::{CreateProjectInput, create_project};
 use kanbania_core::features::stories::{CreateStoryInput, create_story};
 use kanbania_core::platform::storage::{
     BackupKind, DATABASE_FILE, MAX_KEPT, Store, backup_path, list_backups, restore_backup,
-    restore_backup_waiting, save_backup_copy,
+    restore_backup_waiting, save_backup_copy, verify_backup,
 };
 
 fn rid() -> String {
@@ -531,4 +531,49 @@ async fn restore_waits_for_an_in_flight_handle_to_be_released() {
         ["A"],
         "ninguna escritura llegó a la base restaurada"
     );
+}
+
+/// Verificar una copia no necesita cerrar el almacén ni lo toca: así el host puede rechazar una
+/// carpeta no válida antes de detener nada (procesos de intentos incluidos).
+#[tokio::test]
+async fn a_copy_is_verified_with_the_store_open_and_without_changes() {
+    let data = tempfile::tempdir().unwrap();
+    let store = Store::open(data.path()).await.unwrap();
+    let p = project(&store).await;
+    add_story(&store, &p, "sigue").await;
+    let backup = store.create_backup(BackupKind::Manual).await.unwrap();
+    let path = backup_path(data.path(), &backup.id).unwrap();
+    let version = verify_backup(data.path(), &path).await.unwrap();
+    assert_eq!(Some(version), backup.schema_version);
+
+    // Carpeta sin manifiesto y copia con bytes alterados: validación, con el almacén abierto.
+    let empty = tempfile::tempdir().unwrap();
+    let err = verify_backup(data.path(), empty.path()).await.unwrap_err();
+    assert_eq!(err.code(), ErrorCode::Validation, "{err}");
+    let flipped = tempfile::tempdir().unwrap();
+    for f in ["manifest.json", DATABASE_FILE] {
+        std::fs::copy(path.join(f), flipped.path().join(f)).unwrap();
+    }
+    let mut bytes = std::fs::read(flipped.path().join(DATABASE_FILE)).unwrap();
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 0xff;
+    std::fs::write(flipped.path().join(DATABASE_FILE), &bytes).unwrap();
+    let err = verify_backup(data.path(), flipped.path())
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("dañada"), "{err}");
+
+    // El almacén sigue abierto y con sus datos; no quedan carpetas de trabajo.
+    assert_eq!(titles(&store).await, ["sigue"]);
+    let leftovers = std::fs::read_dir(data.path().join("backups"))
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".work-verify")
+        })
+        .count();
+    assert_eq!(leftovers, 0);
 }

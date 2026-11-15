@@ -798,6 +798,8 @@ describe("StoryEditor · intentos (HU-017)", () => {
     usage: { inputTokens: null, outputTokens: null, costUsdMicros: null },
     lastSequence: 1,
     snapshotSha256: "ab".repeat(32),
+    startRequestedAt: null,
+    cancelRequestedAt: null,
   };
   const frozen: RunDetail = {
     run: queued,
@@ -833,6 +835,9 @@ describe("StoryEditor · intentos (HU-017)", () => {
     snapshotIntact: true,
     events: [],
     eventsTruncated: false,
+    startRequest: null,
+    cancelReason: null,
+    worktree: null,
   };
 
   it("el detalle muestra la instantánea, no la historia actual", async () => {

@@ -1933,6 +1933,7 @@ version = "0.1.0"
 dependencies = [
  "kanbania-core",
  "kanbania-local-service",
+ "kanbania-runner",
  "serde_json",
  "sqlx",
  "tauri",
@@ -1972,6 +1973,22 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "kanbania-runner"
+version = "0.1.0"
+dependencies = [
+ "dunce",
+ "kanbania-core",
+ "nix",
+ "process-wrap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "windows",
 ]
 
 [[package]]

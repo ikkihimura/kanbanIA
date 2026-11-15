@@ -17,7 +17,7 @@
     "typecheck": "npm run typecheck -w apps/desktop",
     "format": "prettier --write . && cargo fmt --all",
     "format:check": "prettier --check . && cargo fmt --all --check",
-    "lint:rust": "cargo clippy --workspace --all-targets --locked -- -D warnings",
+    "lint:rust": "cargo clippy --workspace --all-targets --locked -- -D warnings && cargo check -p kanbania-runner --no-default-features --locked",
     "test:rust": "cargo test --workspace --locked && npm run check:mcp-deps",
     "check:mcp-deps": "node scripts/check-mcp-deps.mjs",
     "check": "npm run contracts && npm run format:check && npm run lint && npm run build:web && npm run test:web && npm run lint:rust && npm run test:rust",

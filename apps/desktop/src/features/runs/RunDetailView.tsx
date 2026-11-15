@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useId, useRef } from "react";
+import { useCallback, useEffect, useId, useRef, type RefObject } from "react";
 import type { RunDetail } from "../../contracts/generated/RunDetail";
+import type { RunSummary } from "../../contracts/generated/RunSummary";
 import type { SnapshotStoryRef } from "../../contracts/generated/SnapshotStoryRef";
 import { getRun } from "../../shared/ipc/commands";
 import { useRefreshSignal } from "../../shared/ipc/useAgentChanges";
@@ -9,23 +10,41 @@ import { MarkdownPreview } from "../../shared/ui/MarkdownPreview";
 import { CATEGORY_LABEL } from "../columns/categories";
 import { PRIORITY_LABEL } from "../stories/priorities";
 import { CAPABILITY_LABEL } from "../team/TeamView";
+import { RunOutputPanel } from "./RunOutputPanel";
 import {
   NOT_AVAILABLE,
-  RUN_STATE_LABEL,
+  SCENARIO_LABEL,
+  TEST_PROCESS_LABEL,
+  canStartRun,
   describeRunEvent,
   formatCost,
   formatTokens,
+  isActiveRun,
+  isCancelPending,
   runStateBadgeClass,
+  runStatusLabel,
 } from "./runFormat";
+import { StartRunForm } from "./StartRunForm";
+import { WorktreeSection } from "./WorktreeSection";
+
+/** Dónde poner el foco al cargar: el encabezado, el formulario de inicio o ninguno. */
+export type DetailFocus = "title" | "start" | null;
 
 interface Props {
   projectId: string;
   runId: string;
-  /** Cambia tras crear o cancelar, o al recargar la historia: vuelve a consultar. */
+  /**
+   * Cambia tras crear, iniciar o cancelar, al recargar la historia o con un aviso
+   * `run-change` del intento: vuelve a consultar (detalle y salida).
+   */
   refreshSignal: number;
-  /** Mueve el foco al encabezado al cargar (se abrió desde la lista). */
-  focusOnLoad: boolean;
+  /** Foco al cargar (se abrió desde la lista o desde «Iniciar…»). */
+  focusOnLoad: DetailFocus;
   onClose: () => void;
+  /** Se pidió iniciar el intento: el panel recarga la lista y lo anuncia. */
+  onStarted: (run: RunSummary) => void;
+  /** El intento cambió desde aquí (o el núcleo dijo que ya había cambiado). */
+  onChanged: () => void;
 }
 
 /**
@@ -38,6 +57,8 @@ export function RunDetailView({
   refreshSignal,
   focusOnLoad,
   onClose,
+  onStarted,
+  onChanged,
 }: Props) {
   const id = useId();
   const load = useCallback(() => getRun(projectId, runId), [projectId, runId]);
@@ -48,11 +69,16 @@ export function RunDetailView({
   useRefreshSignal(refreshSignal, reload);
 
   const titleRef = useRef<HTMLHeadingElement>(null);
-  const focused = useRef(!focusOnLoad);
+  const scenarioRef = useRef<HTMLInputElement>(null);
+  const focused = useRef(focusOnLoad === null);
+  const focusTarget = useRef(focusOnLoad);
   useEffect(() => {
     if (state.status !== "loading" && !focused.current) {
       focused.current = true;
-      titleRef.current?.focus();
+      // Sin formulario de inicio (ya no está en cola), el foco va al encabezado.
+      const target =
+        focusTarget.current === "start" ? scenarioRef.current : null;
+      (target ?? titleRef.current)?.focus();
     }
   }, [state.status]);
 
@@ -61,7 +87,7 @@ export function RunDetailView({
       className="run-detail"
       aria-labelledby={`${id}-title`}
       onKeyDown={(event) => {
-        if (event.key === "Escape") onClose();
+        if (event.key === "Escape" && !event.defaultPrevented) onClose();
       }}
     >
       <div className="repo__summary">
@@ -105,7 +131,24 @@ export function RunDetailView({
           </button>
         </div>
       )}
-      {state.status === "ready" && <DetailBody detail={state.data} />}
+      {state.status === "ready" && (
+        <DetailBody
+          detail={state.data}
+          projectId={projectId}
+          refreshSignal={refreshSignal}
+          scenarioRef={scenarioRef}
+          onStarted={(started) => {
+            // El formulario desaparece: el foco va al encabezado del detalle.
+            titleRef.current?.focus();
+            reload();
+            onStarted(started);
+          }}
+          onChanged={() => {
+            reload();
+            onChanged();
+          }}
+        />
+      )}
     </section>
   );
 }
@@ -114,16 +157,40 @@ function storyRef(ref: SnapshotStoryRef): string {
   return `#${String(ref.number)} ${ref.title} (${ref.accepted ? "aceptada" : "sin aceptar"})`;
 }
 
-function DetailBody({ detail }: { detail: RunDetail }) {
+interface BodyProps {
+  detail: RunDetail;
+  projectId: string;
+  refreshSignal: number;
+  scenarioRef: RefObject<HTMLInputElement | null>;
+  onStarted: (run: RunSummary) => void;
+  onChanged: () => void;
+}
+
+function DetailBody({
+  detail,
+  projectId,
+  refreshSignal,
+  scenarioRef,
+  onStarted,
+  onChanged,
+}: BodyProps) {
   const { run, snapshot } = detail;
   const { story, agent } = snapshot;
+  const request = detail.startRequest;
+  const requestRepo =
+    request && snapshot.repositories.find((r) => r.id === request.repositoryId);
+  const live =
+    run.state === "preparing" ||
+    run.state === "running" ||
+    run.state === "waiting_approval";
   return (
     <div className="run-detail__body">
       <p>
         <span className={runStateBadgeClass(run.state)}>
-          {RUN_STATE_LABEL[run.state]}
+          {runStatusLabel(run)}
         </span>{" "}
-        Agente A-{run.agentNumber} {run.agentName}.
+        Agente asignado al intento: A-{run.agentNumber} {run.agentName} (no
+        participa: lo ejecuta el proceso de prueba).
         {run.endedAt !== null &&
           ` Terminado el ${formatDateTime(run.endedAt)}.`}
         {run.endReason !== null && ` Motivo: ${run.endReason}`}
@@ -133,6 +200,105 @@ function DetailBody({ detail }: { detail: RunDetail }) {
         <p className="run-detail__warning" role="alert">
           La instantánea no coincide con su huella: no es fiable.
         </p>
+      )}
+
+      <section className="run-execution" aria-label="Ejecución">
+        <h4 className="relations__title">Ejecución</h4>
+        <dl className="facts facts--compact">
+          <dt>Ejecutor</dt>
+          <dd>
+            <span className="badge">{TEST_PROCESS_LABEL}</span>
+          </dd>
+          {request && (
+            <>
+              <dt>Escenario</dt>
+              <dd>{SCENARIO_LABEL[request.scenario]}</dd>
+              <dt>Repositorio</dt>
+              <dd className="repo__path">
+                {requestRepo ? requestRepo.path : NOT_AVAILABLE}
+              </dd>
+              <dt>Inicio pedido</dt>
+              <dd>
+                <time dateTime={request.requestedAt}>
+                  {formatDateTime(request.requestedAt)}
+                </time>
+              </dd>
+              {request.dispatchedAt !== null && (
+                <>
+                  <dt>Salió de la cola</dt>
+                  <dd>
+                    <time dateTime={request.dispatchedAt}>
+                      {formatDateTime(request.dispatchedAt)}
+                    </time>
+                  </dd>
+                </>
+              )}
+            </>
+          )}
+        </dl>
+        <p className="field__hint">
+          Ningún agente ni IA trabaja en este intento: el ejecutor es un proceso
+          de prueba incluido en la app.
+        </p>
+
+        {run.state === "queued" && run.startRequestedAt !== null && (
+          <p className="run-detail__info" role="status">
+            En cola · esperando turno: arrancará cuando haya hueco según el
+            límite de ejecuciones a la vez (Sistema → Ejecuciones).
+          </p>
+        )}
+        {request?.voidedAt != null && run.state === "queued" && (
+          <p className="run-detail__warning">
+            La petición de inicio se anuló al reiniciar la ejecución (al abrir
+            la app, tras restaurar una copia o al reintentar el almacenamiento;{" "}
+            <time dateTime={request.voidedAt}>
+              {formatDateTime(request.voidedAt)}
+            </time>
+            ): nada arranca solo. Pulsa «Iniciar» de nuevo si quieres
+            ejecutarlo.
+          </p>
+        )}
+        {isCancelPending(run) && run.cancelRequestedAt !== null && (
+          <p className="run-detail__warning" role="status">
+            Cancelación solicitada el {formatDateTime(run.cancelRequestedAt)}
+            {detail.cancelReason !== null && ` (${detail.cancelReason})`}: se
+            está deteniendo el proceso y sus procesos hijos…
+          </p>
+        )}
+        {run.state === "completed" && (
+          <p className="run-detail__info">
+            El proceso terminó bien. No cambia la historia ni su columna:
+            aceptarla sigue siendo una decisión humana.
+          </p>
+        )}
+        {canStartRun(run) && (
+          <StartRunForm
+            projectId={projectId}
+            runId={run.id}
+            runNumber={run.number}
+            repositories={snapshot.repositories}
+            scenarioRef={scenarioRef}
+            onStarted={onStarted}
+            onStale={onChanged}
+          />
+        )}
+      </section>
+
+      <WorktreeSection
+        projectId={projectId}
+        runId={run.id}
+        worktree={detail.worktree}
+        ended={!isActiveRun(run.state)}
+        onChanged={onChanged}
+      />
+
+      {run.state !== "queued" && (
+        <RunOutputPanel
+          projectId={projectId}
+          runId={run.id}
+          live={live}
+          refreshSignal={refreshSignal}
+        />
       )}
 
       <div className="run-detail__snapshot">

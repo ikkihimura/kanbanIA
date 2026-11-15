@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/local-service", "crates/mcp", "apps/desktop/src-tauri"]
+members = ["crates/core", "crates/local-service", "crates/mcp", "crates/runner", "apps/desktop/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
@@ -18,6 +18,9 @@ hyper-util = { version = "0.1.21", features = ["tokio"] }
 toml = "1.2.1"
 kanbania-core = { path = "crates/core" }
 kanbania-local-service = { path = "crates/local-service" }
+kanbania-runner = { path = "crates/runner" }
+nix = { version = "0.31.3", default-features = false, features = ["signal"] }
+process-wrap = { version = "10.0.1", default-features = false, features = ["creation-flags", "job-object", "kill-on-drop", "process-group", "tokio1"] }
 rmcp = { version = "3.9.0", default-features = false }
 same-file = "1.0.6"
 schemars = "1.2.3"
@@ -32,6 +35,7 @@ tauri = "2.12.5"
 tauri-build = "2.7.4"
 tauri-plugin-dialog = "2.8.4"
 ts-rs = { version = "12.0.1", features = ["serde-json-impl"] }
+windows = { version = "0.62.2", features = ["Win32_System_Threading"] }
 uuid = { version = "1.29.2", features = ["v7"] }
 
 [workspace.lints.rust]

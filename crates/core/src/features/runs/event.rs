@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::run::{RunState, RunSummary, RunUsage, append_event, require_run, validate_id};
+use super::supervisor::{SupervisorToken, ensure_token};
 use crate::error::CoreError;
 use crate::platform::storage::Store;
 use crate::platform::text::{contains_secret_like, has_invisible_formatting};
@@ -127,17 +128,31 @@ pub struct RecordedRunEvent {
 ///   devuelve el estado vigente (`applied = false`);
 /// - una secuencia ya aplicada con otro contenido → `conflict` con el intento vigente (p. ej.
 ///   una persona canceló mientras tanto y ocupó esa secuencia);
-/// - un hueco (`sequence > lastSequence + 1`) o una secuencia < 1 → error de validación.
+/// - un hueco (`sequence > lastSequence + 1`) o una secuencia < 1 → error de validación;
+/// - un `StateChanged` → `validation` (los cambios de estado los registra el núcleo).
 ///
-/// API interna del núcleo para la fuente de eventos de ejecución (supervisor, HU-018). No
-/// tiene comando Tauri ni ruta del servicio local o MCP: un agente nunca la invoca.
+/// API del núcleo para la fuente de eventos de ejecución: exige el [`SupervisorToken`] del
+/// almacén (HU-018; token de otro almacén → `forbidden`). No tiene comando Tauri ni ruta del
+/// servicio local o MCP: un agente nunca la invoca. Para despachar, terminar o cancelar,
+/// el supervisor usa las funciones de `supervisor` (`begin_dispatch`, `finish_run`…), que
+/// aplican además las reglas de HU-018; esta queda para eventos de la fuente (uso, HU-019).
 pub async fn record_run_event(
     store: &Store,
+    token: &SupervisorToken,
     input: &RecordRunEventInput,
 ) -> Result<RecordedRunEvent, CoreError> {
+    ensure_token(store, token)?;
     validate_id("runId", &input.run_id)?;
     if input.sequence < 1 {
         return Err(invalid("sequence", "La secuencia empieza en 1.".into()));
+    }
+    // Los cambios de estado solo los aplican las funciones del núcleo (crear, cancelar,
+    // `begin_dispatch`, `finish_run`…), con sus reglas: la fuente externa solo informa uso.
+    if matches!(input.event, RunEvent::StateChanged { .. }) {
+        return Err(invalid(
+            "event",
+            "Los cambios de estado los registra el núcleo; aquí solo se admite uso.".into(),
+        ));
     }
     let event = input.event.normalized()?;
     let payload = event.to_payload()?;
