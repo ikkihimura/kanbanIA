@@ -19,19 +19,25 @@ use kanbania_core::features::projects::{CreateProjectInput, Project, create_proj
 use kanbania_core::features::relations::{SetStoryAgentInput, set_story_agent};
 use kanbania_core::features::repositories::{LinkRepositoryInput, link_repository};
 use kanbania_core::features::runs::{
-    AcpSessionInfo, CancelRunInput, CreateRunInput, RunDetail, RunEvent, RunExecutor,
+    APPROVAL_TTL_MS, AcpSessionInfo, ApprovalDecision, ApprovalState, CancelRunInput,
+    CreateRunInput, DecideApprovalInput, RunApproval, RunDetail, RunEvent, RunExecutor,
     RunOutputKind, RunOutputLine, RunOutputStream, RunState, RunSummary, StartRunInput,
-    SupervisorToken, UpdateRunSettingsInput, cancel_run, create_run, get_run, get_run_settings,
-    prompt_digest, start_run, update_run_settings,
+    SupervisorToken, UpdateRunSettingsInput, cancel_run, create_run, decide_approval, get_run,
+    get_run_settings, prompt_digest, start_run, update_run_settings,
 };
 use kanbania_core::features::stories::{CreateStoryInput, Priority, create_story};
 use kanbania_core::features::team::{
     Agent, AgentFields, AvatarSpec, Capability, CreateAgentInput, create_agent,
 };
 use kanbania_core::platform::actor::Actor;
+use kanbania_core::platform::clock::ManualClock;
 use kanbania_core::platform::storage::Store;
-use kanbania_runner::acp::{AcpLimits, ProbeError, probe_adapter};
-use kanbania_runner::supervisor::{Supervisor, SupervisorConfig, read_run_output};
+use kanbania_runner::acp::{AcpClient, AcpLimits, CLAUDE_CODE_PROFILE, ProbeError, probe_adapter};
+use kanbania_runner::output::{AgentKind, OutputLog, read_tail};
+use kanbania_runner::process::{ProcessSpec, RunningProcess, cancel_pair};
+use kanbania_runner::supervisor::{
+    ApprovalNotice, ApprovalNotifier, Supervisor, SupervisorConfig, read_run_output,
+};
 
 const UI: &str = "ui";
 /// Correo ficticio y textos ocultos que envía el agente falso (`src/bin/kanbania-fake-acp`):
@@ -104,6 +110,15 @@ struct Env {
 
 impl Env {
     async fn new() -> Self {
+        Self::build(None).await
+    }
+
+    /// Con reloj controlado (caducidad de los permisos).
+    async fn with_clock(clock: Arc<ManualClock>) -> Self {
+        Self::build(Some(clock)).await
+    }
+
+    async fn build(clock: Option<Arc<ManualClock>>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let base = dunce::canonicalize(dir.path()).unwrap();
         let data_dir = base.join("datos con espacios");
@@ -116,7 +131,10 @@ impl Env {
         git(&repo, &["commit", "-q", "-m", "inicial"]);
         let adapter = install_adapter(&base);
 
-        let store = Store::open(&data_dir).await.unwrap();
+        let mut store = Store::open(&data_dir).await.unwrap();
+        if let Some(clock) = clock {
+            store = store.with_clock(clock);
+        }
         let project = create_project(
             &store,
             UI,
@@ -178,6 +196,10 @@ impl Env {
     }
 
     async fn set_adapter(&self, path: Option<String>) {
+        self.set_settings(path, false).await;
+    }
+
+    async fn set_settings(&self, path: Option<String>, approval_notifications: bool) {
         let current = get_run_settings(&self.store).await.unwrap();
         update_run_settings(
             &self.store,
@@ -187,10 +209,54 @@ impl Env {
                 max_concurrency: current.max_concurrency,
                 timeout_minutes: current.timeout_minutes,
                 claude_acp_path: path,
+                approval_notifications,
             },
         )
         .await
         .unwrap();
+    }
+
+    /// Espera una petición de permiso pendiente del intento y la decide como persona.
+    async fn decide_pending(&self, run: &RunSummary, decision: ApprovalDecision) -> RunApproval {
+        let pending = self.wait_pending(run).await;
+        decide_approval(
+            &self.store,
+            &Actor::Human,
+            &DecideApprovalInput {
+                request_id: rid(),
+                project_id: self.project.id.clone(),
+                approval_id: pending.id,
+                decision,
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn wait_pending(&self, run: &RunSummary) -> RunApproval {
+        let started = Instant::now();
+        loop {
+            let detail = self.detail(run).await;
+            if let Some(pending) = detail
+                .approvals
+                .into_iter()
+                .find(|a| a.state == ApprovalState::Pending)
+            {
+                assert_eq!(detail.run.state, RunState::WaitingApproval);
+                return pending;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "no llegó ninguna petición de permiso ({:?})",
+                detail.run.state
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Worktree del intento.
+    async fn worktree(&self, run: &RunSummary) -> PathBuf {
+        PathBuf::from(self.detail(run).await.worktree.unwrap().path)
     }
 
     fn config(&self, args: &[&str]) -> SupervisorConfig {
@@ -540,22 +606,209 @@ async fn full_turn_is_normalized_and_session_recorded() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn permissions_are_always_rejected_once() {
+async fn a_rejection_by_a_person_is_answered_reject_once() {
     let env = Env::new().await;
-    let (run, detail) = env.scenario(&["permission"]).await;
+    let supervisor = env.supervisor(env.config(&["permission"])).await;
+    let run = env.queued(&supervisor).await;
+    let decided = env.decide_pending(&run, ApprovalDecision::Reject).await;
+    supervisor.wake();
+    let detail = env.wait_terminal(&run).await;
+    supervisor.shutdown().await;
     // El agente falso termina con error si no recibe `reject_once` (o `cancelled` sin esa
     // opción): llegar a `completed` prueba la respuesta.
     assert_eq!(detail.run.state, RunState::Completed, "{:?}", detail.run);
+    assert_eq!(decided.tool_title, "Editar README.md");
+    assert_eq!(decided.tool_kind.as_deref(), Some("edit"));
+    assert_eq!(detail.approvals.len(), 1, "{:?}", detail.approvals);
+    assert_eq!(detail.approvals[0].state, ApprovalState::Rejected);
+    assert!(detail.approvals[0].delivered);
     let permissions = env.agent_lines(&run, RunOutputKind::Permission);
-    assert_eq!(permissions.len(), 2, "{permissions:?}");
-    assert!(
-        permissions[0].starts_with("Permiso pedido para «Editar README.md»: rechazado una vez")
+    assert_eq!(
+        permissions,
+        [
+            "Permiso pedido para «Editar README.md»: espera la decisión de una persona en la app.",
+            "Permiso para «Editar README.md»: rechazado por una persona.",
+            "Permiso pedido para «Ejecutar  pruebas»: sin opción «rechazar una vez», respondido como cancelado.",
+        ]
     );
-    assert!(permissions[1].contains("sin opción «rechazar una vez», respondido como cancelado"));
     // El U+202E del título se sustituye: nunca llega a la salida.
-    assert!(permissions[1].starts_with("Permiso pedido para «Ejecutar  pruebas»"));
     let raw = env.raw_output(&run);
     assert!(!raw.contains('\u{202E}') && !raw.to_lowercase().contains("\\u202e"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_allow_once_is_applied_and_the_action_runs() {
+    let env = Env::new().await;
+    let log = env.base.join("registro del falso.txt");
+    let supervisor = env
+        .supervisor(env.config(&["approval", "--log", log.to_str().unwrap()]))
+        .await;
+    let run = env.queued(&supervisor).await;
+    let pending = env.wait_pending(&run).await;
+    // Alcance: el comando que informa el agente.
+    assert_eq!(pending.scope.as_deref(), Some("touch nota.txt"));
+    assert!(pending.can_allow);
+    let worktree = env.worktree(&run).await;
+    assert!(!worktree.join("nota.txt").exists());
+    env.decide_pending(&run, ApprovalDecision::AllowOnce).await;
+    supervisor.wake();
+    let detail = env.wait_terminal(&run).await;
+    supervisor.shutdown().await;
+    assert_eq!(detail.run.state, RunState::Completed, "{:?}", detail.run);
+    assert!(received(&log).contains(&"permiso: permitir-1".to_owned()));
+    assert!(worktree.join("nota.txt").exists());
+    assert_eq!(detail.approvals[0].state, ApprovalState::Allowed);
+    assert!(detail.approvals[0].delivered);
+    // Pasó por «esperando aprobación» y volvió a «en ejecución».
+    let states: Vec<RunState> = detail
+        .events
+        .iter()
+        .filter_map(|e| match &e.event {
+            RunEvent::StateChanged { to, .. } => Some(*to),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        states,
+        [
+            RunState::Queued,
+            RunState::Preparing,
+            RunState::Running,
+            RunState::WaitingApproval,
+            RunState::Running,
+            RunState::Completed
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_while_waiting_answers_cancelled_and_nothing_runs() {
+    let env = Env::new().await;
+    let log = env.base.join("registro del falso.txt");
+    let supervisor = env
+        .supervisor(env.config(&["approval", "--log", log.to_str().unwrap()]))
+        .await;
+    let run = env.queued(&supervisor).await;
+    let pending = env.wait_pending(&run).await;
+    let worktree = env.worktree(&run).await;
+    env.cancel(&run).await;
+    supervisor.wake();
+    let detail = env.wait_terminal(&run).await;
+    supervisor.shutdown().await;
+    assert_eq!(detail.run.state, RunState::Cancelled, "{:?}", detail.run);
+    assert!(received(&log).contains(&"permiso: cancelled".to_owned()));
+    assert!(!worktree.join("nota.txt").exists());
+    let approval = detail
+        .approvals
+        .iter()
+        .find(|a| a.id == pending.id)
+        .unwrap();
+    assert_eq!(approval.state, ApprovalState::Cancelled);
+}
+
+/// Carrera aprobar/cancelar: la persona permite y cancela antes de que el supervisor entregue
+/// la decisión. La aprobación no se aplica nunca.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_allow_followed_by_a_cancel_is_never_applied() {
+    let env = Env::new().await;
+    let log = env.base.join("registro del falso.txt");
+    let supervisor = env
+        .supervisor(env.config(&["approval", "--log", log.to_str().unwrap()]))
+        .await;
+    let run = env.queued(&supervisor).await;
+    env.wait_pending(&run).await;
+    let worktree = env.worktree(&run).await;
+    // Sin `wake` entre medias: la decisión aún no se ha entregado al cancelar.
+    env.decide_pending(&run, ApprovalDecision::AllowOnce).await;
+    env.cancel(&run).await;
+    supervisor.wake();
+    let detail = env.wait_terminal(&run).await;
+    supervisor.shutdown().await;
+    assert_eq!(detail.run.state, RunState::Cancelled, "{:?}", detail.run);
+    assert!(received(&log).contains(&"permiso: cancelled".to_owned()));
+    assert!(!worktree.join("nota.txt").exists());
+    assert_eq!(detail.approvals[0].state, ApprovalState::Cancelled);
+    assert!(!detail.approvals[0].delivered);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unanswered_request_expires_as_a_rejection() {
+    let clock = Arc::new(ManualClock::new(1_794_744_000_000));
+    let env = Env::with_clock(clock.clone()).await;
+    let log = env.base.join("registro del falso.txt");
+    let supervisor = env
+        .supervisor(env.config(&["approval", "--log", log.to_str().unwrap()]))
+        .await;
+    let run = env.queued(&supervisor).await;
+    env.wait_pending(&run).await;
+    clock.advance(Duration::from_millis(
+        u64::try_from(APPROVAL_TTL_MS).unwrap(),
+    ));
+    supervisor.wake();
+    let detail = env.wait_terminal(&run).await;
+    supervisor.shutdown().await;
+    assert_eq!(detail.run.state, RunState::Completed, "{:?}", detail.run);
+    assert!(received(&log).contains(&"permiso: rechazar-1".to_owned()));
+    assert_eq!(detail.approvals[0].state, ApprovalState::Expired);
+    assert!(
+        env.agent_lines(&run, RunOutputKind::Permission)
+            .iter()
+            .any(|l| l.contains("caducó sin respuesta"))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_can_withdraw_a_pending_request() {
+    let env = Env::new().await;
+    let log = env.base.join("registro del falso.txt");
+    let supervisor = env
+        .supervisor(env.config(&["approval_withdraw", "--log", log.to_str().unwrap()]))
+        .await;
+    let run = env.queued(&supervisor).await;
+    let detail = env.wait_terminal(&run).await;
+    supervisor.shutdown().await;
+    assert_eq!(detail.run.state, RunState::Completed, "{:?}", detail.run);
+    assert!(received(&log).contains(&"ok: retirada respondida con -32800".to_owned()));
+    assert_eq!(detail.approvals.len(), 1);
+    assert_eq!(detail.approvals[0].state, ApprovalState::Withdrawn);
+    assert_eq!(detail.approvals[0].scope.as_deref(), Some("src/main.rs"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_system_notification_only_when_enabled_and_without_details() {
+    let env = Env::new().await;
+    let notices: Arc<std::sync::Mutex<Vec<ApprovalNotice>>> = Arc::default();
+    let sink = notices.clone();
+    let mut config = env.config(&["approval"]);
+    config.approval_notifier = Some(ApprovalNotifier(Arc::new(move |notice| {
+        sink.lock().unwrap().push(notice);
+    })));
+    let supervisor = env.supervisor(config).await;
+    // Desactivada (por defecto): nada.
+    let first = env.queued(&supervisor).await;
+    env.decide_pending(&first, ApprovalDecision::Reject).await;
+    supervisor.wake();
+    env.wait_terminal(&first).await;
+    assert!(notices.lock().unwrap().is_empty());
+    // Activada: una, solo con el número de la historia.
+    env.set_settings(Some(env.adapter.to_str().unwrap().to_owned()), true)
+        .await;
+    let second = env.queued(&supervisor).await;
+    env.decide_pending(&second, ApprovalDecision::Reject).await;
+    supervisor.wake();
+    env.wait_terminal(&second).await;
+    supervisor.shutdown().await;
+    let number =
+        kanbania_core::features::stories::get_story(&env.store, &env.project.id, &second.story_id)
+            .await
+            .unwrap()
+            .number;
+    assert_eq!(
+        *notices.lock().unwrap(),
+        [ApprovalNotice {
+            story_number: number
+        }]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -972,4 +1225,121 @@ async fn adapter_without_execute_permission_fails_to_spawn() {
         "No se pudo lanzar el adaptador de Claude Code configurado. Consulta el registro del \
          intento.",
     );
+}
+
+/// `PermissionPolicy::RejectAll` (por defecto, la de las pruebas reales sin persona): rechaza en
+/// el acto con `reject_once` (o `cancelled` sin esa opción), sin preguntar.
+#[tokio::test(flavor = "multi_thread")]
+async fn reject_all_policy_answers_without_asking() {
+    let env = Env::new().await;
+    let repo = env.base.join("repositorio con espacios");
+    let output_dir = env.base.join("salida directa");
+    let log = OutputLog::create(&output_dir).unwrap();
+    let spec = ProcessSpec {
+        program: env.adapter.clone(),
+        args: vec!["permission".into()],
+        cwd: repo.clone(),
+        extra_env: Vec::new(),
+        timeout: Duration::from_secs(60),
+        grace: Duration::from_secs(1),
+    };
+    let (process, io) = RunningProcess::spawn_protocol(spec, log).unwrap();
+    let deadline = process.deadline();
+    let limits = AcpLimits::default();
+    let mut client = AcpClient::new(io, limits, None);
+    let (_keep, mut token) = cancel_pair();
+    let declared = client.initialize(&mut token, deadline).await.unwrap();
+    client
+        .open_session(&repo, &declared, &CLAUDE_CODE_PROFILE, &mut token, deadline)
+        .await
+        .unwrap();
+    // El agente falso termina con error si no recibe `reject_once` y después `cancelled`.
+    let ended = client.prompt("Haz algo", &mut token, deadline).await;
+    client.close_input();
+    drop(client);
+    let (report, log) = process.close(limits.close_wait).await;
+    drop(log);
+    assert_eq!(ended, Ok(()), "{report:?}");
+    let permissions: Vec<String> = read_tail(&output_dir, 100)
+        .unwrap()
+        .lines
+        .into_iter()
+        .filter(|l| l.kind == Some(AgentKind::Permission))
+        .map(|l| l.text)
+        .collect();
+    assert_eq!(permissions.len(), 2, "{permissions:?}");
+    assert!(permissions[0].contains("rechazado una vez por la política de la app"));
+    assert!(permissions[1].contains("respondido como cancelado"));
+}
+
+/// Dos intentos a la vez: cada decisión llega a la sesión de su intento.
+#[tokio::test(flavor = "multi_thread")]
+async fn decisions_reach_the_right_session_with_two_runs() {
+    let env = Env::new().await;
+    let supervisor = env.supervisor(env.config(&["approval"])).await;
+    let first = env.queued(&supervisor).await;
+    let second = env.queued(&supervisor).await;
+    env.wait_pending(&first).await;
+    env.wait_pending(&second).await;
+    let (first_tree, second_tree) = (env.worktree(&first).await, env.worktree(&second).await);
+    env.decide_pending(&second, ApprovalDecision::Reject).await;
+    env.decide_pending(&first, ApprovalDecision::AllowOnce)
+        .await;
+    supervisor.wake();
+    let first_detail = env.wait_terminal(&first).await;
+    let second_detail = env.wait_terminal(&second).await;
+    supervisor.shutdown().await;
+    assert_eq!(first_detail.run.state, RunState::Completed);
+    assert_eq!(second_detail.run.state, RunState::Completed);
+    assert!(first_tree.join("nota.txt").exists());
+    assert!(!second_tree.join("nota.txt").exists());
+    assert_eq!(first_detail.approvals[0].state, ApprovalState::Allowed);
+    assert_eq!(second_detail.approvals[0].state, ApprovalState::Rejected);
+}
+
+/// La caducidad no depende de que alguien despierte al supervisor (ni del reloj monotónico:
+/// equipo suspendido): el broker revisa sus pendientes cada `poll_interval`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_expires_without_any_wake() {
+    let clock = Arc::new(ManualClock::new(1_794_744_000_000));
+    let env = Env::with_clock(clock.clone()).await;
+    let log = env.base.join("registro del falso.txt");
+    let supervisor = env
+        .supervisor(env.config(&["approval", "--log", log.to_str().unwrap()]))
+        .await;
+    let run = env.queued(&supervisor).await;
+    env.wait_pending(&run).await;
+    clock.advance(Duration::from_millis(
+        u64::try_from(APPROVAL_TTL_MS).unwrap(),
+    ));
+    let detail = env.wait_terminal(&run).await;
+    supervisor.shutdown().await;
+    assert_eq!(detail.run.state, RunState::Completed, "{:?}", detail.run);
+    assert!(received(&log).contains(&"permiso: rechazar-1".to_owned()));
+    assert_eq!(detail.approvals[0].state, ApprovalState::Expired);
+}
+
+/// Si el tiempo máximo corta el turno con una petición pendiente, el cliente responde
+/// «cancelado» por su cuenta y la petición queda cerrada en la base: una decisión posterior no
+/// puede constar como entregada.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_timeout_while_waiting_closes_the_request() {
+    let env = Env::new().await;
+    let log = env.base.join("registro del falso.txt");
+    let mut config = env.config(&["approval", "--log", log.to_str().unwrap()]);
+    config.timeout_override = Some(Duration::from_secs(3));
+    let supervisor = env.supervisor(config).await;
+    let run = env.queued(&supervisor).await;
+    let pending = env.wait_pending(&run).await;
+    let detail = env.wait_terminal(&run).await;
+    supervisor.shutdown().await;
+    assert_eq!(detail.run.state, RunState::Failed, "{:?}", detail.run);
+    assert!(received(&log).contains(&"permiso: cancelled".to_owned()));
+    let approval = detail
+        .approvals
+        .iter()
+        .find(|a| a.id == pending.id)
+        .unwrap();
+    assert_eq!(approval.state, ApprovalState::Cancelled);
+    assert!(!approval.delivered);
 }

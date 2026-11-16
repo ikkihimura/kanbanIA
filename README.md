@@ -259,7 +259,7 @@ La app es cliente ACP v1 ([Agent Client Protocol](https://agentclientprotocol.co
 Qué hace la app:
 - El agente trabaja en el worktree del intento (su `cwd`) con las instrucciones generadas de la instantánea (sin rutas absolutas); se registra su SHA-256.
 - Fija el modo `default` («pedir permiso»; el adaptador arranca en `auto`) y falla si no puede o si el agente lo cambia.
-- **Hasta HU-020 rechaza toda petición de permiso.** Ojo: en ese modo Claude Code ejecuta sin preguntar los comandos de **solo lectura** (`cat`, `git ls-files`…); lo que se impide es escribir o ejecutar con efectos.
+- Cada petición de permiso la decides tú (HU-020, ver «Aprobaciones»). Ojo: en ese modo Claude Code ejecuta sin preguntar los comandos de **solo lectura** dentro del worktree (`cat`, `git ls-files`…); para escribir, ejecutar con efectos o leer fuera del worktree (herramienta Read) pide permiso.
 - Pide al adaptador no cargar tu configuración de Claude Code ni la del repositorio (`settingSources: []`): sin reglas `allow`, hooks ni `.mcp.json` del repo. Probablemente tampoco carga el `CLAUDE.md` del repositorio.
 - Entorno limpio: nunca pasa `KANBANIA_*`, `ANTHROPIC_*` ni `CLAUDE_*`.
 - Salida: «agente (reportado)» es lo que informa el agente (mensajes, herramientas, permisos, uso), no hechos comprobados; stderr del adaptador con correos y tokens ocultos. El coste que informa el agente se muestra en la salida, pero no se guarda como coste del intento.
@@ -268,6 +268,17 @@ Qué hace la app:
 Limitaciones: el adaptador npm es un script de Node y necesita `node` en `PATH` (si abres la app desde Finder con nvm, no lo encuentra: abre la app desde la terminal o usa el binario autónomo); el aislamiento depende de una opción propia del adaptador (vuelve a comprobarlo al cambiar de versión); Windows sin ejecutar.
 
 Pruebas: contrato con el agente falso `cargo test -p kanbania-runner --test acp`. Pruebas reales (consumen tu suscripción; solo con autorización): `KANBANIA_ACP_REAL=/ruta/absoluta/claude-agent-acp cargo test -p kanbania-runner --test acp_real -- --ignored --nocapture`.
+
+## Aprobaciones (HU-020, M3)
+
+Cuando Claude Code pide permiso (escribir un archivo, ejecutar un comando…), el intento pasa a **«Espera tu permiso»** y la petición aparece en el detalle del intento («Permisos del agente») con la acción, el tipo y el alcance (comando o rutas; correos y secretos ocultos). La tarjeta del tablero y la bandeja «Atención» lo señalan.
+
+- Solo **Permitir una vez** o **Rechazar**: nunca reglas permanentes. Cada decisión se aplica una sola vez.
+- Caducidad: **10 minutos**. Si nadie decide, la app responde «rechazar» y el agente sigue; el tiempo máximo del intento sigue contando.
+- Cancelar el intento (o que termine) invalida las peticiones abiertas y las decididas que aún no se habían entregado.
+- Hasta 8 peticiones abiertas por intento; más se rechazan sin preguntar.
+- **Permitir un comando lo ejecuta de verdad en tu equipo** (dentro del worktree como carpeta de trabajo, pero sin sandbox): permite solo lo que entiendas.
+- Notificación del sistema opcional (desactivada por defecto): «Sistema» → «Ejecuciones» → «Avisarme…». Solo dice «Un agente pide permiso en #N», sin acción ni alcance. Usa `tauri-plugin-notification` 2.8.0 (Apache-2.0 OR MIT) desde Rust; la ventana no tiene permisos de notificación.
 
 ## Notas
 

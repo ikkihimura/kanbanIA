@@ -228,6 +228,7 @@ impl Board {
                 max_concurrency: current.max_concurrency,
                 timeout_minutes: current.timeout_minutes,
                 claude_acp_path: path.map(str::to_owned),
+                approval_notifications: false,
             },
         )
         .await
@@ -778,6 +779,7 @@ async fn adapter_path_is_checked_on_disk_before_saving() {
                     max_concurrency: 2,
                     timeout_minutes: 30,
                     claude_acp_path: Some(adapter.to_str().unwrap().into()),
+                    approval_notifications: false,
                 },
             )
             .await
@@ -1328,6 +1330,7 @@ async fn an_unchanged_adapter_path_is_not_checked_again() {
             max_concurrency: 5,
             timeout_minutes: current.timeout_minutes,
             claude_acp_path: Some(format!(" {path} ")),
+            approval_notifications: false,
         },
     )
     .await
@@ -1352,6 +1355,7 @@ async fn an_unchanged_adapter_path_is_not_checked_again() {
             max_concurrency: 3,
             timeout_minutes: current.timeout_minutes,
             claude_acp_path: Some(path.clone()),
+            approval_notifications: false,
         },
     )
     .await;

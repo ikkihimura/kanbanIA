@@ -225,9 +225,10 @@ export function StartRunForm({
       ) : (
         <p className="run-detail__info">
           Lanza Claude Code en el worktree con las instrucciones de la
-          instantánea. El agente trabaja con tu sesión de Claude Code. Hasta
-          HU-020 la app rechaza todas sus peticiones de permiso (editar,
-          ejecutar…), así que normalmente solo podrá leer y responder.
+          instantánea. El agente trabaja con tu sesión de Claude Code. Cada
+          petición de permiso (editar, ejecutar…) aparece en el detalle del
+          intento para que la permitas una vez o la rechaces; sin respuesta en
+          10 minutos, se rechaza.
         </p>
       )}
 

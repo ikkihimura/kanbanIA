@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::acp_session::AcpSessionInfo;
+use super::approval::ApprovalState;
 use super::run::{RunState, RunSummary, RunUsage, append_event, require_run, validate_id};
 use super::supervisor::{SupervisorToken, ensure_token};
 use crate::error::CoreError;
@@ -28,6 +29,19 @@ pub enum RunEvent {
     /// Sesión ACP negociada (HU-019): lo que el agente declaró y el modo fijado. Reportado por
     /// el agente, no verificado. Solo lo registra `record_acp_session`.
     AcpSession(AcpSessionInfo),
+    /// El agente pidió permiso (HU-020). Sin título ni alcance: están en `run_approvals`.
+    #[serde(rename_all = "camelCase")]
+    ApprovalRequested {
+        approval_id: String,
+        #[ts(type = "number")]
+        sequence: i64,
+    },
+    /// La petición se cerró: decisión de una persona, caducidad o retirada del agente.
+    #[serde(rename_all = "camelCase")]
+    ApprovalResolved {
+        approval_id: String,
+        outcome: ApprovalState,
+    },
 }
 
 impl RunEvent {
@@ -36,6 +50,8 @@ impl RunEvent {
             Self::StateChanged { .. } => "state_changed",
             Self::UsageReported(_) => "usage_reported",
             Self::AcpSession(_) => "acp_session",
+            Self::ApprovalRequested { .. } => "approval_requested",
+            Self::ApprovalResolved { .. } => "approval_resolved",
         }
     }
 
@@ -76,6 +92,8 @@ impl RunEvent {
                 Ok(self.clone())
             }
             Self::AcpSession(info) => Ok(Self::AcpSession(info.normalized()?)),
+            // Solo los genera el núcleo (`approval`), con ids propios.
+            Self::ApprovalRequested { .. } | Self::ApprovalResolved { .. } => Ok(self.clone()),
         }
     }
 }

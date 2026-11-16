@@ -326,7 +326,7 @@ fn runs_execute_through_the_host_supervisor() {
         &app,
         "update_run_settings",
         json!({ "input": {
-            "expectedRevision": settings["revision"], "maxConcurrency": 3, "timeoutMinutes": 10,
+            "expectedRevision": settings["revision"], "maxConcurrency": 3, "timeoutMinutes": 10, "approvalNotifications": false,
         } }),
     )
     .unwrap();
@@ -335,7 +335,7 @@ fn runs_execute_through_the_host_supervisor() {
         &app,
         "update_run_settings",
         json!({ "input": {
-            "expectedRevision": updated["revision"], "maxConcurrency": 9, "timeoutMinutes": 10,
+            "expectedRevision": updated["revision"], "maxConcurrency": 9, "timeoutMinutes": 10, "approvalNotifications": false,
         } }),
     )
     .unwrap_err();
@@ -874,6 +874,7 @@ fn acp_adapter_check_through_ipc() {
                 "maxConcurrency": settings["maxConcurrency"],
                 "timeoutMinutes": settings["timeoutMinutes"],
                 "claudeAcpPath": adapter.to_str().unwrap(),
+                "approvalNotifications": false,
             } }),
         )
         .unwrap();
@@ -897,4 +898,49 @@ fn acp_adapter_check_through_ipc() {
         );
         assert!(!error.to_string().contains("carpeta con espacios"));
     }
+}
+
+/// Aprobaciones (HU-020) por IPC: listar las que esperan y decidir. El recorrido completo con un
+/// agente lo prueban `crates/core/tests/run_approvals.rs` y `crates/runner/tests/acp.rs`.
+#[test]
+fn approvals_through_ipc() {
+    let data = tempfile::tempdir().unwrap();
+    let app = build_app(data.path());
+    let pid = invoke(
+        &app,
+        "create_project",
+        json!({ "input": { "requestId": "p", "name": "P" } }),
+    )
+    .unwrap()["id"]
+        .clone();
+    let waiting = invoke(&app, "list_waiting_approvals", json!({ "projectId": pid })).unwrap();
+    assert_eq!(waiting, json!([]));
+    let missing = invoke(
+        &app,
+        "decide_approval",
+        json!({ "input": {
+            "requestId": "d1", "projectId": pid,
+            "approvalId": "01a1e1aa-0000-7000-8000-000000000000", "decision": "allow_once",
+        } }),
+    )
+    .unwrap_err();
+    assert_eq!(missing["code"], "not_found");
+    assert_eq!(missing["requestId"], "d1");
+    // Una decisión desconocida no se deserializa (nunca «permitir siempre»).
+    let always = invoke(
+        &app,
+        "decide_approval",
+        json!({ "input": {
+            "requestId": "d2", "projectId": pid,
+            "approvalId": "01a1e1aa-0000-7000-8000-000000000000", "decision": "allow_always",
+        } }),
+    );
+    assert!(always.is_err());
+    let unknown_project = invoke(
+        &app,
+        "list_waiting_approvals",
+        json!({ "projectId": "no-existe" }),
+    )
+    .unwrap_err();
+    assert_eq!(unknown_project["code"], "not_found");
 }

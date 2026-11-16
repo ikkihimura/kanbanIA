@@ -12,6 +12,7 @@ import { MarkdownPreview } from "../../shared/ui/MarkdownPreview";
 import { CATEGORY_LABEL } from "../columns/categories";
 import { PRIORITY_LABEL } from "../stories/priorities";
 import { CAPABILITY_LABEL } from "../team/TeamView";
+import { ApprovalsSection } from "./ApprovalsSection";
 import { RunOutputPanel } from "./RunOutputPanel";
 import {
   NOT_AVAILABLE,
@@ -207,6 +208,16 @@ function DetailBody({
           ` Terminado el ${formatDateTime(run.endedAt)}.`}
         {run.endReason !== null && ` Motivo: ${run.endReason}`}
       </p>
+
+      {/* Arriba del detalle y siempre en el mismo sitio: una petición pendiente se ve sin
+          desplazarse, y decidirla no la mueve (no se pierden el foco ni el aviso). */}
+      {detail.approvals.length > 0 && (
+        <ApprovalsSection
+          projectId={projectId}
+          approvals={detail.approvals}
+          onChanged={onChanged}
+        />
+      )}
 
       {!detail.snapshotIntact && (
         <p className="run-detail__warning" role="alert">
@@ -473,7 +484,7 @@ function DetailBody({
                 {e.sequence}.{" "}
                 <time dateTime={e.at}>{formatDateTime(e.at)}</time>
               </span>
-              <span>{describeRunEvent(e.event)}</span>
+              <span>{describeRunEvent(e.event, detail.approvals)}</span>
             </li>
           ))}
         </ol>

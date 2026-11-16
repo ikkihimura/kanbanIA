@@ -3,6 +3,7 @@ use ts_rs::TS;
 
 use sqlx::SqliteConnection;
 
+use super::approval::{ApprovalCloseCause, close_open_approvals};
 use super::run::{RunState, RunSummary, require_run, transition, validate_id};
 use crate::error::CoreError;
 use crate::platform::actor::Actor;
@@ -85,7 +86,8 @@ pub(super) async fn cancel_or_request(
             .bind(&run.id)
             .execute(&mut *conn)
             .await?;
-            Ok(())
+            // Ninguna decisión pendiente o sin entregar se aplica después (HU-020).
+            close_open_approvals(conn, &run.id, ApprovalCloseCause::CancelRequested, now).await
         }
         RunState::Completed | RunState::Failed | RunState::Cancelled | RunState::Interrupted => {
             Err(CoreError::InvalidRunTransition {

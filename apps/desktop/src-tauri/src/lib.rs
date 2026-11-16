@@ -89,6 +89,8 @@ pub fn register_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
             commands::agent_activity::list_story_activity,
             commands::runs::create_run,
             commands::runs::cancel_run,
+            commands::runs::decide_approval,
+            commands::runs::list_waiting_approvals,
             commands::runs::list_story_runs,
             commands::runs::get_run,
             commands::runs::start_run,
@@ -138,7 +140,9 @@ fn should_block_and_ask<R: Runtime>(handle: &AppHandle<R>) -> bool {
 pub fn run() {
     let builder = register_commands(Builder::default())
         // Solo el selector de carpetas: capability `dialog:allow-open`.
-        .plugin(tauri_plugin_dialog::init());
+        .plugin(tauri_plugin_dialog::init())
+        // Solo se usa desde Rust (aviso de permisos, HU-020): la capability no da permisos JS.
+        .plugin(tauri_plugin_notification::init());
 
     // macOS: «Salir» (⌘Q) propio para que pase por `ExitGuard` (ver `menu.rs`).
     #[cfg(target_os = "macos")]

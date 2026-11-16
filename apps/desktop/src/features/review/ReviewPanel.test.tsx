@@ -16,6 +16,7 @@ vi.mock("../../shared/ipc/commands", async (importOriginal) => ({
   returnDelivery: vi.fn(),
   setStoryBlocker: vi.fn(),
   listAttention: vi.fn(),
+  listWaitingApprovals: vi.fn(),
   listColumns: vi.fn(),
 }));
 
@@ -92,6 +93,7 @@ function renderPanel(detail = story(), locked = false) {
 beforeEach(() => {
   mocked.getStoryReview.mockResolvedValue(review());
   mocked.listColumns.mockResolvedValue([]);
+  mocked.listWaitingApprovals.mockResolvedValue([]);
 });
 
 describe("ReviewPanel", () => {

@@ -15,6 +15,9 @@ import type { StoryActivity } from "../../contracts/generated/StoryActivity";
 import type { StoryActivityInput } from "../../contracts/generated/StoryActivityInput";
 import type { AcpAdapterCheck } from "../../contracts/generated/AcpAdapterCheck";
 import type { CancelRunInput } from "../../contracts/generated/CancelRunInput";
+import type { DecideApprovalInput } from "../../contracts/generated/DecideApprovalInput";
+import type { RunApproval } from "../../contracts/generated/RunApproval";
+import type { WaitingApproval } from "../../contracts/generated/WaitingApproval";
 import type { CreateRunInput } from "../../contracts/generated/CreateRunInput";
 import type { RunDetail } from "../../contracts/generated/RunDetail";
 import type { RunSummary } from "../../contracts/generated/RunSummary";
@@ -418,6 +421,31 @@ export function checkAcpAdapter(
   path: string | null = null,
 ): Promise<AcpAdapterCheck> {
   return call("check_acp_adapter", { path });
+}
+
+// --- permisos del agente (HU-020) ---
+
+/**
+ * Decide una petición de permiso del agente: «Permitir una vez» (`allow_once`) o «Rechazar»
+ * (`reject`). Solo se aplica una vez: si ya se decidió, caducó, la retiró el agente o el
+ * intento terminó o se está cancelando, devuelve `approval_closed`. Permitir cuando el agente
+ * no lo ofreció devuelve `validation` en el campo `decision`. Mantén el mismo `requestId` al
+ * reintentar la misma decisión.
+ */
+export function decideApproval(
+  input: DecideApprovalInput,
+): Promise<RunApproval> {
+  return call("decide_approval", { input });
+}
+
+/**
+ * Intentos del proyecto con peticiones de permiso pendientes y sin caducar (bandeja y
+ * tablero). Sale de la base, no de lo que diga el agente.
+ */
+export function listWaitingApprovals(
+  projectId: string,
+): Promise<WaitingApproval[]> {
+  return call("list_waiting_approvals", { projectId });
 }
 
 /** Nombre del evento emitido por el host (`RUN_CHANGE_EVENT` en run_supervisor.rs). */

@@ -3,6 +3,7 @@ use sha2::{Digest, Sha256};
 use sqlx::SqliteConnection;
 use ts_rs::TS;
 
+use super::approval::{RunApproval, approvals_of_run};
 use super::event::RunEvent;
 use super::run::{RunSummary, require_run, validate_id};
 use super::snapshot::RunSnapshot;
@@ -63,6 +64,9 @@ pub struct RunDetail {
     /// Worktree del intento (ruta absoluta local; nunca para agentes).
     #[serde(default)]
     pub worktree: Option<RunWorktree>,
+    /// Peticiones de permiso del agente (HU-020), la más reciente primero.
+    #[serde(default)]
+    pub approvals: Vec<RunApproval>,
 }
 
 /// Detalle de un intento del proyecto (otro proyecto o inexistente → «no encontrado»). Se lee
@@ -92,6 +96,7 @@ async fn load(
             .await?;
     let start_request = load_start_request(conn, &run.id).await?;
     let worktree = load_worktree(conn, &run.id).await?;
+    let approvals = approvals_of_run(conn, &run.id).await?;
     let digest: String = Sha256::digest(snapshot.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -126,6 +131,7 @@ async fn load(
         start_request,
         cancel_reason,
         worktree,
+        approvals,
     })
 }
 

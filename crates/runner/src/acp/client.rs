@@ -15,6 +15,10 @@ use super::jsonrpc::{
     self, AUTH_REQUIRED, Incoming, METHOD_NOT_FOUND, REQUEST_CANCELLED, RpcError,
 };
 use super::normalize::{Effect, Normalizer, Out, ascii_name, single_line};
+use super::permission::{
+    MAX_PENDING_PERMISSIONS, MAX_SCOPE_CHARS, PermissionAnswer, PermissionAsk, PermissionBridge,
+    PermissionEvent, PermissionPolicy, PermissionReply,
+};
 use super::{
     AcpFailure, AcpLimits, AcpProfile, AcpStop, ISOLATION_NOTE, PROTOCOL_VERSION,
     claude_code_isolation_meta,
@@ -54,6 +58,23 @@ pub struct OpenedSession {
     pub capabilities: Vec<&'static str>,
 }
 
+/// Petición de permiso que espera la decisión de una persona.
+struct PendingPermission {
+    key: u64,
+    /// Id JSON-RPC de la petición del agente (se devuelve tal cual).
+    rpc_id: Value,
+    title: String,
+    allow_once: Option<String>,
+    reject_once: String,
+}
+
+/// Lo que despertó la espera de un mensaje.
+enum Woke {
+    Line(ReadLine),
+    /// Respuesta de quien decide; `None` = el puente se cerró.
+    Answer(Option<PermissionAnswer>),
+}
+
 /// Por qué terminó una espera.
 enum Wait {
     Cancel,
@@ -80,6 +101,10 @@ pub struct AcpClient {
     /// Cancelación y plazo de la fase en curso: una escritura bloqueada compite con ellos.
     write_cancel: Option<CancelToken>,
     write_deadline: Option<Instant>,
+    /// Con `Some`, las peticiones de permiso se preguntan (HU-020); con `None`, se rechazan.
+    permissions: Option<PermissionBridge>,
+    pending: Vec<PendingPermission>,
+    next_key: u64,
 }
 
 impl std::fmt::Debug for AcpClient {
@@ -103,7 +128,20 @@ impl AcpClient {
             normalizer: Normalizer::default(),
             write_cancel: None,
             write_deadline: None,
+            permissions: None,
+            pending: Vec::new(),
+            next_key: 1,
         }
+    }
+
+    /// Política de permisos (por defecto, rechazar sin preguntar).
+    #[must_use]
+    pub fn with_permissions(mut self, policy: PermissionPolicy) -> Self {
+        self.permissions = match policy {
+            PermissionPolicy::RejectAll => None,
+            PermissionPolicy::Ask(bridge) => Some(bridge),
+        };
+        self
     }
 
     /// Escritura en el registro del intento (líneas `sys`).
@@ -335,6 +373,8 @@ impl AcpClient {
         let mut out = Vec::new();
         self.normalizer.flush(&mut out);
         self.emit(out).await;
+        // El turno terminó: ninguna petición pendiente puede aplicarse ya.
+        self.answer_all_cancelled("el turno terminó").await;
         result
     }
 
@@ -354,6 +394,8 @@ impl AcpClient {
                 .await;
             return cause;
         }
+        // Después de `session/cancel` (orden de ACP): las pendientes se responden `cancelled`.
+        self.answer_all_cancelled("se canceló el turno").await;
         let fast = self
             .fast_cancel
             .as_ref()
@@ -479,13 +521,33 @@ impl AcpClient {
                         None => std::future::pending().await,
                     }
                 };
+                let answer = async {
+                    match self.permissions.as_mut() {
+                        Some(bridge) => bridge.answers.recv().await,
+                        None => std::future::pending().await,
+                    }
+                };
                 tokio::select! {
                     biased;
                     () = cancelled => return Err(Wait::Cancel),
                     () = sleep_until(deadline) => return Err(Wait::Deadline),
                     () = phase_over => return Err(Wait::PhaseTimeout),
-                    line = self.reader.next_line() => line,
+                    answer = answer => Woke::Answer(answer),
+                    line = self.reader.next_line() => Woke::Line(line),
                 }
+            };
+            let line = match line {
+                Woke::Answer(Some(answer)) => {
+                    self.on_answer(answer).await;
+                    continue;
+                }
+                Woke::Answer(None) => {
+                    // Quien decidía ya no está: nada pendiente se puede aplicar.
+                    self.permissions = None;
+                    self.answer_all_cancelled("no hay quien decida").await;
+                    continue;
+                }
+                Woke::Line(line) => line,
             };
             let line = match line {
                 ReadLine::Line(line) => line,
@@ -547,60 +609,260 @@ impl AcpClient {
             .await;
     }
 
-    /// Política hasta HU-020: rechazar siempre con `reject_once`; sin esa opción, `cancelled`.
-    /// Nunca `allow_*` ni `reject_always` (no se guardan reglas en el agente).
+    /// Petición de permiso del agente. Con el turno cancelándose → `cancelled`. Sin
+    /// `reject_once` → `cancelled` (no se podría responder un rechazo). Sin puente
+    /// ([`PermissionPolicy::RejectAll`]) → `reject_once` en el acto. Con puente → queda
+    /// pendiente hasta la respuesta de quien decide (como mucho [`MAX_PENDING_PERMISSIONS`] a la
+    /// vez; más → `reject_once`). Nunca `allow_always` ni `reject_always`.
     async fn on_permission(&mut self, id: &Value, params: &Value) {
         let mut out = Vec::new();
         self.normalizer.flush(&mut out);
-        let title = params
-            .get("toolCall")
+        let tool = params.get("toolCall");
+        // El título de Bash suele ser el comando entero: se redacta como el alcance.
+        let title = tool
             .and_then(|t| t.get("title"))
             .and_then(Value::as_str)
-            .map_or_else(|| "(sin título)".to_owned(), |t| single_line(t, 300));
-        let reject_once = params
-            .get("options")
-            .and_then(Value::as_array)
-            .and_then(|options| {
-                options.iter().find_map(|option| {
-                    (option.get("kind").and_then(Value::as_str) == Some("reject_once"))
-                        .then(|| option.get("optionId").and_then(Value::as_str))
-                        .flatten()
+            .map_or_else(
+                || "(sin título)".to_owned(),
+                |t| {
+                    let redacted = crate::redact::redact_line(t.as_bytes());
+                    single_line(&String::from_utf8_lossy(&redacted), 300)
+                },
+            );
+        let duplicate = self.pending.iter().any(|p| &p.rpc_id == id);
+        let option_of = |kind: &str| {
+            params
+                .get("options")
+                .and_then(Value::as_array)
+                .and_then(|options| {
+                    options.iter().find_map(|option| {
+                        (option.get("kind").and_then(Value::as_str) == Some(kind))
+                            .then(|| option.get("optionId").and_then(Value::as_str))
+                            .flatten()
+                    })
                 })
-            })
-            .map(str::to_owned);
-        let (response, line) = match (self.cancelling, reject_once) {
-            (true, _) => (
-                json!({ "outcome": { "outcome": "cancelled" } }),
+                .filter(|option| !option.is_empty() && option.len() <= 256)
+                .map(str::to_owned)
+        };
+        let reject_once = option_of("reject_once");
+        let allow_once = option_of("allow_once");
+        let cancelled = json!({ "outcome": { "outcome": "cancelled" } });
+        let immediate = match (self.cancelling, &reject_once, &self.permissions) {
+            (true, _, _) => Some((
+                cancelled,
                 format!(
                     "Permiso pedido para «{title}»: respondido como cancelado (se estaba cancelando el turno)."
                 ),
-            ),
-            (false, Some(option)) => (
-                json!({ "outcome": { "outcome": "selected", "optionId": option } }),
-                format!(
-                    "Permiso pedido para «{title}»: rechazado una vez por la política de la app (hasta HU-020 se rechazan todos)."
-                ),
-            ),
-            (false, None) => {
+            )),
+            (false, None, _) => {
                 out.push(Out::System(
                     "El agente pidió un permiso sin la opción «rechazar una vez»: se responde como cancelado."
                         .into(),
                 ));
-                (
-                    json!({ "outcome": { "outcome": "cancelled" } }),
+                Some((
+                    cancelled,
                     format!(
-                        "Permiso pedido para «{title}»: sin opción «rechazar una vez», respondido como cancelado (política hasta HU-020)."
+                        "Permiso pedido para «{title}»: sin opción «rechazar una vez», respondido como cancelado."
                     ),
-                )
+                ))
             }
+            (false, Some(option), None) => Some((
+                selected(option),
+                format!(
+                    "Permiso pedido para «{title}»: rechazado una vez por la política de la app (nadie puede decidir en esta sesión)."
+                ),
+            )),
+            (false, Some(option), Some(_)) if duplicate => Some((
+                selected(option),
+                format!(
+                    "Permiso pedido para «{title}»: rechazado sin preguntar (el agente repitió el id de otra petición pendiente)."
+                ),
+            )),
+            (false, Some(option), Some(_)) if self.pending.len() >= MAX_PENDING_PERMISSIONS => {
+                Some((
+                    selected(option),
+                    format!(
+                        "Permiso pedido para «{title}»: rechazado sin preguntar (hay ya {MAX_PENDING_PERMISSIONS} peticiones sin responder)."
+                    ),
+                ))
+            }
+            (false, Some(_), Some(_)) => None,
         };
+        if let Some((response, line)) = immediate {
+            out.push(Out::Agent(AgentKind::Permission, line));
+            self.emit(out).await;
+            let _ = self.send(&jsonrpc::result(id, response)).await;
+            return;
+        }
+        let (Some(reject_once), Some(bridge)) = (reject_once, self.permissions.as_ref()) else {
+            return;
+        };
+        let key = self.next_key;
+        self.next_key += 1;
+        let ask = PermissionAsk {
+            key,
+            title: title.clone(),
+            kind: tool
+                .and_then(|t| t.get("kind"))
+                .and_then(Value::as_str)
+                .filter(|k| {
+                    !k.is_empty()
+                        && k.len() <= 32
+                        && k.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+                })
+                .map(str::to_owned),
+            scope: scope_of(tool),
+            can_allow: allow_once.is_some(),
+        };
+        if bridge.events.try_send(PermissionEvent::Asked(ask)).is_err() {
+            out.push(Out::Agent(
+                AgentKind::Permission,
+                format!(
+                    "Permiso pedido para «{title}»: rechazado una vez (no se pudo pasar la petición a la app)."
+                ),
+            ));
+            self.emit(out).await;
+            let _ = self
+                .send(&jsonrpc::result(id, selected(&reject_once)))
+                .await;
+            return;
+        }
+        out.push(Out::Agent(
+            AgentKind::Permission,
+            format!("Permiso pedido para «{title}»: espera la decisión de una persona en la app."),
+        ));
+        self.emit(out).await;
+        self.pending.push(PendingPermission {
+            key,
+            rpc_id: id.clone(),
+            title,
+            allow_once,
+            reject_once,
+        });
+    }
+
+    /// Respuesta de quien decide a una petición pendiente (si ya no lo está, se ignora).
+    async fn on_answer(&mut self, answer: PermissionAnswer) {
+        let Some(index) = self.pending.iter().position(|p| p.key == answer.key) else {
+            return;
+        };
+        let pending = self.pending.remove(index);
+        let title = &pending.title;
+        let (response, line) = match (answer.reply, &pending.allow_once) {
+            (PermissionReply::AllowOnce, Some(option)) => (
+                selected(option),
+                format!("Permiso para «{title}»: permitido una vez por una persona."),
+            ),
+            (PermissionReply::AllowOnce, None) | (PermissionReply::Reject, _) => (
+                selected(&pending.reject_once),
+                format!("Permiso para «{title}»: rechazado por una persona."),
+            ),
+            (PermissionReply::Expired, _) => (
+                selected(&pending.reject_once),
+                format!("Permiso para «{title}»: caducó sin respuesta; se respondió rechazar."),
+            ),
+            (PermissionReply::Unrecorded, _) => (
+                selected(&pending.reject_once),
+                format!(
+                    "Permiso para «{title}»: rechazado sin preguntar (la app no pudo registrar la petición)."
+                ),
+            ),
+            (PermissionReply::Cancelled, _) => (
+                json!({ "outcome": { "outcome": "cancelled" } }),
+                format!(
+                    "Permiso para «{title}»: respondido como cancelado (el intento terminó o se canceló)."
+                ),
+            ),
+        };
+        let mut out = Vec::new();
+        self.normalizer.flush(&mut out);
         out.push(Out::Agent(AgentKind::Permission, line));
         self.emit(out).await;
-        let _ = self.send(&jsonrpc::result(id, response)).await;
+        let _ = self.send(&jsonrpc::result(&pending.rpc_id, response)).await;
+    }
+
+    /// `$/cancel_request {requestId}`: el agente retira una petición pendiente. Se avisa a
+    /// quien decide y se responde con el error «petición cancelada» (-32800).
+    async fn on_cancel_request(&mut self, params: &Value) {
+        let request_id = params.get("requestId");
+        let Some(index) =
+            request_id.and_then(|rid| self.pending.iter().position(|p| &p.rpc_id == rid))
+        else {
+            let mut out = Vec::new();
+            self.normalizer.note(
+                "notification:$/cancel_request".into(),
+                "El agente retiró una petición que no estaba pendiente: se ignora.".into(),
+                &mut out,
+            );
+            self.emit(out).await;
+            return;
+        };
+        let pending = self.pending.remove(index);
+        if let Some(bridge) = self.permissions.as_ref() {
+            let _ = bridge
+                .events
+                .try_send(PermissionEvent::Withdrawn { key: pending.key });
+        }
+        let mut out = Vec::new();
+        self.normalizer.flush(&mut out);
+        out.push(Out::Agent(
+            AgentKind::Permission,
+            format!(
+                "Permiso para «{}»: el agente retiró la petición.",
+                pending.title
+            ),
+        ));
+        self.emit(out).await;
+        let _ = self
+            .send(&jsonrpc::error(
+                &pending.rpc_id,
+                REQUEST_CANCELLED,
+                "Request cancelled",
+            ))
+            .await;
+    }
+
+    /// Responde `cancelled` a todas las pendientes (cancelación, fin del turno, puente cerrado).
+    async fn answer_all_cancelled(&mut self, why: &str) {
+        let pending = std::mem::take(&mut self.pending);
+        if pending.is_empty() {
+            return;
+        }
+        if let Some(bridge) = self.permissions.as_ref() {
+            for item in &pending {
+                let _ = bridge
+                    .events
+                    .try_send(PermissionEvent::Closed { key: item.key });
+            }
+        }
+        let mut out = Vec::new();
+        self.normalizer.flush(&mut out);
+        for item in &pending {
+            out.push(Out::Agent(
+                AgentKind::Permission,
+                format!(
+                    "Permiso para «{}»: respondido como cancelado ({why}).",
+                    item.title
+                ),
+            ));
+        }
+        self.emit(out).await;
+        for item in pending {
+            let _ = self
+                .send(&jsonrpc::result(
+                    &item.rpc_id,
+                    json!({ "outcome": { "outcome": "cancelled" } }),
+                ))
+                .await;
+        }
     }
 
     /// Devuelve un fallo si la notificación obliga a detener el turno.
     async fn on_notification(&mut self, method: &str, params: &Value) -> Option<AcpFailure> {
+        if method == "$/cancel_request" {
+            self.on_cancel_request(params).await;
+            return None;
+        }
         let mut out = Vec::new();
         let mut failure = None;
         if method == "session/update" {
@@ -712,6 +974,41 @@ impl AcpClient {
             }
         }
     }
+}
+
+fn selected(option: &str) -> Value {
+    json!({ "outcome": { "outcome": "selected", "optionId": option } })
+}
+
+/// Alcance de la herramienta: el comando, una ruta o las rutas de `locations` (una línea,
+/// recortada, con correos y prefijos de secreto ocultos). `None` si no hay.
+fn scope_of(tool: Option<&Value>) -> Option<String> {
+    let tool = tool?;
+    let raw = tool.get("rawInput");
+    let text_of = |key: &str| raw.and_then(|r| r.get(key)).and_then(Value::as_str);
+    let scope = text_of("command")
+        .or_else(|| text_of("file_path"))
+        .or_else(|| text_of("path"))
+        .or_else(|| text_of("notebook_path"))
+        .or_else(|| text_of("url"))
+        .map(str::to_owned)
+        .or_else(|| {
+            let paths: Vec<&str> = tool
+                .get("locations")
+                .and_then(Value::as_array)?
+                .iter()
+                .filter_map(|l| l.get("path").and_then(Value::as_str))
+                .take(20)
+                .collect();
+            (!paths.is_empty()).then(|| paths.join(", "))
+        })?;
+    // Una clave PEM ocupa varias líneas: la redacción por palabras solo vería la cabecera.
+    if scope.contains("-----BEGIN") {
+        return Some(crate::redact::REDACTED.to_owned());
+    }
+    let redacted = crate::redact::redact_line(scope.as_bytes());
+    let line = single_line(&String::from_utf8_lossy(&redacted), MAX_SCOPE_CHARS);
+    (!line.is_empty()).then_some(line)
 }
 
 /// Una escritura interrumpida: por cancelación o plazo si ya se cumplieron; si no, el fallo.

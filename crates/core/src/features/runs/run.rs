@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqliteConnection;
 use ts_rs::TS;
 
+use super::approval::{ApprovalCloseCause, close_open_approvals};
 use super::event::RunEvent;
 use crate::error::CoreError;
 use crate::platform::clock::iso_from_ms;
@@ -95,7 +96,12 @@ impl RunState {
                     Running,
                     WaitingApproval | Completed | Failed | Cancelled | Interrupted
                 )
-                | (WaitingApproval, Running | Failed | Cancelled | Interrupted)
+                // `Completed`: el agente terminó su turno con peticiones sin responder (HU-020);
+                // terminar las cierra.
+                | (
+                    WaitingApproval,
+                    Running | Completed | Failed | Cancelled | Interrupted
+                )
         )
     }
 
@@ -395,8 +401,11 @@ pub(super) async fn append_event(
             .execute(&mut *conn)
             .await
         }
-        // Dato reportado por el agente: no cambia estado ni uso, solo ocupa la secuencia.
-        RunEvent::AcpSession(_) => {
+        // Dato reportado por el agente o registro de una petición de permiso: no cambia estado
+        // ni uso, solo ocupa la secuencia.
+        RunEvent::AcpSession(_)
+        | RunEvent::ApprovalRequested { .. }
+        | RunEvent::ApprovalResolved { .. } => {
             sqlx::query(
                 "UPDATE runs SET last_sequence = ?, updated_at_ms = ? \
                  WHERE id = ? AND last_sequence = ?",
@@ -410,6 +419,14 @@ pub(super) async fn append_event(
         }
     };
     let updated = updated?.rows_affected();
+    // Un intento que termina cierra sus peticiones de permiso abiertas: ninguna decisión se
+    // aplica después (HU-020).
+    if updated > 0
+        && let RunEvent::StateChanged { to, .. } = event
+        && to.is_terminal()
+    {
+        close_open_approvals(conn, &run.id, ApprovalCloseCause::RunEnded, now).await?;
+    }
     if updated == 0 {
         // Dentro de `BEGIN IMMEDIATE` nadie más escribe: sería un error de programación.
         return Err(CoreError::Conflict {

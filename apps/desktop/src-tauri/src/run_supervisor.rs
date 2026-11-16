@@ -14,7 +14,8 @@ use std::sync::Arc;
 
 use kanbania_core::features::runs::{InterruptCause, RunChange, SupervisorToken};
 use kanbania_runner::supervisor::{
-    ChangeSink, Supervisor, SupervisorConfig, SupervisorWaker, recover_previous_session,
+    ApprovalNotice, ApprovalNotifier, ChangeSink, Supervisor, SupervisorConfig, SupervisorWaker,
+    recover_previous_session,
 };
 use tauri::async_runtime::Mutex;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -85,7 +86,8 @@ impl RunSupervisorSlot {
             }
             return;
         };
-        let config = SupervisorConfig::new(slot.data_dir().to_path_buf(), program);
+        let mut config = SupervisorConfig::new(slot.data_dir().to_path_buf(), program);
+        config.approval_notifier = Some(approval_notifier(handle));
         match Supervisor::start(store, token, config, sink).await {
             Ok(supervisor) => {
                 if let Ok(mut waker) = self.waker.lock() {
@@ -151,4 +153,30 @@ pub async fn start_run_supervisor<R: Runtime>(handle: &AppHandle<R>) {
     if let Some(slot) = handle.try_state::<RunSupervisorSlot>() {
         slot.ensure_started(handle).await;
     }
+}
+
+/// Notificación del sistema cuando un agente pide permiso (HU-020; el supervisor solo la llama
+/// si está activada). El texto nunca lleva el comando, la ruta ni el título de la acción: solo
+/// el número de la historia.
+fn approval_notifier<R: Runtime>(handle: &AppHandle<R>) -> ApprovalNotifier {
+    let handle = handle.clone();
+    ApprovalNotifier(Arc::new(move |notice: ApprovalNotice| {
+        // Fuera de la tarea del supervisor: mostrarla puede bloquear.
+        let handle = handle.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            use tauri_plugin_notification::NotificationExt;
+            let shown = handle
+                .notification()
+                .builder()
+                .title("Kanban IA")
+                .body(format!(
+                    "Un agente pide permiso en #{}. Ábrelo para permitir o rechazar.",
+                    notice.story_number
+                ))
+                .show();
+            if shown.is_err() {
+                eprintln!("[runs] no se pudo mostrar la notificación");
+            }
+        });
+    }))
 }

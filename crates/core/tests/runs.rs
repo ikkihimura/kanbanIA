@@ -606,6 +606,7 @@ async fn state_machine_accepts_exactly_the_documented_transitions() {
         (Running, Cancelled),
         (Running, Interrupted),
         (WaitingApproval, Running),
+        (WaitingApproval, Completed),
         (WaitingApproval, Failed),
         (WaitingApproval, Cancelled),
         (WaitingApproval, Interrupted),

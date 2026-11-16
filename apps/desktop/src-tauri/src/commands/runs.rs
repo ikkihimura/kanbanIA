@@ -5,9 +5,10 @@
 
 use kanbania_core::error::{CoreError, ErrorPayload};
 use kanbania_core::features::runs::{
-    self, AcpAdapterCheck, CancelRunInput, CreateRunInput, RecordWorktreeRemovalInput,
-    RemoveRunWorktreeInput, RunDetail, RunOutputView, RunSettings, RunSummary, RunWorktree,
-    StartRunInput, UpdateRunSettingsInput, WorktreeChanges, WorktreeRemoval,
+    self, AcpAdapterCheck, CancelRunInput, CreateRunInput, DecideApprovalInput,
+    RecordWorktreeRemovalInput, RemoveRunWorktreeInput, RunApproval, RunDetail, RunOutputView,
+    RunSettings, RunSummary, RunWorktree, StartRunInput, UpdateRunSettingsInput, WaitingApproval,
+    WorktreeChanges, WorktreeRemoval,
 };
 use kanbania_core::platform::actor::Actor;
 use kanbania_runner::acp::probe_adapter;
@@ -45,6 +46,34 @@ pub async fn cancel_run(
     // Con proceso es una petición: que el supervisor mate el árbol ya.
     supervisor.wake();
     Ok(run)
+}
+
+/// Decide una petición de permiso de un agente (HU-020): permitir una vez o rechazar. Despierta
+/// al supervisor para que entregue la decisión al agente.
+#[tauri::command]
+pub async fn decide_approval(
+    slot: State<'_, StorageSlot>,
+    supervisor: State<'_, RunSupervisorSlot>,
+    input: DecideApprovalInput,
+) -> Result<RunApproval, ErrorPayload> {
+    let store = slot.store().await?;
+    let approval = runs::decide_approval(&store, &Actor::Human, &input)
+        .await
+        .map_err(|e| e.to_payload(Some(&input.request_id)))?;
+    supervisor.wake();
+    Ok(approval)
+}
+
+/// Intentos del proyecto que esperan una decisión de permiso (bandeja y tablero).
+#[tauri::command]
+pub async fn list_waiting_approvals(
+    slot: State<'_, StorageSlot>,
+    project_id: String,
+) -> Result<Vec<WaitingApproval>, ErrorPayload> {
+    let store = slot.store().await?;
+    runs::list_waiting_approvals(&store, &project_id)
+        .await
+        .map_err(|e| e.to_payload(None))
 }
 
 #[tauri::command]

@@ -16,4 +16,9 @@ timeoutMinutes: number,
  * Ruta absoluta del ejecutable del adaptador de Claude Code (`claude-agent-acp`), tal como
  * la escribió la persona; `null` = no configurado. Ruta local: nunca para agentes.
  */
-claudeAcpPath: string | null, revision: number, };
+claudeAcpPath: string | null, 
+/**
+ * Notificación del sistema cuando un agente pide permiso (HU-020; por defecto, no). El
+ * texto nunca lleva el comando ni la ruta.
+ */
+approvalNotifications: boolean, revision: number, };

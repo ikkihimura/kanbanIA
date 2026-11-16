@@ -566,6 +566,7 @@ fn status_for(code: ErrorCode) -> StatusCode {
         | ErrorCode::ClaimEnded
         // Intentos (HU-017): ninguna ruta los sirve; el `match` debe ser exhaustivo.
         | ErrorCode::RunActive
+        | ErrorCode::ApprovalClosed
         | ErrorCode::InvalidRunTransition => StatusCode::CONFLICT,
         ErrorCode::StorageLocked
         | ErrorCode::StorageNewerSchema

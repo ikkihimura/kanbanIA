@@ -4,4 +4,4 @@ export type UpdateRunSettingsInput = { expectedRevision: number, maxConcurrency:
 /**
  * Vacía o `null` → no configurado. Si no, absoluta y de un archivo ejecutable.
  */
-claudeAcpPath: string | null, };
+claudeAcpPath: string | null, approvalNotifications: boolean, };

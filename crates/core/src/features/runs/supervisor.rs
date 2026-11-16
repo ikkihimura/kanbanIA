@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use sqlx::SqliteConnection;
 
+use super::approval::close_orphaned_approvals;
 use super::run::{RunState, RunSummary, require_run_any, transition, validate_id};
 use super::runnable::ensure_runnable;
 use super::settings::load_settings;
@@ -753,6 +754,9 @@ pub async fn interrupt_unverifiable_runs(
                         .await?;
                     changed.push(require_run_any(conn, id).await?);
                 }
+                // Peticiones de permiso abiertas de intentos ya terminados (p. ej. de una copia
+                // restaurada, que se interrumpe antes de migrar).
+                close_orphaned_approvals(conn, now).await?;
                 Ok(changed)
             })
         })

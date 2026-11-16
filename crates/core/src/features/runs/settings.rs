@@ -36,6 +36,9 @@ pub struct RunSettings {
     /// Ruta absoluta del ejecutable del adaptador de Claude Code (`claude-agent-acp`), tal como
     /// la escribió la persona; `null` = no configurado. Ruta local: nunca para agentes.
     pub claude_acp_path: Option<String>,
+    /// Notificación del sistema cuando un agente pide permiso (HU-020; por defecto, no). El
+    /// texto nunca lleva el comando ni la ruta.
+    pub approval_notifications: bool,
     #[ts(type = "number")]
     pub revision: i64,
 }
@@ -52,19 +55,21 @@ pub struct UpdateRunSettingsInput {
     pub timeout_minutes: i64,
     /// Vacía o `null` → no configurado. Si no, absoluta y de un archivo ejecutable.
     pub claude_acp_path: Option<String>,
+    pub approval_notifications: bool,
 }
 
 const ENTITY: &str = "Configuración de ejecución";
 
 pub(super) async fn load_settings(conn: &mut SqliteConnection) -> Result<RunSettings, CoreError> {
-    let (max_concurrency, timeout_minutes, claude_acp_path, revision): (
+    let (max_concurrency, timeout_minutes, claude_acp_path, approval_notifications, revision): (
         i64,
         i64,
         Option<String>,
+        bool,
         i64,
     ) = sqlx::query_as(
-        "SELECT max_concurrency, timeout_minutes, claude_acp_path, revision FROM run_settings \
-         WHERE id = 1",
+        "SELECT max_concurrency, timeout_minutes, claude_acp_path, approval_notifications, \
+         revision FROM run_settings WHERE id = 1",
     )
     .fetch_optional(&mut *conn)
     .await?
@@ -73,6 +78,7 @@ pub(super) async fn load_settings(conn: &mut SqliteConnection) -> Result<RunSett
         max_concurrency,
         timeout_minutes,
         claude_acp_path,
+        approval_notifications,
         revision,
     })
 }
@@ -137,11 +143,13 @@ pub async fn update_run_settings(
             Box::pin(async move {
                 let updated = sqlx::query(
                     "UPDATE run_settings SET max_concurrency = ?, timeout_minutes = ?, \
-                     claude_acp_path = ?, revision = revision + 1 WHERE id = 1 AND revision = ?",
+                     claude_acp_path = ?, approval_notifications = ?, revision = revision + 1 \
+                     WHERE id = 1 AND revision = ?",
                 )
                 .bind(input.max_concurrency)
                 .bind(input.timeout_minutes)
                 .bind(adapter_path)
+                .bind(input.approval_notifications)
                 .bind(input.expected_revision)
                 .execute(&mut *conn)
                 .await?

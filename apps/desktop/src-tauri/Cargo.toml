@@ -19,6 +19,7 @@ kanbania-local-service = { workspace = true }
 kanbania-runner = { workspace = true }
 tauri = { workspace = true }
 tauri-plugin-dialog = { workspace = true }
+tauri-plugin-notification = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

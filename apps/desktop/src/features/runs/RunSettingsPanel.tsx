@@ -40,6 +40,7 @@ function isRunSettings(value: unknown): value is RunSettings {
     typeof v.maxConcurrency === "number" &&
     typeof v.timeoutMinutes === "number" &&
     (typeof v.claudeAcpPath === "string" || v.claudeAcpPath === null) &&
+    typeof v.approvalNotifications === "boolean" &&
     typeof v.revision === "number"
   );
 }
@@ -96,6 +97,7 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
   );
   const [timeout, setTimeoutText] = useState(String(initial.timeoutMinutes));
   const [acpPath, setAcpPath] = useState(initial.claudeAcpPath ?? "");
+  const [notify, setNotify] = useState(initial.approvalNotifications);
   const [localErrors, setLocalErrors] = useState<
     Partial<Record<Field, UiError>>
   >({});
@@ -108,7 +110,8 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
   const dirty =
     concurrency !== String(base.maxConcurrency) ||
     timeout !== String(base.timeoutMinutes) ||
-    acpPath !== (base.claudeAcpPath ?? "");
+    acpPath !== (base.claudeAcpPath ?? "") ||
+    notify !== base.approvalNotifications;
   useUnsavedChangesGuard(dirty);
 
   const touch = () => {
@@ -144,6 +147,8 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
       timeoutMinutes,
       // Siempre se envía: si faltara, el núcleo lo borraría. Vacío = no configurado.
       claudeAcpPath: trimmedPath === "" ? null : trimmedPath,
+      // También obligatorio: sin él, el núcleo rechaza la petición.
+      approvalNotifications: notify,
     });
     if (result.ok) {
       setBase(result.value);
@@ -151,6 +156,7 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
       setConcurrency(String(result.value.maxConcurrency));
       setTimeoutText(String(result.value.timeoutMinutes));
       setAcpPath(result.value.claudeAcpPath ?? "");
+      setNotify(result.value.approvalNotifications);
       setMessage("Configuración guardada.");
     } else if (
       result.error.code === "conflict" &&
@@ -300,11 +306,13 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
           </p>
           <p>
             Usa la sesión ya iniciada de Claude Code: puede consumir tu
-            suscripción o tu saldo. Hasta HU-020 la app rechaza toda petición de
-            permiso del agente y fija el modo «Always ask» (pedir permiso). Para
-            que nada se permita sin preguntar, la app pide al adaptador que no
-            cargue tu configuración de Claude Code ni la del repositorio (reglas
-            «allow», hooks, servidores MCP); tu sesión iniciada sí se usa.
+            suscripción o tu saldo. La app fija el modo «Always ask» (pedir
+            permiso): cada petición de permiso del agente aparece en el detalle
+            del intento para que la permitas una vez o la rechaces; sin
+            respuesta en 10 minutos, se rechaza. Para que nada se permita sin
+            preguntar, la app pide al adaptador que no cargue tu configuración
+            de Claude Code ni la del repositorio (reglas «allow», hooks,
+            servidores MCP); tu sesión iniciada sí se usa.
           </p>
         </div>
         <FieldError id={`${id}-acp-error`} error={acpPathError} />
@@ -344,14 +352,39 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
         </div>
       </div>
 
+      <div className="field">
+        <label className="checkbox run-settings__checkbox">
+          <input
+            type="checkbox"
+            checked={notify}
+            aria-describedby={`${id}-notify-hint`}
+            onChange={(event) => {
+              setNotify(event.target.checked);
+              touch();
+            }}
+          />
+          Avisarme con una notificación del sistema cuando un agente pida
+          permiso
+        </label>
+        <span id={`${id}-notify-hint`} className="field__hint">
+          El aviso solo dice el número de la historia, nunca el comando ni la
+          ruta. Puede requerir permitir notificaciones de Kanban IA en el
+          sistema.
+        </span>
+      </div>
+
       {conflict && (
         <div className="run-form__alert" role="alert">
           <p>
             La configuración cambió mientras la editabas. Ahora es:{" "}
-            {conflict.maxConcurrency} a la vez, {conflict.timeoutMinutes} min y{" "}
+            {conflict.maxConcurrency} a la vez, {conflict.timeoutMinutes} min,{" "}
             {conflict.claudeAcpPath === null
               ? "sin adaptador de Claude Code"
-              : `adaptador ${conflict.claudeAcpPath}`}
+              : `adaptador ${conflict.claudeAcpPath}`}{" "}
+            y{" "}
+            {conflict.approvalNotifications
+              ? "con notificaciones de permisos"
+              : "sin notificaciones de permisos"}
             . Revisa tus valores y guarda de nuevo para aplicarlos.
           </p>
         </div>

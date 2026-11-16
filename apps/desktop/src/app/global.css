@@ -1250,6 +1250,79 @@ fieldset.run-start__scenarios legend {
   font-style: italic;
 }
 
+/* ---------- permisos del agente (HU-020) ---------- */
+
+.approvals {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 2px solid var(--color-border);
+}
+
+/* Con peticiones por decidir, el borde lo refuerza; el texto del título lo dice. */
+.approvals--open {
+  border-color: var(--color-warn);
+}
+
+.approvals__list {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.approval {
+  display: grid;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--color-surface-raised);
+  border: 2px solid var(--color-border);
+}
+
+.approval--open {
+  border-style: dashed;
+  border-color: var(--color-warn);
+}
+
+.approval__title {
+  margin: 0;
+  font-size: 1rem;
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+/* Alcance según el agente: texto plano, monoespaciado y sin desbordar. */
+.approval__scope {
+  margin: 0;
+  max-height: 12rem;
+  overflow: auto;
+  padding: 4px 8px;
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--color-text);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+}
+
+/* Agente con una petición de permiso pendiente (dato de la base): marco y pulso discreto. */
+.card__agent--waiting .pixel-avatar {
+  outline: 2px solid var(--color-warn);
+  outline-offset: 2px;
+  animation: approval-pulse 1.6s steps(2, jump-none) infinite;
+}
+
+@keyframes approval-pulse {
+  from {
+    outline-color: var(--color-warn);
+  }
+
+  to {
+    outline-color: transparent;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .shell__cursor {
     animation: none;
@@ -1263,5 +1336,10 @@ fieldset.run-start__scenarios legend {
   .agent-card:hover > .pixel-avatar {
     transition: none;
     transform: none;
+  }
+
+  /* Sin pulso: el marco queda fijo y la insignia de texto sigue ahí. */
+  .card__agent--waiting .pixel-avatar {
+    animation: none;
   }
 }

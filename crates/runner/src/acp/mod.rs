@@ -14,8 +14,11 @@
 //!   `session/set_mode {sessionId, modeId}`. Cada petición ≤ 60 s;
 //! - turno ([`AcpClient::prompt`]): un único bloque `text` con las instrucciones de la
 //!   instantánea; `session/update` → salida normalizada (`agent`, [`normalize`]); permisos →
-//!   siempre la opción `reject_once` (o `cancelled` si no existe; nunca `allow_*` ni
-//!   `reject_always`); otras peticiones del agente → `-32601`; otras notificaciones → solo su
+//!   según la [`PermissionPolicy`]: rechazar en el acto (`reject_once`) o preguntar a una
+//!   persona (HU-020) y responder `allow_once`/`reject_once` cuando decide (`cancelled` si no
+//!   hay `reject_once`, si se cancela el turno o si se cierra sin decisión; nunca
+//!   `allow_always` ni `reject_always`); `$/cancel_request` del agente retira una pendiente;
+//!   otras peticiones del agente → `-32601`; otras notificaciones → solo su
 //!   nombre en `sys`, una vez (el adaptador real envía el correo de la cuenta en
 //!   `_auth/status_update`: nunca se copian parámetros);
 //! - cancelación: `session/cancel` (notificación), los permisos que lleguen después se
@@ -34,12 +37,17 @@ pub(crate) mod framing;
 mod guards;
 pub(crate) mod jsonrpc;
 pub(crate) mod normalize;
+mod permission;
 mod probe;
 
 use std::time::Duration;
 
 pub use client::{AcpClient, AgentDeclaration, OpenedSession};
 pub use framing::MAX_LINE_BYTES;
+pub use permission::{
+    MAX_PENDING_PERMISSIONS, MAX_SCOPE_CHARS, PermissionAnswer, PermissionAsk, PermissionBridge,
+    PermissionEvent, PermissionPolicy, PermissionReply, permission_bridge,
+};
 pub use probe::{ProbeError, probe_adapter};
 
 /// Versión de ACP que habla este cliente.

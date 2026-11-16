@@ -414,7 +414,7 @@ async fn start_dispatch_and_finish_follow_the_state_machine() {
         .iter()
         .filter_map(|e| match &e.event {
             RunEvent::StateChanged { to, .. } => Some(*to),
-            RunEvent::UsageReported(_) | RunEvent::AcpSession(_) => None,
+            _ => None,
         })
         .collect();
     assert_eq!(
@@ -991,6 +991,7 @@ async fn settings_have_defaults_limits_and_revision() {
         max_concurrency,
         timeout_minutes,
         claude_acp_path: None,
+        approval_notifications: false,
     };
     for (input, name) in [
         (update(1, 0, 30), "maxConcurrency"),

@@ -96,6 +96,12 @@ pub enum CoreError {
     )]
     RunActive { number: i64 },
 
+    /// La petición de permiso de un agente ya no admite decisión (HU-020): ya se decidió,
+    /// caducó, la retiró el agente o el intento terminó o se está cancelando. `reason` es apto
+    /// para el usuario.
+    #[error("{reason}")]
+    ApprovalClosed { reason: &'static str },
+
     /// La máquina de estados de los intentos no admite el cambio. `from` y `to` son las
     /// etiquetas en español de los estados.
     #[error("Un intento «{from}» no puede pasar a «{to}».")]
@@ -142,6 +148,7 @@ pub enum ErrorCode {
     ClaimLimit,
     ClaimEnded,
     RunActive,
+    ApprovalClosed,
     InvalidRunTransition,
     StorageLocked,
     StorageNewerSchema,
@@ -190,6 +197,7 @@ impl CoreError {
             Self::ClaimLimit { .. } => ErrorCode::ClaimLimit,
             Self::ClaimEnded { .. } => ErrorCode::ClaimEnded,
             Self::RunActive { .. } => ErrorCode::RunActive,
+            Self::ApprovalClosed { .. } => ErrorCode::ApprovalClosed,
             Self::InvalidRunTransition { .. } => ErrorCode::InvalidRunTransition,
             Self::StorageLocked => ErrorCode::StorageLocked,
             Self::NewerSchema(_) => ErrorCode::StorageNewerSchema,
@@ -211,7 +219,9 @@ impl CoreError {
             | Self::RunActive { .. }
             | Self::ClaimedForRun => (self.to_string(), true),
             // El intento ya cambió de estado: reintentar lo mismo no sirve.
-            Self::InvalidRunTransition { .. } => (self.to_string(), false),
+            Self::InvalidRunTransition { .. } | Self::ApprovalClosed { .. } => {
+                (self.to_string(), false)
+            }
             // Reintentar lo mismo no sirve: el agente debe cambiar de historia o reclamar.
             Self::Claimed | Self::NotReady | Self::ClaimLimit { .. } | Self::ClaimEnded { .. } => {
                 (self.to_string(), false)

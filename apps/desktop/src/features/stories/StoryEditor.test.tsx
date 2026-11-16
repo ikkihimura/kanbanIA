@@ -838,6 +838,7 @@ describe("StoryEditor · intentos (HU-017)", () => {
     startRequest: null,
     cancelReason: null,
     worktree: null,
+    approvals: [],
   };
 
   it("el detalle muestra la instantánea, no la historia actual", async () => {

@@ -1,4 +1,6 @@
 import type { AcpSessionInfo } from "../../contracts/generated/AcpSessionInfo";
+import type { ApprovalState } from "../../contracts/generated/ApprovalState";
+import type { RunApproval } from "../../contracts/generated/RunApproval";
 import type { RunEvent } from "../../contracts/generated/RunEvent";
 import type { RunExecutor } from "../../contracts/generated/RunExecutor";
 import type { RunOutputKind } from "../../contracts/generated/RunOutputKind";
@@ -196,13 +198,62 @@ export function describeUsage(usage: RunUsage): string {
   );
 }
 
-/** Evento en texto. Los motivos los genera el núcleo; aun así se muestran como texto plano. */
-export function describeRunEvent(event: RunEvent): string {
+/**
+ * Estado de una petición de permiso (HU-020) en texto. `pending` es la vigente; una pendiente
+ * cuyo plazo ya pasó se muestra con `EXPIRED_PENDING_LABEL`.
+ */
+export const APPROVAL_STATE_LABEL: Record<ApprovalState, string> = {
+  pending: "Espera tu decisión",
+  allowed: "Permitido una vez",
+  rejected: "Rechazado",
+  expired: "Caducó (se respondió rechazar)",
+  cancelled: "Cancelado",
+  withdrawn: "Retirado por el agente",
+};
+
+/** Pendiente con el plazo ya vencido: el supervisor responderá «rechazar». */
+export const EXPIRED_PENDING_LABEL = "Caducada: la app responderá «rechazar»";
+
+/** Pendiente y dentro de plazo según el reloj local: admite decidir. */
+export function isApprovalOpen(
+  approval: Pick<RunApproval, "state" | "expiresAt">,
+  now: number,
+): boolean {
+  return approval.state === "pending" && Date.parse(approval.expiresAt) > now;
+}
+
+/** Estado visible de una petición, distinguiendo la pendiente ya caducada. */
+export function approvalStatusLabel(
+  approval: Pick<RunApproval, "state" | "expiresAt">,
+  now: number,
+): string {
+  if (approval.state === "pending" && !isApprovalOpen(approval, now))
+    return EXPIRED_PENDING_LABEL;
+  return APPROVAL_STATE_LABEL[approval.state];
+}
+
+/**
+ * Evento en texto. Los motivos los genera el núcleo; aun así se muestran como texto plano.
+ * Con `approvals`, la resolución de un permiso lleva su número («Permiso #n: …»).
+ */
+export function describeRunEvent(
+  event: RunEvent,
+  approvals: readonly Pick<RunApproval, "id" | "sequence">[] = [],
+): string {
   if (event.kind === "state_changed") {
     const to = `Estado → ${RUN_STATE_LABEL[event.to]}`;
     return event.reason === null ? to : `${to}: ${event.reason}`;
   }
   if (event.kind === "acp_session")
     return `Sesión del agente iniciada (reportado): ${describeAgentIdentity(event)} · ACP v${String(event.protocolVersion)}`;
+  if (event.kind === "approval_requested")
+    return `Petición de permiso #${String(event.sequence)}`;
+  if (event.kind === "approval_resolved") {
+    const approval = approvals.find((a) => a.id === event.approvalId);
+    const label = approval
+      ? `Permiso #${String(approval.sequence)}`
+      : "Permiso";
+    return `${label}: ${APPROVAL_STATE_LABEL[event.outcome]}`;
+  }
   return `Uso reportado (${describeUsage(event)})`;
 }

@@ -8,11 +8,13 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { RunChange } from "../../contracts/generated/RunChange";
 import type { StoryClaim } from "../../contracts/generated/StoryClaim";
 import type { StoryDetail } from "../../contracts/generated/StoryDetail";
 import type { StorySummary } from "../../contracts/generated/StorySummary";
 import * as commands from "../../shared/ipc/commands";
 import { emitAgentChange, fakeAgentChanges } from "../../test/agentChanges";
+import { RUN_CHANGE_BATCH_MS } from "../runs/useRunChanges";
 import { Board } from "./Board";
 import { applyMove } from "./boardModel";
 import { card, column } from "./boardFixtures";
@@ -27,7 +29,9 @@ vi.mock("../../shared/ipc/commands", async (importOriginal) => ({
   getStory: vi.fn(),
   acceptStory: vi.fn(),
   listActiveClaims: vi.fn(),
+  listWaitingApprovals: vi.fn(),
   onAgentChange: vi.fn(),
+  onRunChange: vi.fn(),
 }));
 
 const mocked = vi.mocked(commands);
@@ -78,9 +82,20 @@ function renderBoard() {
   return { onOpenStory };
 }
 
+type RunHandler = (change: RunChange) => void;
+const runHandlers = new Set<RunHandler>();
+
 beforeEach(() => {
   vi.clearAllMocks();
   fakeAgentChanges(mocked.onAgentChange);
+  runHandlers.clear();
+  mocked.onRunChange.mockImplementation((handler) => {
+    runHandlers.add(handler);
+    return Promise.resolve(() => {
+      runHandlers.delete(handler);
+    });
+  });
+  mocked.listWaitingApprovals.mockResolvedValue([]);
   server = [
     card("s1", "todo", 0, {
       title: "Login",
@@ -160,6 +175,53 @@ describe("Board", () => {
     if (!api) throw new Error("sin tarjeta");
     expect(api).not.toHaveTextContent(/Reclamada/);
     expect(screen.getAllByText(/Reclamada por/)).toHaveLength(1);
+  });
+
+  it("una tarjeta con un permiso pendiente lleva la insignia y marca el avatar (HU-020)", async () => {
+    renderBoard();
+    const login = await screen.findByRole("button", { name: /^#1 Login/ });
+    expect(screen.queryByText("Espera tu permiso")).not.toBeInTheDocument();
+    expect(mocked.listWaitingApprovals).toHaveBeenCalledWith("p1");
+
+    // Un aviso `run-change` vuelve a leer los permisos pendientes de la base.
+    mocked.listWaitingApprovals.mockResolvedValue([
+      {
+        storyId: "s1",
+        storyNumber: 1,
+        storyTitle: "Login",
+        runId: "r1",
+        runNumber: 1,
+        agentId: "a1",
+        pending: 1,
+        since: "2026-11-12T10:00:00Z",
+      },
+    ]);
+    await waitFor(() => {
+      expect(runHandlers.size).toBeGreaterThan(0);
+    });
+    act(() => {
+      for (const handler of runHandlers)
+        handler({ runIds: ["r1"], storyIds: ["s1"] });
+    });
+    await act(async () => {
+      await new Promise((resolve) =>
+        setTimeout(resolve, RUN_CHANGE_BATCH_MS + 20),
+      );
+    });
+
+    const item = login.closest("li");
+    if (!item) throw new Error("sin tarjeta");
+    expect(
+      await within(item).findByText("Espera tu permiso"),
+    ).toBeInTheDocument();
+    // Se anuncia al enfocar la tarjeta, no solo se ve.
+    expect(login).toHaveAccessibleDescription(/^Espera tu permiso/);
+    expect(item.querySelector(".card__agent--waiting")).toHaveTextContent(
+      "Jean Claude",
+    );
+    // Las demás tarjetas no la llevan.
+    expect(screen.getAllByText("Espera tu permiso")).toHaveLength(1);
+    expect(document.querySelectorAll(".card__agent--waiting")).toHaveLength(1);
   });
 
   it("la etiqueta del reclamo desaparece al vencer, sin recargar", async () => {

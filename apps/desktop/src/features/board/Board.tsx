@@ -11,12 +11,14 @@ import type { Column } from "../../contracts/generated/Column";
 import type { Epic } from "../../contracts/generated/Epic";
 import type { StoryClaim } from "../../contracts/generated/StoryClaim";
 import type { StorySummary } from "../../contracts/generated/StorySummary";
+import type { WaitingApproval } from "../../contracts/generated/WaitingApproval";
 import {
   listActiveClaims,
   listAgents,
   listColumns,
   listEpics,
   listStories,
+  listWaitingApprovals,
   moveStory,
   toUiError,
 } from "../../shared/ipc/commands";
@@ -24,6 +26,7 @@ import { useAgentChanges } from "../../shared/ipc/useAgentChanges";
 import { useIpcResource } from "../../shared/ipc/useIpcResource";
 import { formatTime } from "../../shared/ui/format";
 import { useUnexpiredClaims } from "../claims/useUnexpiredClaims";
+import { useRunChanges } from "../runs/useRunChanges";
 import { PRIORITY_LABEL } from "../stories/priorities";
 import { PixelAvatar } from "../team/PixelAvatar";
 import { AcceptDialog } from "./AcceptDialog";
@@ -42,6 +45,7 @@ import {
 
 const NO_CARDS: StorySummary[] = [];
 const NO_CLAIMS: StoryClaim[] = [];
+const NO_WAITING: WaitingApproval[] = [];
 
 const AGENT_NOTICE = "Tablero actualizado con cambios de un agente.";
 
@@ -105,6 +109,12 @@ export function Board({ projectId, onOpenStory }: Props) {
   const agents = useIpcResource(listAgents);
   // Los reclamos son informativos: si no cargan, el tablero funciona igual.
   const claims = useIpcResource(loadClaims);
+  // Permisos pendientes (HU-020), leídos de la base: tampoco bloquean el tablero si fallan.
+  const loadWaiting = useCallback(
+    () => listWaitingApprovals(projectId),
+    [projectId],
+  );
+  const waiting = useIpcResource(loadWaiting);
 
   const [filter, setFilter] = useState<BoardFilter>({ text: "", epicId: "" });
   const [laneMode, setLaneMode] = useState<LaneMode>("none");
@@ -146,6 +156,16 @@ export function Board({ projectId, onOpenStory }: Props) {
     claims.state.status === "ready" ? claims.state.data : NO_CLAIMS,
   );
   const claimByStory = new Map(activeClaims.map((c) => [c.storyId, c]));
+  const waitingByStory = new Map<string, number>();
+  for (const w of waiting.state.status === "ready"
+    ? waiting.state.data
+    : NO_WAITING) {
+    if (w.pending > 0)
+      waitingByStory.set(
+        w.storyId,
+        (waitingByStory.get(w.storyId) ?? 0) + w.pending,
+      );
+  }
   const byColumn = useMemo(
     () => cardsByColumn(columnList, cards),
     [columnList, cards],
@@ -171,11 +191,13 @@ export function Board({ projectId, onOpenStory }: Props) {
     }
   }, [cards, base, accepting]);
 
-  // Recarga las historias y, con ellas, los reclamos vigentes.
+  // Recarga las historias y, con ellas, los reclamos vigentes y los permisos pendientes.
+  const runWaiting = waiting.run;
   const reloadStories = useCallback(() => {
     stories.run(loadStories, { keepData: true });
     claims.run(loadClaims, { keepData: true });
-  }, [stories, claims, loadStories, loadClaims]);
+    runWaiting(loadWaiting, { keepData: true });
+  }, [stories, claims, runWaiting, loadStories, loadClaims, loadWaiting]);
 
   const reload = useCallback(() => {
     reloadStories();
@@ -204,6 +226,10 @@ export function Board({ projectId, onOpenStory }: Props) {
   useAgentChanges(projectId, () => {
     if (moving.current) agentReloadPending.current = true;
     else agentReload();
+  });
+  // Peticiones de permiso nuevas o cerradas (aviso `run-change`): solo cambia la insignia.
+  useRunChanges(() => {
+    runWaiting(loadWaiting, { keepData: true });
   });
 
   if (columns.state.status === "error" || stories.state.status === "error") {
@@ -474,6 +500,12 @@ export function Board({ projectId, onOpenStory }: Props) {
           muestran sin ellos.
         </p>
       )}
+      {waiting.state.status === "error" && (
+        <p className="field__hint">
+          No se pudieron cargar los permisos pendientes de los agentes: las
+          tarjetas se muestran sin ellos.
+        </p>
+      )}
       {claims.state.status === "error" && (
         <p className="field__hint">
           No se pudieron cargar los reclamos de agentes: las tarjetas se
@@ -558,6 +590,7 @@ export function Board({ projectId, onOpenStory }: Props) {
                               (a) => a.id === story.agentId,
                             )}
                             claim={claimByStory.get(story.id)}
+                            waitingApprovals={waitingByStory.get(story.id) ?? 0}
                             helpId={`${id}-help`}
                             disabled={busy}
                             dragging={dragId === story.id}
@@ -653,6 +686,8 @@ interface CardProps {
   epic: Epic | undefined;
   agent: Agent | undefined;
   claim: StoryClaim | undefined;
+  /** Peticiones de permiso pendientes en la base (HU-020), no lo que diga el agente. */
+  waitingApprovals: number;
   helpId: string;
   disabled: boolean;
   dragging: boolean;
@@ -672,6 +707,7 @@ function BoardCard({
   epic,
   agent,
   claim,
+  waitingApprovals,
   helpId,
   disabled,
   dragging,
@@ -686,6 +722,8 @@ function BoardCard({
   onDrop,
 }: CardProps) {
   const claimId = useId();
+  const waitingId = useId();
+  const waiting = waitingApprovals > 0;
   const blocked =
     story.blockerReason !== null || story.pendingPrerequisites > 0;
   const classes = [
@@ -728,8 +766,15 @@ function BoardCard({
         type="button"
         className="card__open"
         ref={buttonRef}
-        // El reclamo se anuncia al enfocar la tarjeta, antes de la ayuda de teclado.
-        aria-describedby={claim ? `${claimId} ${helpId}` : helpId}
+        // El permiso pendiente y el reclamo se anuncian al enfocar la tarjeta, antes de la
+        // ayuda de teclado.
+        aria-describedby={[
+          waiting ? waitingId : null,
+          claim ? claimId : null,
+          helpId,
+        ]
+          .filter(Boolean)
+          .join(" ")}
         aria-keyshortcuts="Alt+ArrowLeft Alt+ArrowRight Alt+ArrowUp Alt+ArrowDown"
         onClick={onOpen}
       >
@@ -751,6 +796,12 @@ function BoardCard({
           {story.pendingPrerequisites === 1 ? "prerequisito" : "prerequisitos"}
         </span>
       )}
+      {waiting && (
+        <span className="badge badge--warn card__waiting" id={waitingId}>
+          Espera tu permiso
+          {waitingApprovals > 1 && ` (${String(waitingApprovals)})`}
+        </span>
+      )}
       {claim && (
         <p className="card__meta card__claim" id={claimId}>
           Reclamada por {claim.owner.agentName} · vence{" "}
@@ -758,7 +809,9 @@ function BoardCard({
         </p>
       )}
       {agent && (
-        <span className="assignee card__agent">
+        <span
+          className={`assignee card__agent${waiting ? " card__agent--waiting" : ""}`}
+        >
           <PixelAvatar
             spec={agent.avatar}
             name={agent.name}

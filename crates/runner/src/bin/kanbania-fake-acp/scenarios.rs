@@ -17,7 +17,13 @@
 //! `no_modes`, `version2`, `auth`, `set_mode_error`, `cancel`, `ignore_cancel`, `refusal`,
 //! `max_tokens`, `cancelled_unasked`, `mode_change`, `config_mode_change`, `flood`, `child`,
 //! `slow_init`, `hang_init`, `permission_on_cancel`, `unknown_id`, `other_session`,
-//! `mode_no_session`, `auth_other_error`.
+//! `mode_no_session`, `auth_other_error`, `approval`, `approval_withdraw`.
+//!
+//! `approval` (HU-020) pide permiso para `touch nota.txt` y espera la respuesta tanto como
+//! haga falta (también durante una cancelación); anota el resultado en `--log`
+//! (`permiso: <optionId>` o `permiso: cancelled`) y, solo si se permitió, crea `nota.txt` en
+//! su carpeta (el efecto de la acción). `approval_withdraw` pide permiso y lo retira en seguida
+//! con `$/cancel_request`; espera el error -32800.
 
 use std::io::{BufRead, Write};
 use std::time::Duration;
@@ -321,6 +327,8 @@ impl Fake {
             }
             "child" => self.child(id),
             "permission_on_cancel" => self.permission_on_cancel(id),
+            "approval" => self.approval(id),
+            "approval_withdraw" => self.approval_withdraw(id),
             "unknown_id" => {
                 send(&json!({"jsonrpc":"2.0","id":4242,"result":{}}));
                 None
@@ -438,6 +446,87 @@ impl Fake {
         }
         message_chunk("m1", "No tengo permiso: termino sin cambios.");
         end(id, "end_turn")
+    }
+
+    /// Pide permiso y espera la respuesta (ver la documentación del módulo).
+    fn approval(&mut self, id: &Value) -> Option<i32> {
+        send(
+            &json!({"jsonrpc":"2.0","id":"permiso-nota","method":"session/request_permission","params":{
+                "sessionId": SESSION_ID,
+                "toolCall": {
+                    "toolCallId":"h3","title":"Crear nota.txt","kind":"execute","status":"pending",
+                    "rawInput": {"command":"touch nota.txt"}
+                },
+                "options": [
+                    {"optionId":"permitir-siempre","name":"Permitir siempre","kind":"allow_always"},
+                    {"optionId":"permitir-1","name":"Permitir","kind":"allow_once"},
+                    {"optionId":"rechazar-1","name":"Rechazar","kind":"reject_once"}
+                ]
+            }}),
+        );
+        let mut cancelled = false;
+        loop {
+            let message = self.recv()?;
+            if message["method"] == "session/cancel" {
+                cancelled = true;
+                continue;
+            }
+            if message["id"] != "permiso-nota" {
+                continue;
+            }
+            let outcome = &message["result"]["outcome"];
+            let choice = if outcome["outcome"] == "cancelled" {
+                "cancelled".to_owned()
+            } else {
+                outcome["optionId"].as_str().unwrap_or("?").to_owned()
+            };
+            self.note(&format!("permiso: {choice}"));
+            if choice == "permitir-1" {
+                if std::fs::write(
+                    "nota.txt", "hola
+",
+                )
+                .is_err()
+                {
+                    eprintln!("FAKE: no se pudo crear nota.txt");
+                }
+                message_chunk("m1", "Creé nota.txt.");
+            } else {
+                message_chunk("m1", "No tengo permiso: termino sin cambios.");
+            }
+            return end(id, if cancelled { "cancelled" } else { "end_turn" });
+        }
+    }
+
+    /// Pide permiso y lo retira con `$/cancel_request`.
+    fn approval_withdraw(&mut self, id: &Value) -> Option<i32> {
+        send(
+            &json!({"jsonrpc":"2.0","id":"permiso-retirado","method":"session/request_permission","params":{
+                "sessionId": SESSION_ID,
+                "toolCall": {"toolCallId":"h4","title":"Editar main.rs","kind":"edit","locations":[{"path":"src/main.rs"}]},
+                "options": [
+                    {"optionId":"permitir-1","name":"Permitir","kind":"allow_once"},
+                    {"optionId":"rechazar-1","name":"Rechazar","kind":"reject_once"}
+                ]
+            }}),
+        );
+        // Deja que el cliente la registre antes de retirarla.
+        std::thread::sleep(Duration::from_millis(500));
+        send(
+            &json!({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":"permiso-retirado"}}),
+        );
+        loop {
+            let message = self.recv()?;
+            if message["id"] == "permiso-retirado" {
+                if message["error"]["code"] == -32800 {
+                    self.note("ok: retirada respondida con -32800");
+                } else {
+                    self.note("mal: la retirada no se respondió con -32800");
+                }
+                message_chunk("m1", "Ya no necesito ese permiso.");
+                return end(id, "end_turn");
+            }
+        }
     }
 
     /// Espera `session/cancel` y después pide un permiso: la app debe responder `cancelled`.

@@ -33,16 +33,19 @@ use std::time::Duration;
 
 use kanbania_core::error::CoreError;
 use kanbania_core::features::runs::{
-    self, AcpSessionInfo, Dispatch, DispatchExecutor, DispatchOutcome, InterruptCause,
-    RUN_OUTPUT_DIR, RunChange, RunFailure, RunOutcome, RunOutputKind, RunOutputLine,
-    RunOutputStream, RunOutputView, RunSummary, SupervisorToken, TestScenario, WORKTREES_DIR,
+    self, AcpSessionInfo, ApprovalAsk, ApprovalDecision, ApprovalResolution, Dispatch,
+    DispatchExecutor, DispatchOutcome, InterruptCause, RUN_OUTPUT_DIR, RunChange, RunFailure,
+    RunOutcome, RunOutputKind, RunOutputLine, RunOutputStream, RunOutputView, RunSummary,
+    SupervisorToken, TestScenario, WORKTREES_DIR,
 };
 use kanbania_core::platform::storage::Store;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinSet;
 
 use crate::acp::{
-    AcpClient, AcpFailure, AcpLimits, AcpStop, AgentDeclaration, CLAUDE_CODE_PROFILE, OpenedSession,
+    AcpClient, AcpFailure, AcpLimits, AcpStop, AgentDeclaration, CLAUDE_CODE_PROFILE,
+    OpenedSession, PermissionAnswer, PermissionEvent, PermissionPolicy, PermissionReply,
+    permission_bridge,
 };
 use crate::output::{AgentKind, MAX_TAIL_LINES, OutputLog, Stream, read_tail};
 use crate::process::{
@@ -66,6 +69,24 @@ const SHUTDOWN_MARGIN: Duration = Duration::from_secs(10);
 
 /// Aviso de cambios para la app (el host emite `run-change`).
 pub type ChangeSink = Arc<dyn Fn(RunChange) + Send + Sync>;
+
+/// Aviso de una petición de permiso nueva (HU-020) para la notificación del sistema. Recibe solo
+/// el número de la historia: nunca el comando, la ruta ni el título de la acción. El supervisor
+/// solo lo llama si `run_settings.approval_notifications` está activado.
+#[derive(Clone)]
+pub struct ApprovalNotifier(pub Arc<dyn Fn(ApprovalNotice) + Send + Sync>);
+
+impl std::fmt::Debug for ApprovalNotifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ApprovalNotifier")
+    }
+}
+
+/// Datos de la notificación (sin detalles de la acción).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApprovalNotice {
+    pub story_number: i64,
+}
 
 /// Configuración del supervisor.
 #[derive(Debug, Clone)]
@@ -95,6 +116,8 @@ pub struct SupervisorConfig {
     pub acp_args: Vec<OsString>,
     /// Límites del cliente ACP (las pruebas los acortan).
     pub acp_limits: AcpLimits,
+    /// Notificación del sistema al pedir permiso (el host la pone; las pruebas, una propia).
+    pub approval_notifier: Option<ApprovalNotifier>,
 }
 
 impl SupervisorConfig {
@@ -111,6 +134,7 @@ impl SupervisorConfig {
             timeout_override: None,
             acp_args: Vec::new(),
             acp_limits: AcpLimits::default(),
+            approval_notifier: None,
         }
     }
 }
@@ -193,14 +217,20 @@ pub async fn recover_previous_session(
     Ok(())
 }
 
-/// Despierta al supervisor (tras iniciar, cancelar, aceptar, archivar o cambiar la
-/// configuración). Clonable y barato.
+/// Despierta al supervisor (tras iniciar, cancelar, aceptar, archivar, cambiar la
+/// configuración o decidir un permiso). Clonable y barato. También avisa a las sesiones ACP de
+/// que puede haber decisiones de permiso que entregar (HU-020).
 #[derive(Debug, Clone)]
-pub struct SupervisorWaker(Arc<Notify>);
+pub struct SupervisorWaker {
+    notify: Arc<Notify>,
+    approvals: Arc<watch::Sender<u64>>,
+}
 
 impl SupervisorWaker {
     pub fn wake(&self) {
-        self.0.notify_one();
+        self.approvals
+            .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+        self.notify.notify_one();
     }
 }
 
@@ -226,6 +256,8 @@ struct Shared {
     sink: ChangeSink,
     /// También lo lee el cliente ACP para esperar menos al cancelar durante el apagado.
     shutting_down: Arc<AtomicBool>,
+    /// Sube con cada `wake`: las sesiones ACP vuelven a mirar sus peticiones de permiso.
+    approvals: Arc<watch::Sender<u64>>,
 }
 
 impl Shared {
@@ -260,6 +292,7 @@ impl Supervisor {
         recover_previous_session(&store, &token, &sink).await?;
         let mut git = git_config(&config.data_dir, config.git_timeout);
         git.program = config.git_program.clone();
+        let approvals = Arc::new(watch::channel(0_u64).0);
         let shared = Arc::new(Shared {
             store,
             token,
@@ -267,10 +300,14 @@ impl Supervisor {
             git,
             sink,
             shutting_down: Arc::new(AtomicBool::new(false)),
+            approvals: approvals.clone(),
         });
-        let waker = SupervisorWaker(Arc::new(Notify::new()));
+        let waker = SupervisorWaker {
+            notify: Arc::new(Notify::new()),
+            approvals,
+        };
         let (stop, stopped) = watch::channel(None);
-        let task = tokio::spawn(run_loop(shared, waker.0.clone(), stopped));
+        let task = tokio::spawn(run_loop(shared, waker.notify.clone(), stopped));
         Ok(Self { waker, stop, task })
     }
 
@@ -472,7 +509,8 @@ async fn execute(
         )),
         DispatchExecutor::ClaudeAcp { .. } => log.write_system(
             "Claude Code vía ACP. Lo que el agente informa se guarda como «agente (reportado)»: \
-             la app no lo comprueba. Permisos: se rechazan todos (hasta HU-020).",
+             la app no lo comprueba. Permisos: cada petición espera la decisión de una persona \
+             (permitir una vez o rechazar; caduca a los 10 min).",
         ),
     }
 
@@ -691,17 +729,57 @@ async fn run_claude_acp(
     // 5. Negociar, registrar la sesión, enviar las instrucciones y esperar el turno.
     let limits = shared.config.acp_limits;
     let deadline = process.deadline();
-    let mut client = AcpClient::new(io, limits, Some(shared.shutting_down.clone()));
-    let ended = acp_session(
-        shared,
-        dispatch,
-        &mut client,
-        &launch.worktree,
-        &launch.instructions,
-        &mut token,
-        deadline,
-    )
-    .await;
+    let (bridge, events, answers) = permission_bridge();
+    let mut client = AcpClient::new(io, limits, Some(shared.shutting_down.clone()))
+        .with_permissions(PermissionPolicy::Ask(bridge));
+    // El broker de permisos vive mientras dure la sesión. Al terminar esta, acaba lo que tenga
+    // en curso (nunca se suelta a medias una escritura del núcleo), registra las retiradas que
+    // queden en la cola y sale; lo que quede abierto lo cierra `finish_run`.
+    let (done, session_done) = tokio::sync::oneshot::channel::<()>();
+    let session = async {
+        let ended = acp_session(
+            shared,
+            dispatch,
+            &mut client,
+            &launch.worktree,
+            &launch.instructions,
+            &mut token,
+            deadline,
+        )
+        .await;
+        let _ = done.send(());
+        ended
+    };
+    let mut events = events;
+    let mut open = Vec::new();
+    let (ended, ()) = tokio::join!(
+        session,
+        approval_broker(
+            shared,
+            dispatch,
+            &mut events,
+            &answers,
+            &mut open,
+            session_done
+        )
+    );
+    while let Ok(event) = events.try_recv() {
+        // Lo que quedó en la cola se registra igual (sin notificar), para que el historial
+        // de peticiones sea completo; `Closed`/`Withdrawn` las cierran en seguida.
+        match event {
+            PermissionEvent::Asked(ask) => {
+                if let Some(item) = register_ask(shared, dispatch, ask, None).await {
+                    open.push(item);
+                }
+            }
+            PermissionEvent::Withdrawn { key } => {
+                withdraw_open(shared, dispatch, &mut open, key, false).await;
+            }
+            PermissionEvent::Closed { key } => {
+                withdraw_open(shared, dispatch, &mut open, key, true).await;
+            }
+        }
+    }
     client.close_input();
     drop(client);
     // Tras un fin normal, el adaptador puede terminar solo al cerrar su stdin (y tras una
@@ -845,6 +923,228 @@ async fn record_session(
             log_core("registrar la sesión del agente", &error);
             Err(SessionEnd::Internal)
         }
+    }
+}
+
+// Los límites del cliente ACP (que no enlaza el núcleo) deben coincidir con los del núcleo.
+const _: () = assert!(
+    crate::acp::MAX_PENDING_PERMISSIONS as i64 == runs::MAX_PENDING_APPROVALS
+        && crate::acp::MAX_SCOPE_CHARS == runs::MAX_APPROVAL_SCOPE_CHARS
+);
+
+/// Peticiones de permiso de una sesión ACP abiertas en el núcleo.
+struct OpenApproval {
+    key: u64,
+    approval_id: String,
+    expires_at_ms: i64,
+}
+
+/// Registra una petición del agente en el núcleo y avisa a la app (y, al empezar a esperar, la
+/// notificación del sistema si está activada). Si no se puede registrar y hay a quién
+/// responder (`answers`), se responde `cancelled` (intento que ya no admite decisiones) o
+/// rechazo sin preguntar.
+async fn register_ask(
+    shared: &Shared,
+    dispatch: &Dispatch,
+    ask: crate::acp::PermissionAsk,
+    answers: Option<&tokio::sync::mpsc::Sender<PermissionAnswer>>,
+) -> Option<OpenApproval> {
+    let core_ask = ApprovalAsk {
+        tool_title: ask.title,
+        tool_kind: ask.kind,
+        scope: ask.scope,
+        can_allow: ask.can_allow,
+    };
+    match runs::request_approval(&shared.store, &shared.token, &dispatch.run_id, &core_ask).await {
+        Ok(requested) => {
+            shared.notify(&dispatch.run_id, &requested.story_id);
+            // Una notificación al empezar a esperar, no una por petición.
+            if requested.started_waiting && answers.is_some() {
+                notify_approval(shared, requested.story_number).await;
+            }
+            Some(OpenApproval {
+                key: ask.key,
+                approval_id: requested.approval.id,
+                expires_at_ms: requested.expires_at_ms,
+            })
+        }
+        Err(error) => {
+            let reply = if matches!(error, CoreError::ApprovalClosed { .. }) {
+                PermissionReply::Cancelled
+            } else {
+                log_core("registrar una petición de permiso", &error);
+                PermissionReply::Unrecorded
+            };
+            if let Some(answers) = answers {
+                let _ = answers.try_send(PermissionAnswer {
+                    key: ask.key,
+                    reply,
+                });
+            }
+            None
+        }
+    }
+}
+
+/// Pasa las peticiones del cliente ACP al núcleo (`request_approval`) y entrega las decisiones
+/// (`resolve_approval`) cuando el supervisor se despierta o vence la caducidad más próxima.
+/// Termina cuando acaba la sesión (`session_done`), entre dos operaciones.
+async fn approval_broker(
+    shared: &Shared,
+    dispatch: &Dispatch,
+    events: &mut tokio::sync::mpsc::Receiver<PermissionEvent>,
+    answers: &tokio::sync::mpsc::Sender<PermissionAnswer>,
+    open: &mut Vec<OpenApproval>,
+    mut session_done: tokio::sync::oneshot::Receiver<()>,
+) {
+    let mut epoch = shared.approvals.subscribe();
+    let mut next_expiry: Option<i64> = None;
+    let mut events_closed = false;
+    loop {
+        // Hasta la caducidad más próxima, y como mucho `poll_interval` mientras haya alguna
+        // abierta: así también caducan si el reloj salta (equipo suspendido) o si nadie despierta
+        // al supervisor. Revisar una pendiente es solo una lectura.
+        let wait_expiry = async {
+            match next_expiry {
+                Some(at_ms) => {
+                    let wait = u64::try_from(at_ms - shared.store.now_ms()).unwrap_or(0);
+                    // Un pequeño margen: el núcleo compara con su propio reloj.
+                    let wait = Duration::from_millis(wait + 50).min(shared.config.poll_interval);
+                    tokio::time::sleep(wait).await;
+                }
+                None => std::future::pending().await,
+            }
+        };
+        let event = async {
+            if events_closed {
+                std::future::pending().await
+            } else {
+                events.recv().await
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = &mut session_done => return,
+            event = event => match event {
+                Some(PermissionEvent::Asked(ask)) => {
+                    if let Some(item) = register_ask(shared, dispatch, ask, Some(answers)).await {
+                        next_expiry = Some(
+                            next_expiry.map_or(item.expires_at_ms, |at| at.min(item.expires_at_ms)),
+                        );
+                        open.push(item);
+                    }
+                }
+                Some(PermissionEvent::Withdrawn { key }) => {
+                    withdraw_open(shared, dispatch, open, key, false).await;
+                }
+                Some(PermissionEvent::Closed { key }) => {
+                    withdraw_open(shared, dispatch, open, key, true).await;
+                }
+                None => events_closed = true,
+            },
+            changed = epoch.changed() => {
+                if changed.is_err() {
+                    // El supervisor se apaga: la cancelación cerrará la sesión.
+                    let _ = (&mut session_done).await;
+                    return;
+                }
+                next_expiry = deliver_decisions(shared, dispatch, open, answers).await;
+            }
+            () = wait_expiry => {
+                next_expiry = deliver_decisions(shared, dispatch, open, answers).await;
+            }
+        }
+    }
+}
+
+/// El agente retiró una petición: se registra en el núcleo.
+async fn withdraw_open(
+    shared: &Shared,
+    dispatch: &Dispatch,
+    open: &mut Vec<OpenApproval>,
+    key: u64,
+    closed: bool,
+) {
+    if let Some(index) = open.iter().position(|o| o.key == key) {
+        let item = open.remove(index);
+        let result = if closed {
+            runs::cancel_approval(&shared.store, &shared.token, &item.approval_id).await
+        } else {
+            runs::withdraw_approval(&shared.store, &shared.token, &item.approval_id).await
+        };
+        match result {
+            Ok(_) => shared.notify(&dispatch.run_id, &dispatch.story_id),
+            Err(error) => log_core("retirar una petición de permiso", &error),
+        }
+    }
+}
+
+/// Mira cada petición abierta en el núcleo y responde las que ya tienen respuesta. Devuelve la
+/// caducidad más próxima de las que siguen pendientes.
+async fn deliver_decisions(
+    shared: &Shared,
+    dispatch: &Dispatch,
+    open: &mut Vec<OpenApproval>,
+    answers: &tokio::sync::mpsc::Sender<PermissionAnswer>,
+) -> Option<i64> {
+    let mut next_expiry: Option<i64> = None;
+    let mut changed = false;
+    let mut still_open = Vec::with_capacity(open.len());
+    for item in open.drain(..) {
+        let resolution =
+            match runs::resolve_approval(&shared.store, &shared.token, &item.approval_id).await {
+                Ok(resolution) => resolution,
+                Err(error) => {
+                    // Error transitorio (p. ej. base ocupada): se reintenta en un segundo, no
+                    // solo con el próximo `wake`.
+                    log_core("entregar una decisión de permiso", &error);
+                    let retry = shared.store.now_ms() + 1_000;
+                    next_expiry = Some(next_expiry.map_or(retry, |at| at.min(retry)));
+                    still_open.push(item);
+                    continue;
+                }
+            };
+        let reply = match resolution {
+            ApprovalResolution::Pending { expires_at_ms } => {
+                next_expiry = Some(next_expiry.map_or(expires_at_ms, |at| at.min(expires_at_ms)));
+                still_open.push(item);
+                continue;
+            }
+            ApprovalResolution::Deliver(ApprovalDecision::AllowOnce) => PermissionReply::AllowOnce,
+            ApprovalResolution::Deliver(ApprovalDecision::Reject) => PermissionReply::Reject,
+            ApprovalResolution::Expired => PermissionReply::Expired,
+            // Cerrada por una cancelación o el fin del intento: no se responde aquí. La
+            // cancelación del turno (`session/cancel`) responde `cancelled` a las pendientes en
+            // el orden de ACP; si no llegara, el tiempo máximo termina la sesión.
+            ApprovalResolution::Closed => {
+                changed = true;
+                continue;
+            }
+        };
+        changed = true;
+        let _ = answers.try_send(PermissionAnswer {
+            key: item.key,
+            reply,
+        });
+    }
+    *open = still_open;
+    if changed {
+        shared.notify(&dispatch.run_id, &dispatch.story_id);
+    }
+    next_expiry
+}
+
+/// Notificación del sistema si está activada en la configuración (solo el número de historia).
+async fn notify_approval(shared: &Shared, story_number: i64) {
+    let Some(notifier) = shared.config.approval_notifier.as_ref() else {
+        return;
+    };
+    match runs::get_run_settings(&shared.store).await {
+        Ok(settings) if settings.approval_notifications => {
+            (notifier.0)(ApprovalNotice { story_number });
+        }
+        Ok(_) => {}
+        Err(error) => log_core("leer la configuración de notificaciones", &error),
     }
 }
 

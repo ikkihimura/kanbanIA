@@ -27,9 +27,13 @@
 //!   registra lo que el agente declaró al negociar (`record_acp_session`, evento
 //!   `acp_session`) y termina con motivos del núcleo (`RunFailure`, `RunOutcome`), nunca
 //!   con texto del agente.
+//! - Aprobaciones (HU-020, `approval`): peticiones de permiso del agente que decide una persona
+//!   una sola vez (permitir una vez o rechazar), con caducidad, y que el supervisor entrega en
+//!   una transacción que vuelve a comprobar el intento. Cancelar o terminar las cierra.
 //! - Nada de esto se expone a agentes (servicio local o MCP).
 
 mod acp_session;
+mod approval;
 mod cancel;
 mod close;
 mod create;
@@ -49,6 +53,12 @@ mod worktree;
 pub use acp_session::{
     ACP_CAPABILITIES, AcpAdapterCheck, AcpSessionInfo, MAX_ACP_CAPABILITIES, MAX_ACP_NAME_CHARS,
     MAX_ACP_VERSION_CHARS, ReportedSession, prompt_digest, record_acp_session,
+};
+pub use approval::{
+    APPROVAL_TTL_MS, ApprovalAsk, ApprovalDecision, ApprovalResolution, ApprovalState,
+    DecideApprovalInput, MAX_APPROVAL_SCOPE_CHARS, MAX_APPROVAL_TITLE_CHARS, MAX_APPROVALS_PER_RUN,
+    MAX_PENDING_APPROVALS, RequestedApproval, RunApproval, WaitingApproval, cancel_approval,
+    decide_approval, list_waiting_approvals, request_approval, resolve_approval, withdraw_approval,
 };
 pub use cancel::{CancelRunInput, cancel_run};
 pub use create::{CreateRunInput, MAX_NOTE_CHARS, create_run};

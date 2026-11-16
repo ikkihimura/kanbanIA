@@ -149,6 +149,7 @@ function detail(
     startRequest: null,
     cancelReason: null,
     worktree: null,
+    approvals: [],
     ...overrides,
   };
 }
@@ -189,6 +190,7 @@ function settings(overrides: Partial<RunSettings> = {}): RunSettings {
     maxConcurrency: 2,
     timeoutMinutes: 30,
     claudeAcpPath: null,
+    approvalNotifications: false,
     revision: 1,
     ...overrides,
   };
@@ -1355,6 +1357,7 @@ describe("Sistema → Ejecuciones", () => {
       maxConcurrency: 3,
       timeoutMinutes: 45,
       claudeAcpPath: null,
+      approvalNotifications: false,
     });
     expect(
       await screen.findByText("✓ Configuración guardada."),
@@ -1390,7 +1393,7 @@ describe("Sistema → Ejecuciones", () => {
     await user.click(screen.getByRole("button", { name: "Guardar" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "La configuración cambió mientras la editabas. Ahora es: 4 a la vez, 60 min y sin adaptador de Claude Code.",
+      "La configuración cambió mientras la editabas. Ahora es: 4 a la vez, 60 min, sin adaptador de Claude Code y sin notificaciones de permisos.",
     );
     // Lo escrito se conserva.
     expect(concurrency).toHaveValue(1);
@@ -1401,6 +1404,7 @@ describe("Sistema → Ejecuciones", () => {
       maxConcurrency: 1,
       timeoutMinutes: 30,
       claudeAcpPath: null,
+      approvalNotifications: false,
     });
     expect(
       await screen.findByText("✓ Configuración guardada."),
@@ -1583,7 +1587,7 @@ describe("Iniciar con Claude Code (ACP)", () => {
       }),
     ).not.toBeInTheDocument();
     expect(form).toHaveTextContent(
-      "Lanza Claude Code en el worktree con las instrucciones de la instantánea. El agente trabaja con tu sesión de Claude Code. Hasta HU-020 la app rechaza todas sus peticiones de permiso (editar, ejecutar…), así que normalmente solo podrá leer y responder.",
+      "Lanza Claude Code en el worktree con las instrucciones de la instantánea. El agente trabaja con tu sesión de Claude Code. Cada petición de permiso (editar, ejecutar…) aparece en el detalle del intento para que la permitas una vez o la rechaces; sin respuesta en 10 minutos, se rechaza.",
     );
     expect(form).not.toHaveTextContent("No trabaja ningún agente ni IA");
     const submit = within(form).getByRole("button", { name: "Iniciar" });
@@ -1892,7 +1896,7 @@ describe("Sistema → Ejecuciones: adaptador de Claude Code", () => {
     const path = await screen.findByLabelText("Adaptador de Claude Code (ACP)");
     expect(path).toHaveValue(ACP_PATH);
     expect(path).toHaveAccessibleDescription(
-      /La app no lo incluye ni lo instala\..*necesita node en el PATH.*desde Finder.*binario autónomo.*terminal.*puede consumir tu suscripción o tu saldo.*rechaza toda petición de permiso.*«Always ask».*no cargue tu configuración de Claude Code ni la del repositorio/,
+      /La app no lo incluye ni lo instala\..*necesita node en el PATH.*desde Finder.*binario autónomo.*terminal.*puede consumir tu suscripción o tu saldo.*«Always ask».*permitas una vez o la rechaces.*no cargue tu configuración de Claude Code ni la del repositorio/,
     );
 
     // Cambiar otro campo también envía la ruta (si faltara, el núcleo la borraría).
@@ -1907,6 +1911,7 @@ describe("Sistema → Ejecuciones: adaptador de Claude Code", () => {
       maxConcurrency: 3,
       timeoutMinutes: 30,
       claudeAcpPath: null,
+      approvalNotifications: false,
     });
     await screen.findByText("✓ Configuración guardada.");
 
