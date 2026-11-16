@@ -280,6 +280,29 @@ Cuando Claude Code pide permiso (escribir un archivo, ejecutar un comando…), e
 - **Permitir un comando lo ejecuta de verdad en tu equipo** (dentro del worktree como carpeta de trabajo, pero sin sandbox): permite solo lo que entiendas.
 - Notificación del sistema opcional (desactivada por defecto): «Sistema» → «Ejecuciones» → «Avisarme…». Solo dice «Un agente pide permiso en #N», sin acción ni alcance. Usa `tauri-plugin-notification` 2.8.0 (Apache-2.0 OR MIT) desde Rust; la ventana no tiene permisos de notificación.
 
+## Codex por ACP (HU-021, M3)
+
+Segundo agente real: OpenAI Codex a través del adaptador [`@agentclientprotocol/codex-acp`](https://www.npmjs.com/package/@agentclientprotocol/codex-acp) (Apache-2.0). La app no lo incluye ni lo instala.
+
+| Herramienta | Versión verificada | Nota |
+| --- | --- | --- |
+| `@agentclientprotocol/codex-acp` | 2.5.0 (2026-11-16) | Incluye `@openai/codex` 0.165. Necesita `node` en `PATH`. |
+| Codex CLI (`codex`) | 0.160.0 | Solo para iniciar sesión en la carpeta de Codex de la app. |
+
+1. Instálalo en una carpeta propia: `npm install @agentclientprotocol/codex-acp@2.5.0`.
+2. En «Sistema» → «Ejecuciones», pega la ruta absoluta de `node_modules/.bin/codex-acp`, pulsa «Comprobar adaptador» y guarda.
+3. Inicia sesión **una vez** en la carpeta de Codex de la app con el comando que muestra esa pantalla (`CODEX_HOME='<datos>/codex-home' codex login`, o su variante de PowerShell). La app nunca usa tu `~/.codex`.
+4. En el detalle de un intento, «Iniciar…» → «Codex (ACP)».
+
+Qué hace la app con Codex:
+- Modo `read-only` (pide permiso para escribir, ejecutar con efectos o usar la red). Solo **Permitir una vez** / **Rechazar**; nunca opciones de sesión, de turno completo ni reglas permanentes.
+- Carpeta de Codex (`CODEX_HOME`) y carpeta personal (`HOME`) propias: no carga tu configuración, servidores MCP, reglas, historial ni tus skills de `~/.agents`; desactiva búsqueda web, apps, hooks, memorias, analítica y plugins remotos. Antes de cada lanzamiento borra la caché de plugins que Codex descarga y se niega a lanzar si su carpeta contiene configuración (`config.toml`, reglas, `AGENTS.md`, `prompts`, hooks…) o si el repositorio contiene `.codex/`.
+- Entorno sin claves: nunca pasa `OPENAI_*`, `CODEX_API_KEY`, `CODEX_PATH` ni similares.
+
+Comprobado con Codex real (2026-11-16): lee archivos **sin pedir permiso, también fuera del worktree** (podría leer los datos de la app); al pedir escribir solo ofrece «aceptar» o «cancelar», así que **rechazar una escritura detiene su turno** («El agente detuvo su turno tras un permiso rechazado.»); el modelo no ve ninguna skill con la configuración de la app. No informa del coste.
+
+Pruebas reales (consumen tu suscripción; solo con autorización): `KANBANIA_ACP_REAL_CODEX=/ruta/codex-acp KANBANIA_CODEX_HOME=/ruta/codex-home cargo test -p kanbania-runner --test acp_real real_codex -- --ignored --nocapture`.
+
 ## Notas
 
 - Identificador de la app: `dev.ikkidev.kanbania`.

@@ -68,8 +68,78 @@ impl TestScenario {
     }
 }
 
-/// Ejecutor elegido al pedir el inicio (HU-019). JSON con etiqueta `kind`:
-/// `{ "kind": "testProcess", "scenario": "success" }` o `{ "kind": "claudeAcp" }`.
+/// Agente real que se lanza por ACP (HU-019: Claude Code; HU-021: Codex). Cada uno tiene su
+/// adaptador en «Sistema → Ejecuciones» y su perfil en el runner (modo que pide permiso,
+/// aislamiento, entorno). La identidad del agente del equipo (nombre, avatar) no depende de él.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum AcpAgent {
+    /// Claude Code vía `@agentclientprotocol/claude-agent-acp`.
+    ClaudeCode,
+    /// Codex vía `@agentclientprotocol/codex-acp`.
+    Codex,
+}
+
+impl AcpAgent {
+    pub const ALL: [Self; 2] = [Self::ClaudeCode, Self::Codex];
+
+    /// Campo de la ruta de su adaptador en `UpdateRunSettingsInput` (errores de validación).
+    pub fn settings_field(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claudeAcpPath",
+            Self::Codex => "codexAcpPath",
+        }
+    }
+
+    /// Nombre para mostrar.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex",
+        }
+    }
+}
+
+/// Carpeta de Codex propia de la app (`CODEX_HOME`, HU-021, decisión del propietario) dentro
+/// del directorio de datos: Codex no carga la configuración, los servidores MCP, las reglas ni
+/// el historial de `~/.codex` del usuario. La persona inicia sesión una vez en ella
+/// (`CODEX_HOME=<ruta> codex login`); guarda credenciales: nunca para agentes ni en copias
+/// exportadas.
+pub const CODEX_HOME_DIR: &str = "codex-home";
+
+/// `<data_dir>/codex-home`.
+pub fn codex_home(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join(CODEX_HOME_DIR)
+}
+
+/// Estado de la carpeta de Codex de la app para «Sistema → Ejecuciones» (HU-021). Ruta local:
+/// solo para la persona, nunca para agentes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct CodexHomeStatus {
+    /// Ruta absoluta de la carpeta (para el comando `CODEX_HOME=<ruta> codex login`).
+    pub path: String,
+    /// Hay un `auth.json` (archivo normal) en la carpeta: se inició sesión alguna vez. Solo se
+    /// comprueba que exista; nunca se lee. No garantiza que la sesión siga siendo válida.
+    pub signed_in: bool,
+}
+
+/// Lee el estado de la carpeta de Codex (E/S bloqueante y breve: llámalo fuera del runtime).
+pub fn codex_home_status(data_dir: &std::path::Path) -> CodexHomeStatus {
+    let home = codex_home(data_dir);
+    let signed_in =
+        std::fs::symlink_metadata(home.join("auth.json")).is_ok_and(|metadata| metadata.is_file());
+    CodexHomeStatus {
+        path: home.to_string_lossy().into_owned(),
+        signed_in,
+    }
+}
+
+/// Ejecutor elegido al pedir el inicio (HU-019, HU-021). JSON con etiqueta `kind`:
+/// `{ "kind": "testProcess", "scenario": "success" }`, `{ "kind": "claudeAcp" }` o
+/// `{ "kind": "codexAcp" }`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 #[ts(export)]
@@ -78,6 +148,8 @@ pub enum RunExecutor {
     TestProcess { scenario: TestScenario },
     /// Claude Code vía ACP con el adaptador configurado en «Sistema → Ejecuciones».
     ClaudeAcp,
+    /// Codex vía ACP con el adaptador configurado en «Sistema → Ejecuciones» (HU-021).
+    CodexAcp,
 }
 
 impl RunExecutor {
@@ -86,6 +158,16 @@ impl RunExecutor {
         match self {
             Self::TestProcess { .. } => "test_process",
             Self::ClaudeAcp => "claude_acp",
+            Self::CodexAcp => "codex_acp",
+        }
+    }
+
+    /// Agente ACP del ejecutor (ninguno para el proceso de prueba).
+    pub fn acp_agent(self) -> Option<AcpAgent> {
+        match self {
+            Self::TestProcess { .. } => None,
+            Self::ClaudeAcp => Some(AcpAgent::ClaudeCode),
+            Self::CodexAcp => Some(AcpAgent::Codex),
         }
     }
 
@@ -93,7 +175,7 @@ impl RunExecutor {
     pub(super) fn scenario(self) -> Option<TestScenario> {
         match self {
             Self::TestProcess { scenario } => Some(scenario),
-            Self::ClaudeAcp => None,
+            Self::ClaudeAcp | Self::CodexAcp => None,
         }
     }
 
@@ -104,6 +186,7 @@ impl RunExecutor {
                 scenario: TestScenario::parse(scenario)?,
             }),
             ("claude_acp", None) => Ok(Self::ClaudeAcp),
+            ("codex_acp", None) => Ok(Self::CodexAcp),
             _ => Err(CoreError::Database(sqlx::Error::Decode(
                 format!("ejecutor desconocido: {executor}").into(),
             ))),
@@ -142,7 +225,8 @@ struct Payload<'a> {
 /// que el supervisor tenga hueco y lo despache, momento en que vuelve a evaluar
 /// `ensure_runnable`.
 ///
-/// Errores: `claudeAcp` sin la ruta del adaptador configurada → `validation` (`executor`);
+/// Errores: `claudeAcp`/`codexAcp` sin la ruta de su adaptador configurada → `validation`
+/// (`executor`);
 /// intento de otro proyecto o inexistente → `not_found`; no está en cola →
 /// `invalid_run_transition`; ya tiene una petición pendiente → `validation` (`runId`);
 /// la instantánea no tiene ningún repositorio con commit, el indicado no está en ella o no
@@ -188,14 +272,15 @@ pub async fn start_run(
                         ),
                     });
                 }
-                if input.executor == RunExecutor::ClaudeAcp
-                    && load_settings(conn).await?.claude_acp_path.is_none()
+                if let Some(agent) = input.executor.acp_agent()
+                    && load_settings(conn).await?.adapter_path(agent).is_none()
                 {
                     return Err(CoreError::Validation {
                         field: "executor",
-                        reason: "Configura la ruta del adaptador de Claude Code en Sistema → \
-                                 Ejecuciones."
-                            .into(),
+                        reason: format!(
+                            "Configura la ruta del adaptador de {} en Sistema → Ejecuciones.",
+                            agent.label()
+                        ),
                     });
                 }
                 let snapshot = load_snapshot(conn, &run.id).await?;

@@ -14,7 +14,7 @@ use kanbania_core::features::projects::{CreateProjectInput, Project, create_proj
 use kanbania_core::features::relations::{SetStoryAgentInput, set_story_agent};
 use kanbania_core::features::repositories::{LinkRepositoryInput, link_repository};
 use kanbania_core::features::runs::{
-    AcpAdapterCheck, AcpSessionInfo, CreateRunInput, DispatchExecutor, DispatchOutcome,
+    AcpAdapterCheck, AcpAgent, AcpSessionInfo, CreateRunInput, DispatchExecutor, DispatchOutcome,
     RecordRunEventInput, RunEvent, RunExecutor, RunFailure, RunOutcome, RunSettings, RunState,
     RunSummary, StartRunInput, SupervisorToken, TestScenario, UpdateRunSettingsInput,
     begin_dispatch, create_run, finish_run, get_run, get_run_settings, mark_running, prompt_digest,
@@ -25,7 +25,8 @@ use kanbania_core::features::stories::{
     get_story, update_story,
 };
 use kanbania_core::features::team::{
-    Agent, AgentFields, AvatarSpec, Capability, CreateAgentInput, create_agent,
+    Agent, AgentFields, AvatarSpec, Capability, CreateAgentInput, UpdateAgentInput, create_agent,
+    list_agents, update_agent,
 };
 use kanbania_core::platform::actor::Actor;
 use kanbania_core::platform::clock::ManualClock;
@@ -228,6 +229,7 @@ impl Board {
                 max_concurrency: current.max_concurrency,
                 timeout_minutes: current.timeout_minutes,
                 claude_acp_path: path.map(str::to_owned),
+                codex_acp_path: None,
                 approval_notifications: false,
             },
         )
@@ -298,6 +300,7 @@ fn session() -> AcpSessionInfo {
         mode: Some("default".into()),
         prompt_sha256: None,
         prompt_chars: None,
+        model: None,
     }
 }
 
@@ -343,8 +346,23 @@ fn executor_and_session_have_a_stable_json_shape() {
             "mode": "default",
             "promptSha256": null,
             "promptChars": null,
+            "model": null,
         })
     );
+    // HU-021: Codex y el modelo declarado; los eventos anteriores (sin `model`) se siguen leyendo.
+    assert_eq!(
+        serde_json::to_value(RunExecutor::CodexAcp).unwrap(),
+        json!({ "kind": "codexAcp" })
+    );
+    let old: RunEvent = serde_json::from_value(json!({
+        "kind": "acp_session", "protocolVersion": 1, "agentName": null, "agentTitle": null,
+        "agentVersion": null, "capabilities": [], "mode": "default"
+    }))
+    .unwrap();
+    let RunEvent::AcpSession(old) = old else {
+        panic!("debía ser acp_session");
+    };
+    assert_eq!(old.model, None);
 }
 
 /// Base con el esquema de la migración 0012 (las migraciones 0001..0012 del repositorio
@@ -643,7 +661,8 @@ async fn acp_executor_needs_a_configured_adapter() {
         panic!("debía despacharse");
     };
     let repository_path = dispatch.repository_path.to_str().unwrap().to_owned();
-    let DispatchExecutor::ClaudeAcp {
+    let DispatchExecutor::Acp {
+        agent: AcpAgent::ClaudeCode,
         adapter_path,
         instructions,
     } = dispatch.executor
@@ -779,6 +798,7 @@ async fn adapter_path_is_checked_on_disk_before_saving() {
                     max_concurrency: 2,
                     timeout_minutes: 30,
                     claude_acp_path: Some(adapter.to_str().unwrap().into()),
+                    codex_acp_path: None,
                     approval_notifications: false,
                 },
             )
@@ -844,6 +864,7 @@ async fn acp_session_is_recorded_as_a_reported_event() {
         mode: None,
         prompt_sha256: None,
         prompt_chars: None,
+        model: None,
     };
     record_acp_session(&b.store, &b.token, &run.id, &minimal)
         .await
@@ -1018,7 +1039,7 @@ async fn acp_outcomes_produce_safe_core_reasons() {
             "El agente no habla una versión de ACP compatible (se requiere la 1).",
         ),
         (
-            RunFailure::AgentAuthRequired,
+            RunFailure::AgentAuthRequired(AcpAgent::ClaudeCode),
             "El agente necesita iniciar sesión: abre Claude Code en una terminal y usa /login.",
         ),
         (
@@ -1039,7 +1060,7 @@ async fn acp_outcomes_produce_safe_core_reasons() {
             "El agente devolvió un error durante el turno. Consulta el registro del intento.",
         ),
         (
-            RunFailure::AdapterMissing,
+            RunFailure::AdapterMissing(AcpAgent::ClaudeCode),
             "No se encontró el adaptador de Claude Code configurado o no es ejecutable.",
         ),
     ];
@@ -1306,7 +1327,7 @@ async fn copied_text_cannot_forge_the_content_marks() {
     let DispatchOutcome::Ready(dispatch) = b.dispatch(&run).await else {
         panic!("debía despacharse");
     };
-    let DispatchExecutor::ClaudeAcp { instructions, .. } = dispatch.executor else {
+    let DispatchExecutor::Acp { instructions, .. } = dispatch.executor else {
         panic!("debía ser ACP");
     };
     assert_single_marks(&instructions);
@@ -1330,6 +1351,7 @@ async fn an_unchanged_adapter_path_is_not_checked_again() {
             max_concurrency: 5,
             timeout_minutes: current.timeout_minutes,
             claude_acp_path: Some(format!(" {path} ")),
+            codex_acp_path: None,
             approval_notifications: false,
         },
     )
@@ -1355,6 +1377,7 @@ async fn an_unchanged_adapter_path_is_not_checked_again() {
             max_concurrency: 3,
             timeout_minutes: current.timeout_minutes,
             claude_acp_path: Some(path.clone()),
+            codex_acp_path: None,
             approval_notifications: false,
         },
     )
@@ -1371,7 +1394,7 @@ async fn spawn_failures_have_neutral_core_reasons() {
     for (failure, reason) in [
         (RunFailure::SpawnFailed, "No se pudo lanzar el proceso."),
         (
-            RunFailure::AdapterSpawnFailed,
+            RunFailure::AdapterSpawnFailed(AcpAgent::ClaudeCode),
             "No se pudo lanzar el adaptador de Claude Code configurado. Consulta el registro del \
              intento.",
         ),
@@ -1383,4 +1406,326 @@ async fn spawn_failures_have_neutral_core_reasons() {
         assert_eq!(done.state, RunState::Failed);
         assert_eq!(done.end_reason.as_deref(), Some(reason));
     }
+}
+
+/// HU-021: el segundo agente (Codex) tiene su propia ruta de adaptador, independiente de la de
+/// Claude Code; el despacho lleva el agente elegido.
+#[tokio::test]
+async fn codex_executor_uses_its_own_adapter_path() {
+    let b = Board::new().await;
+    let run = b.run("Con Codex").await;
+    let claude = b.adapter("claude-agent-acp");
+    b.set_adapter(Some(claude.to_str().unwrap())).await.unwrap();
+
+    // Con solo Claude Code configurado, Codex no se puede iniciar (y el error lo nombra).
+    let (code, field, message) = error(
+        start_run(
+            &b.store,
+            &Actor::Human,
+            &b.start_input(&run, RunExecutor::CodexAcp),
+        )
+        .await,
+    );
+    assert_eq!((code, field.as_str()), (ErrorCode::Validation, "executor"));
+    assert!(message.contains("adaptador de Codex"), "{message}");
+
+    // Ruta de Codex no válida → error en su propio campo, sin tocar la de Claude Code.
+    let current = get_run_settings(&b.store).await.unwrap();
+    let mut input = UpdateRunSettingsInput {
+        expected_revision: current.revision,
+        max_concurrency: current.max_concurrency,
+        timeout_minutes: current.timeout_minutes,
+        claude_acp_path: current.claude_acp_path.clone(),
+        codex_acp_path: Some("codex-acp".into()),
+        approval_notifications: false,
+    };
+    let (code, field, _) = error(update_run_settings(&b.store, &Actor::Human, &input).await);
+    assert_eq!(
+        (code, field.as_str()),
+        (ErrorCode::Validation, "codexAcpPath")
+    );
+
+    let codex = b.adapter("codex-acp");
+    input.codex_acp_path = Some(codex.to_str().unwrap().into());
+    let saved = update_run_settings(&b.store, &Actor::Human, &input)
+        .await
+        .unwrap();
+    assert_eq!(saved.codex_acp_path.as_deref(), codex.to_str());
+    assert_eq!(saved.claude_acp_path.as_deref(), claude.to_str());
+
+    b.start(&run, RunExecutor::CodexAcp).await;
+    let stored: (String, Option<String>) =
+        sqlx::query_as("SELECT executor, scenario FROM run_start_requests WHERE run_id = ?")
+            .bind(&run.id)
+            .fetch_one(b.store.reader())
+            .await
+            .unwrap();
+    assert_eq!(stored, ("codex_acp".into(), None));
+    let detail = get_run(&b.store, &b.project.id, &run.id).await.unwrap();
+    assert_eq!(
+        detail.start_request.unwrap().executor,
+        RunExecutor::CodexAcp
+    );
+    let DispatchOutcome::Ready(dispatch) = b.dispatch(&run).await else {
+        panic!("debía despacharse");
+    };
+    let DispatchExecutor::Acp {
+        agent,
+        adapter_path,
+        instructions,
+    } = dispatch.executor
+    else {
+        panic!("debía ser ACP");
+    };
+    assert_eq!((agent, adapter_path), (AcpAgent::Codex, codex));
+    // Las mismas instrucciones que recibiría Claude Code (sin rutas absolutas).
+    assert!(instructions.contains("Trabajas en tu carpeta actual"));
+
+    // Quitar la ruta de Codex tras pedir el inicio → falla con el motivo de Codex.
+    let second = b.run("Codex sin adaptador al despachar").await;
+    b.start(&second, RunExecutor::CodexAcp).await;
+    let current = get_run_settings(&b.store).await.unwrap();
+    update_run_settings(
+        &b.store,
+        &Actor::Human,
+        &UpdateRunSettingsInput {
+            expected_revision: current.revision,
+            codex_acp_path: None,
+            ..input
+        },
+    )
+    .await
+    .unwrap();
+    let DispatchOutcome::Rejected(rejected) = b.dispatch(&second).await else {
+        panic!("debía rechazarse");
+    };
+    assert_eq!(
+        rejected.end_reason.as_deref(),
+        Some("No se encontró el adaptador de Codex configurado o no es ejecutable.")
+    );
+}
+
+/// HU-021: motivos propios de Codex, todos generados por el núcleo.
+#[tokio::test]
+async fn codex_outcomes_have_core_reasons() {
+    let b = Board::new().await;
+    for (failure, reason) in [
+        (
+            RunFailure::AgentAuthRequired(AcpAgent::Codex),
+            "Codex necesita iniciar sesión en la carpeta de Codex de la app: usa el comando que \
+             muestra Sistema → Ejecuciones.",
+        ),
+        (
+            RunFailure::AgentConfigInRepository(AcpAgent::Codex),
+            "El repositorio contiene configuración de Codex (.codex/), que podría saltarse los \
+             permisos o lanzar programas: la app no ejecuta Codex en él.",
+        ),
+        (
+            RunFailure::AdapterSpawnFailed(AcpAgent::Codex),
+            "No se pudo lanzar el adaptador de Codex configurado. Consulta el registro del \
+             intento.",
+        ),
+    ] {
+        let run = b.preparing(&format!("{failure:?}")).await;
+        let done = finish_run(&b.store, &b.token, &run.id, RunOutcome::Failed(failure))
+            .await
+            .unwrap();
+        assert_eq!(done.state, RunState::Failed);
+        assert_eq!(done.end_reason.as_deref(), Some(reason));
+    }
+    // Codex detiene el turno al rechazar una edición: termina como completado, con su motivo.
+    let run = b.running("Rechazo que detiene el turno").await;
+    let done = finish_run(
+        &b.store,
+        &b.token,
+        &run.id,
+        RunOutcome::AgentStoppedAfterRejection,
+    )
+    .await
+    .unwrap();
+    assert_eq!(done.state, RunState::Completed);
+    assert_eq!(
+        done.end_reason.as_deref(),
+        Some("El agente detuvo su turno tras un permiso rechazado.")
+    );
+}
+
+/// HU-021: el modelo que declara el agente se registra si cumple los límites y se omite si no.
+#[test]
+fn the_declared_model_is_kept_only_within_limits() {
+    let base = AcpSessionInfo::from_reported(1, None, None, None, vec![], None).info;
+    assert_eq!(
+        base.clone()
+            .with_model(Some("gpt-6.1-sol[medium]"))
+            .model
+            .as_deref(),
+        Some("gpt-6.1-sol[medium]")
+    );
+    assert_eq!(base.clone().with_model(Some(&"x".repeat(51))).model, None);
+    assert_eq!(base.clone().with_model(Some("modelo\u{202e}")).model, None);
+    assert_eq!(base.with_model(None).model, None);
+}
+
+/// HU-021: la carpeta de Codex de la app vive en el directorio de datos y «sesión iniciada» solo
+/// mira que exista `auth.json` como archivo normal (nunca lo lee).
+#[test]
+fn codex_home_status_only_checks_that_the_login_file_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let status = kanbania_core::features::runs::codex_home_status(dir.path());
+    assert_eq!(
+        status.path,
+        dir.path().join("codex-home").to_string_lossy().into_owned()
+    );
+    assert!(!status.signed_in);
+    let home = dir.path().join("codex-home");
+    std::fs::create_dir_all(home.join("auth.json")).unwrap();
+    assert!(!kanbania_core::features::runs::codex_home_status(dir.path()).signed_in);
+    std::fs::remove_dir(home.join("auth.json")).unwrap();
+    std::fs::write(home.join("auth.json"), "{}").unwrap();
+    assert!(kanbania_core::features::runs::codex_home_status(dir.path()).signed_in);
+}
+
+/// HU-021 (CA-2): el mismo agente del equipo (id, nombre, avatar) trabaja una historia con
+/// Claude Code y después con Codex; cambiar su proveedor y modelo entre medias conserva su
+/// identidad, y cada intento congela el perfil que tenía al crearse.
+#[tokio::test]
+async fn the_same_team_agent_runs_with_either_adapter() {
+    let b = Board::new().await;
+    let claude = b.adapter("claude-agent-acp");
+    let codex = b.adapter("codex-acp");
+    let current = get_run_settings(&b.store).await.unwrap();
+    update_run_settings(
+        &b.store,
+        &Actor::Human,
+        &UpdateRunSettingsInput {
+            expected_revision: current.revision,
+            max_concurrency: current.max_concurrency,
+            timeout_minutes: current.timeout_minutes,
+            claude_acp_path: Some(claude.to_str().unwrap().into()),
+            codex_acp_path: Some(codex.to_str().unwrap().into()),
+            approval_notifications: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    let story = b.assigned("Misma historia, dos agentes").await;
+    let new_run = || async {
+        create_run(
+            &b.store,
+            &Actor::Human,
+            &CreateRunInput {
+                request_id: rid(),
+                project_id: b.project.id.clone(),
+                story_id: story.id.clone(),
+                agent_id: None,
+                note: None,
+            },
+        )
+        .await
+        .unwrap()
+    };
+    let first = new_run().await;
+    b.start(&first, RunExecutor::ClaudeAcp).await;
+    assert!(matches!(
+        b.dispatch(&first).await,
+        DispatchOutcome::Ready(_)
+    ));
+    record_worktree(&b.store, &b.token, &first.id)
+        .await
+        .unwrap();
+    mark_running(&b.store, &b.token, &first.id).await.unwrap();
+    finish_run(&b.store, &b.token, &first.id, RunOutcome::AgentEndedTurn)
+        .await
+        .unwrap();
+
+    let fields = AgentFields {
+        name: b.agent.name.clone(),
+        role: b.agent.role.clone(),
+        provider: "OpenAI".into(),
+        model: "gpt-6.1-sol".into(),
+        capabilities: b.agent.capabilities.clone(),
+        avatar: b.agent.avatar,
+    };
+    let updated = update_agent(
+        &b.store,
+        &UpdateAgentInput {
+            id: b.agent.id.clone(),
+            expected_revision: b.agent.revision,
+            fields,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (updated.id.as_str(), updated.name.as_str(), &updated.avatar),
+        (b.agent.id.as_str(), b.agent.name.as_str(), &b.agent.avatar)
+    );
+
+    let second = new_run().await;
+    b.start(&second, RunExecutor::CodexAcp).await;
+    let DispatchOutcome::Ready(dispatch) = b.dispatch(&second).await else {
+        panic!("debía despacharse");
+    };
+    assert!(matches!(
+        dispatch.executor,
+        DispatchExecutor::Acp {
+            agent: AcpAgent::Codex,
+            ..
+        }
+    ));
+
+    let one = get_run(&b.store, &b.project.id, &first.id).await.unwrap();
+    let two = get_run(&b.store, &b.project.id, &second.id).await.unwrap();
+    assert_eq!(one.run.agent_id, b.agent.id);
+    assert_eq!(two.run.agent_id, b.agent.id);
+    assert_eq!(one.snapshot.agent.id, two.snapshot.agent.id);
+    assert_eq!(
+        (
+            one.snapshot.agent.provider.as_str(),
+            two.snapshot.agent.provider.as_str()
+        ),
+        ("Proveedor", "OpenAI"),
+        "cada intento congela el perfil que tenía al crearse"
+    );
+    assert_eq!(list_agents(&b.store).await.unwrap().len(), 1);
+}
+
+/// HU-021: cambiar solo la ruta de Codex con una revisión obsoleta es un conflicto.
+#[tokio::test]
+async fn a_stale_codex_path_change_is_a_conflict() {
+    let b = Board::new().await;
+    let codex = b.adapter("codex-acp");
+    let current = get_run_settings(&b.store).await.unwrap();
+    let input = UpdateRunSettingsInput {
+        expected_revision: current.revision,
+        max_concurrency: current.max_concurrency,
+        timeout_minutes: current.timeout_minutes,
+        claude_acp_path: None,
+        codex_acp_path: Some(codex.to_str().unwrap().into()),
+        approval_notifications: false,
+    };
+    update_run_settings(&b.store, &Actor::Human, &input)
+        .await
+        .unwrap();
+    let (code, _, _) = error(
+        update_run_settings(
+            &b.store,
+            &Actor::Human,
+            &UpdateRunSettingsInput {
+                codex_acp_path: None,
+                ..input
+            },
+        )
+        .await,
+    );
+    assert_eq!(code, ErrorCode::Conflict);
+    assert_eq!(
+        get_run_settings(&b.store)
+            .await
+            .unwrap()
+            .codex_acp_path
+            .as_deref(),
+        codex.to_str()
+    );
 }

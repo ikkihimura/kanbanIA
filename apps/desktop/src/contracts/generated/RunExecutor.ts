@@ -2,7 +2,8 @@
 import type { TestScenario } from "./TestScenario";
 
 /**
- * Ejecutor elegido al pedir el inicio (HU-019). JSON con etiqueta `kind`:
- * `{ "kind": "testProcess", "scenario": "success" }` o `{ "kind": "claudeAcp" }`.
+ * Ejecutor elegido al pedir el inicio (HU-019, HU-021). JSON con etiqueta `kind`:
+ * `{ "kind": "testProcess", "scenario": "success" }`, `{ "kind": "claudeAcp" }` o
+ * `{ "kind": "codexAcp" }`.
  */
-export type RunExecutor = { "kind": "testProcess", scenario: TestScenario, } | { "kind": "claudeAcp" };
+export type RunExecutor = { "kind": "testProcess", scenario: TestScenario, } | { "kind": "claudeAcp" } | { "kind": "codexAcp" };

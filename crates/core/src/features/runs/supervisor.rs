@@ -28,7 +28,7 @@ use super::run::{RunState, RunSummary, require_run_any, transition, validate_id}
 use super::runnable::ensure_runnable;
 use super::settings::load_settings;
 use super::snapshot::agent_instructions;
-use super::start::{RunExecutor, TestScenario, load_snapshot};
+use super::start::{AcpAgent, RunExecutor, TestScenario, load_snapshot};
 use super::worktree::{RunWorktree, load_worktree, worktree_plan};
 use crate::error::CoreError;
 use crate::features::stories::load_story;
@@ -88,8 +88,9 @@ pub struct PendingStart {
 pub enum DispatchExecutor {
     /// Proceso de prueba incluido (sin IA) con su escenario.
     TestProcess(TestScenario),
-    /// Claude Code vía ACP (HU-019).
-    ClaudeAcp {
+    /// Un agente real vía ACP (HU-019: Claude Code; HU-021: Codex).
+    Acp {
+        agent: AcpAgent,
         /// Ruta del adaptador leída de la configuración al despachar, tal como la escribió la
         /// persona (se validó en disco al guardarla; puede haber cambiado después: si no se
         /// puede lanzar → `RunFailure::AdapterMissing`).
@@ -164,7 +165,7 @@ pub enum RunFailure {
     /// ACP: `initialize` respondió con una versión de protocolo distinta de la 1.
     AgentVersionUnsupported,
     /// ACP: el agente exige autenticarse (la app nunca autentica por su cuenta).
-    AgentAuthRequired,
+    AgentAuthRequired(AcpAgent),
     /// ACP: no hay un modo que pida permiso antes de actuar, o no se pudo fijar.
     AgentModeUnavailable,
     /// ACP: `stopReason: refusal`.
@@ -177,10 +178,17 @@ pub enum RunFailure {
     /// ACP: error JSON-RPC a `session/prompt` (el turno no terminó).
     AgentTurnFailed,
     /// ACP: el adaptador configurado no existe o no se puede ejecutar (o no hay ruta).
-    AdapterMissing,
+    AdapterMissing(AcpAgent),
     /// ACP: el adaptador existe pero no se pudo lanzar por otro motivo (el detalle va al
     /// registro del intento).
-    AdapterSpawnFailed,
+    AdapterSpawnFailed(AcpAgent),
+    /// ACP (Codex, HU-021): el worktree trae configuración del agente (`.codex/`), que se
+    /// cargaría al abrir la sesión (servidores MCP, reglas que ejecutan sin preguntar): no se
+    /// lanza.
+    AgentConfigInRepository(AcpAgent),
+    /// ACP (Codex, HU-021): la carpeta de Codex de la app (`CODEX_HOME`) contiene configuración
+    /// (`config.toml`, reglas, `AGENTS.md`…) que Codex cargaría: no se lanza.
+    AgentConfigInCodexHome,
 }
 
 impl RunFailure {
@@ -201,9 +209,13 @@ impl RunFailure {
                 "No se pudo crear el worktree del intento. Consulta el registro del intento."
             }
             Self::SpawnFailed => "No se pudo lanzar el proceso.",
-            Self::AdapterSpawnFailed => {
+            Self::AdapterSpawnFailed(AcpAgent::ClaudeCode) => {
                 "No se pudo lanzar el adaptador de Claude Code configurado. Consulta el registro \
                  del intento."
+            }
+            Self::AdapterSpawnFailed(AcpAgent::Codex) => {
+                "No se pudo lanzar el adaptador de Codex configurado. Consulta el registro del \
+                 intento."
             }
             Self::Internal => {
                 "El supervisor detuvo el intento por un error interno. Consulta el registro del \
@@ -214,8 +226,12 @@ impl RunFailure {
             Self::AgentVersionUnsupported => {
                 "El agente no habla una versión de ACP compatible (se requiere la 1)."
             }
-            Self::AgentAuthRequired => {
+            Self::AgentAuthRequired(AcpAgent::ClaudeCode) => {
                 "El agente necesita iniciar sesión: abre Claude Code en una terminal y usa /login."
+            }
+            Self::AgentAuthRequired(AcpAgent::Codex) => {
+                "Codex necesita iniciar sesión en la carpeta de Codex de la app: usa el comando \
+                 que muestra Sistema → Ejecuciones."
             }
             Self::AgentModeUnavailable => {
                 "El agente no permite fijar un modo que pida permiso antes de actuar: no se \
@@ -230,8 +246,24 @@ impl RunFailure {
             Self::AgentTurnFailed => {
                 "El agente devolvió un error durante el turno. Consulta el registro del intento."
             }
-            Self::AdapterMissing => {
+            Self::AdapterMissing(AcpAgent::ClaudeCode) => {
                 "No se encontró el adaptador de Claude Code configurado o no es ejecutable."
+            }
+            Self::AdapterMissing(AcpAgent::Codex) => {
+                "No se encontró el adaptador de Codex configurado o no es ejecutable."
+            }
+            Self::AgentConfigInRepository(AcpAgent::Codex) => {
+                "El repositorio contiene configuración de Codex (.codex/), que podría saltarse los \
+                 permisos o lanzar programas: la app no ejecuta Codex en él."
+            }
+            Self::AgentConfigInCodexHome => {
+                "La carpeta de Codex de la app contiene configuración (config.toml, reglas, \
+                 AGENTS.md…) que podría saltarse los permisos: bórrala o vuelve a crear la \
+                 carpeta e inicia sesión de nuevo."
+            }
+            Self::AgentConfigInRepository(AcpAgent::ClaudeCode) => {
+                "El repositorio contiene configuración del agente que podría saltarse los \
+                 permisos: la app no lo ejecuta en él."
             }
         }
     }
@@ -248,6 +280,11 @@ pub enum RunOutcome {
     /// verificación. Después el supervisor cierra el adaptador y mata su árbol: su código de
     /// salida ya no dice nada del resultado.
     AgentEndedTurn,
+    /// ACP (Codex, HU-021): el agente detuvo el turno él mismo justo después de que la app
+    /// rechazara un permiso (por decisión de una persona o por caducidad); Codex no tiene
+    /// «rechazar y seguir» para las ediciones → `completed` («El agente detuvo su turno tras un
+    /// permiso rechazado.»). Igual que `AgentEndedTurn`, no acepta ni mueve la historia.
+    AgentStoppedAfterRejection,
     /// Lo terminó una señal que no envió el supervisor → `failed`.
     Signaled { signal: Option<i32> },
     /// Superó el tiempo máximo y el supervisor mató su árbol → `failed`.
@@ -429,14 +466,20 @@ async fn prepare(
     let settings = load_settings(conn).await?;
     let executor = match executor {
         RunExecutor::TestProcess { scenario } => DispatchExecutor::TestProcess(scenario),
-        RunExecutor::ClaudeAcp => {
+        RunExecutor::ClaudeAcp | RunExecutor::CodexAcp => {
+            let Some(agent) = executor.acp_agent() else {
+                return Err(CoreError::Database(sqlx::Error::Decode(
+                    "ejecutor ACP sin agente".into(),
+                )));
+            };
             // La persona pudo quitar la ruta después de pedir el inicio.
-            let Some(path) = settings.claude_acp_path else {
+            let Some(path) = settings.adapter_path(agent) else {
                 return Ok(Prepared::Rejected(
-                    RunFailure::AdapterMissing.reason().to_owned(),
+                    RunFailure::AdapterMissing(agent).reason().to_owned(),
                 ));
             };
-            DispatchExecutor::ClaudeAcp {
+            DispatchExecutor::Acp {
+                agent,
                 adapter_path: PathBuf::from(path),
                 instructions: agent_instructions(
                     &load_snapshot(conn, &run.id).await?,
@@ -658,6 +701,10 @@ pub async fn finish_run(
                     RunOutcome::AgentEndedTurn => (
                         RunState::Completed,
                         "El agente terminó su turno.".to_owned(),
+                    ),
+                    RunOutcome::AgentStoppedAfterRejection => (
+                        RunState::Completed,
+                        "El agente detuvo su turno tras un permiso rechazado.".to_owned(),
                     ),
                     RunOutcome::Exited { code: 0 } => {
                         (RunState::Completed, "Terminó con código 0.".to_owned())

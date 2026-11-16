@@ -9,11 +9,14 @@
 //! - Por intento: `begin_dispatch` → `record_worktree` (antes de tocar el disco: si la app muere
 //!   en medio, el worktree nunca queda sin registrar) → `create_worktree` → lanzar el ejecutor →
 //!   `mark_running` → esperar → `finish_run`.
-//! - Ejecutores: el proceso de prueba (sin IA, HU-018) y Claude Code vía ACP (HU-019): el
-//!   adaptador configurado se lanza en modo protocolo (sin argumentos, `cwd` = worktree) y,
-//!   ya en `running`, se negocia (`initialize`, `session/new`, modo `default`), se registra la
-//!   sesión (`record_acp_session`), se envían las instrucciones de la instantánea y se espera
-//!   el fin del turno. Fallo al lanzar → `AdapterMissing` (no existe) o
+//! - Ejecutores: el proceso de prueba (sin IA, HU-018) y un agente vía ACP (HU-019: Claude
+//!   Code; HU-021: Codex), con el perfil del agente ([`acp_profile`]) y su entorno
+//!   ([`adapter_env`]): el adaptador configurado se lanza en modo protocolo (sin argumentos,
+//!   `cwd` = worktree) y, ya en `running`, se negocia (`initialize`, `session/new`, modo del
+//!   perfil), se registra la sesión (`record_acp_session`), se envían las instrucciones de la
+//!   instantánea y se espera el fin del turno. No se lanza si el worktree trae configuración
+//!   del agente (perfil: Codex, `.codex` → `AgentConfigInRepository`) ni, en Codex, si su
+//!   carpeta propia trae configuración (`codex_home_config` → `AgentConfigInCodexHome`). Fallo al lanzar → `AdapterMissing` (no existe) o
 //!   `AdapterSpawnFailed` (otro motivo). Cancelar, el tiempo máximo y el
 //!   apagado envían `session/cancel` y terminan el árbol tras una espera acotada.
 //! - Ante un error del núcleo no se reintenta a ciegas: se registra y la siguiente vuelta relee
@@ -33,7 +36,7 @@ use std::time::Duration;
 
 use kanbania_core::error::CoreError;
 use kanbania_core::features::runs::{
-    self, AcpSessionInfo, ApprovalAsk, ApprovalDecision, ApprovalResolution, Dispatch,
+    self, AcpAgent, AcpSessionInfo, ApprovalAsk, ApprovalDecision, ApprovalResolution, Dispatch,
     DispatchExecutor, DispatchOutcome, InterruptCause, RUN_OUTPUT_DIR, RunChange, RunFailure,
     RunOutcome, RunOutputKind, RunOutputLine, RunOutputStream, RunOutputView, RunSummary,
     SupervisorToken, TestScenario, WORKTREES_DIR,
@@ -43,9 +46,10 @@ use tokio::sync::{Notify, watch};
 use tokio::task::JoinSet;
 
 use crate::acp::{
-    AcpClient, AcpFailure, AcpLimits, AcpStop, AgentDeclaration, CLAUDE_CODE_PROFILE,
-    OpenedSession, PermissionAnswer, PermissionEvent, PermissionPolicy, PermissionReply,
-    permission_bridge,
+    AcpClient, AcpFailure, AcpLimits, AcpProfile, AcpStop, AgentDeclaration, CLAUDE_CODE_PROFILE,
+    CODEX_HOME_NOTE, CODEX_PROFILE, OpenedSession, PermissionAnswer, PermissionEvent,
+    PermissionPolicy, PermissionReply, TurnEnd, clear_codex_plugin_cache, codex_env,
+    codex_home_config, ensure_codex_home, has_repository_config, permission_bridge,
 };
 use crate::output::{AgentKind, MAX_TAIL_LINES, OutputLog, Stream, read_tail};
 use crate::process::{
@@ -144,6 +148,28 @@ pub fn git_config(data_dir: &Path, timeout: Duration) -> GitConfig {
     let mut git = GitConfig::new(data_dir.join(WORKTREES_DIR).join(NO_HOOKS_DIR));
     git.timeout = timeout;
     git
+}
+
+/// Perfil ACP de un agente del núcleo (el cliente ACP no enlaza el núcleo).
+pub fn acp_profile(agent: AcpAgent) -> &'static AcpProfile {
+    match agent {
+        AcpAgent::ClaudeCode => &CLAUDE_CODE_PROFILE,
+        AcpAgent::Codex => &CODEX_PROFILE,
+    }
+}
+
+/// Variables propias del adaptador de `agent`, además de la lista común de adaptadores (las
+/// mismas al ejecutar y al comprobar el adaptador). Codex: su carpeta propia
+/// (`runs::codex_home`, que se crea 0700 si falta) y [`codex_env`]. E/S bloqueante y breve.
+pub fn adapter_env(agent: AcpAgent, data_dir: &Path) -> std::io::Result<Vec<(OsString, OsString)>> {
+    match agent {
+        AcpAgent::ClaudeCode => Ok(Vec::new()),
+        AcpAgent::Codex => {
+            let home = runs::codex_home(data_dir);
+            ensure_codex_home(&home)?;
+            Ok(codex_env(&home))
+        }
+    }
 }
 
 /// Carpeta de salida de un intento. El id debe venir del núcleo (ya validado); aun así se
@@ -507,11 +533,12 @@ async fn execute(
             "Proceso de prueba (sin IA), escenario «{}». No es trabajo de un agente.",
             scenario.as_str()
         )),
-        DispatchExecutor::ClaudeAcp { .. } => log.write_system(
-            "Claude Code vía ACP. Lo que el agente informa se guarda como «agente (reportado)»: \
-             la app no lo comprueba. Permisos: cada petición espera la decisión de una persona \
-             (permitir una vez o rechazar; caduca a los 10 min).",
-        ),
+        DispatchExecutor::Acp { agent, .. } => log.write_system(&format!(
+            "{} vía ACP. Lo que el agente informa se guarda como «agente (reportado)»: la app no \
+             lo comprueba. Permisos: cada petición espera la decisión de una persona (permitir \
+             una vez o rechazar; caduca a los 10 min).",
+            agent.label()
+        )),
     }
 
     // 1. Registrar el worktree antes de crearlo.
@@ -555,17 +582,19 @@ async fn execute(
             )
             .await;
         }
-        DispatchExecutor::ClaudeAcp {
+        DispatchExecutor::Acp {
+            agent,
             adapter_path,
             instructions,
         } => {
             let launch = AcpLaunch {
+                agent,
                 adapter_path,
                 instructions,
                 worktree: created,
                 timeout,
             };
-            run_claude_acp(&shared, &dispatch, log, launch, &cancel, token).await;
+            run_acp(&shared, &dispatch, log, launch, &cancel, token).await;
         }
     }
 }
@@ -668,6 +697,7 @@ async fn run_test_process(
 
 /// Lo que necesita el ejecutor ACP.
 struct AcpLaunch {
+    agent: AcpAgent,
     adapter_path: PathBuf,
     instructions: String,
     worktree: PathBuf,
@@ -683,8 +713,96 @@ enum SessionEnd {
     Missing,
 }
 
-/// Claude Code vía ACP (HU-019).
-async fn run_claude_acp(
+/// Antes de lanzar el adaptador: comprobaciones del agente sobre el worktree y su entorno.
+/// `Err` = motivo para cerrar el intento sin lanzar nada.
+async fn prepare_acp(
+    shared: &Shared,
+    agent: AcpAgent,
+    worktree: &Path,
+    log: &mut OutputLog,
+) -> Result<Vec<(OsString, OsString)>, RunFailure> {
+    let data_dir = shared.config.data_dir.clone();
+    let worktree = worktree.to_path_buf();
+    let checked = tokio::task::spawn_blocking(move || {
+        // Configuración del repositorio que el agente cargaría al abrir la sesión (perfil).
+        let repository = has_repository_config(acp_profile(agent), &worktree);
+        let env = adapter_env(agent, &data_dir);
+        // Después de `adapter_env`, que crea la carpeta propia si falta.
+        let home = agent_home_config(agent, &data_dir);
+        (repository, env, home)
+    })
+    .await;
+    let Ok((repository, env, home)) = checked else {
+        log.write_system("No se pudo preparar el lanzamiento del adaptador.");
+        return Err(RunFailure::Internal);
+    };
+    match repository {
+        Ok(None) => {}
+        Ok(Some(name)) => {
+            log.write_system(&format!(
+                "El worktree contiene configuración del agente ({name}): {} la cargaría al abrir \
+                 la sesión (servidores MCP, reglas, ajustes). No se lanza el adaptador.",
+                agent.label()
+            ));
+            return Err(RunFailure::AgentConfigInRepository(agent));
+        }
+        Err(error) => {
+            log.write_system(&format!(
+                "No se pudo comprobar si el worktree trae configuración del agente: {error}. No se \
+                 lanza el adaptador."
+            ));
+            return Err(RunFailure::AgentConfigInRepository(agent));
+        }
+    }
+    let env = match env {
+        Ok(env) => env,
+        Err(error) => {
+            log.write_system(&format!(
+                "No se pudo preparar la carpeta propia del agente: {}.",
+                error.kind()
+            ));
+            return Err(RunFailure::AdapterSpawnFailed(agent));
+        }
+    };
+    match home {
+        Ok(None) => {}
+        Ok(Some(name)) => {
+            log.write_system(&format!(
+                "La carpeta de Codex de la app contiene «{name}» (configuración, reglas, \
+                 instrucciones o skills propias): Codex lo cargaría y podría saltarse los permisos. \
+                 No se lanza el adaptador."
+            ));
+            return Err(RunFailure::AgentConfigInCodexHome);
+        }
+        Err(error) => {
+            log.write_system(&format!(
+                "No se pudo comprobar la carpeta de Codex de la app: {}. No se lanza el adaptador.",
+                error.kind()
+            ));
+            return Err(RunFailure::AgentConfigInCodexHome);
+        }
+    }
+    if agent == AcpAgent::Codex {
+        log.write_system(CODEX_HOME_NOTE);
+    }
+    Ok(env)
+}
+
+/// Configuración no admitida en la carpeta propia del agente (Codex: [`codex_home_config`]):
+/// el nombre de la entrada o `None`. E/S bloqueante y breve.
+fn agent_home_config(agent: AcpAgent, data_dir: &Path) -> std::io::Result<Option<&'static str>> {
+    match agent {
+        AcpAgent::ClaudeCode => Ok(None),
+        AcpAgent::Codex => {
+            let home = runs::codex_home(data_dir);
+            clear_codex_plugin_cache(&home)?;
+            codex_home_config(&home)
+        }
+    }
+}
+
+/// Un agente vía ACP (HU-019, HU-021).
+async fn run_acp(
     shared: &Shared,
     dispatch: &Dispatch,
     log: OutputLog,
@@ -692,15 +810,24 @@ async fn run_claude_acp(
     cancel: &CancelHandle,
     mut token: CancelToken,
 ) {
+    let agent = launch.agent;
+    let mut log = log;
+    let extra_env = match prepare_acp(shared, agent, &launch.worktree, &mut log).await {
+        Ok(env) => env,
+        Err(failure) => {
+            let _ = log.finish();
+            finish(shared, dispatch, RunOutcome::Failed(failure)).await;
+            return;
+        }
+    };
     let spec = ProcessSpec {
         program: launch.adapter_path,
         args: shared.config.acp_args.clone(),
         cwd: launch.worktree.clone(),
-        extra_env: Vec::new(),
+        extra_env,
         timeout: launch.timeout,
         grace: shared.config.grace,
     };
-    let mut log = log;
     let _ = log.flush();
     let (process, io) = match RunningProcess::spawn_protocol(spec, log) {
         Ok(started) => started,
@@ -714,9 +841,9 @@ async fn run_claude_acp(
             // No existe → «no se encontró»; cualquier otro fallo (permiso, ruta no válida…) →
             // «no se pudo lanzar».
             let failure = if failure.error.kind == SpawnErrorKind::NotFound {
-                RunFailure::AdapterMissing
+                RunFailure::AdapterMissing(agent)
             } else {
-                RunFailure::AdapterSpawnFailed
+                RunFailure::AdapterSpawnFailed(agent)
             };
             finish(shared, dispatch, RunOutcome::Failed(failure)).await;
             return;
@@ -741,6 +868,7 @@ async fn run_claude_acp(
             shared,
             dispatch,
             &mut client,
+            acp_profile(agent),
             &launch.worktree,
             &launch.instructions,
             &mut token,
@@ -787,7 +915,7 @@ async fn run_claude_acp(
     // termina el árbol en seguida (aviso, gracia, fuerza).
     let wait_exit = if matches!(
         ended,
-        Ok(()) | Err(SessionEnd::Stop(AcpStop::Failed(AcpFailure::Disconnected)))
+        Ok(_) | Err(SessionEnd::Stop(AcpStop::Failed(AcpFailure::Disconnected)))
     ) {
         limits.close_wait
     } else {
@@ -812,7 +940,11 @@ async fn run_claude_acp(
         other => other,
     };
     let (outcome, summary) = match ended {
-        Ok(()) => (RunOutcome::AgentEndedTurn, "el agente terminó su turno"),
+        Ok(TurnEnd::EndTurn) => (RunOutcome::AgentEndedTurn, "el agente terminó su turno"),
+        Ok(TurnEnd::StoppedAfterRejection) => (
+            RunOutcome::AgentStoppedAfterRejection,
+            "el agente detuvo su turno tras un permiso rechazado",
+        ),
         Err(SessionEnd::Stop(AcpStop::Cancelled)) => (RunOutcome::Cancelled, "cancelado"),
         Err(SessionEnd::Stop(AcpStop::TimedOut)) => (
             RunOutcome::TimedOut {
@@ -821,7 +953,7 @@ async fn run_claude_acp(
             "tiempo máximo agotado",
         ),
         Err(SessionEnd::Stop(AcpStop::Failed(failure))) => (
-            RunOutcome::Failed(acp_failure(failure)),
+            RunOutcome::Failed(acp_failure(failure, agent)),
             "fallo de la sesión ACP",
         ),
         Err(SessionEnd::Internal) => (
@@ -829,7 +961,7 @@ async fn run_claude_acp(
             "no se pudo registrar la sesión",
         ),
         Err(SessionEnd::Missing) => (
-            RunOutcome::Failed(RunFailure::AdapterMissing),
+            RunOutcome::Failed(RunFailure::AdapterMissing(agent)),
             "el adaptador no se pudo ejecutar",
         ),
     };
@@ -850,21 +982,23 @@ async fn run_claude_acp(
     finish(shared, dispatch, outcome).await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn acp_session(
     shared: &Shared,
     dispatch: &Dispatch,
     client: &mut AcpClient,
+    profile: &AcpProfile,
     worktree: &Path,
     instructions: &str,
     token: &mut CancelToken,
     deadline: tokio::time::Instant,
-) -> Result<(), SessionEnd> {
+) -> Result<TurnEnd, SessionEnd> {
     let declared = client
         .initialize(token, deadline)
         .await
         .map_err(SessionEnd::Stop)?;
     let session = client
-        .open_session(worktree, &declared, &CLAUDE_CODE_PROFILE, token, deadline)
+        .open_session(worktree, &declared, profile, token, deadline)
         .await
         .map_err(SessionEnd::Stop)?;
     // La huella es la del texto exacto que va en `session/prompt` (`instructions`, sin cambios).
@@ -913,7 +1047,16 @@ async fn record_session(
         )
         .await;
     }
-    let info = reported.info.with_prompt(prompt);
+    let info = reported
+        .info
+        .with_model(session.model.as_deref())
+        .with_prompt(prompt);
+    if session.model.is_some() && info.model.is_none() {
+        sink.system(
+            "El modelo que declaró el agente no cumple los límites de la app y no se registra.",
+        )
+        .await;
+    }
     match runs::record_acp_session(&shared.store, &shared.token, &dispatch.run_id, &info).await {
         Ok(run) => {
             shared.notify(&run.id, &run.story_id);
@@ -1148,12 +1291,12 @@ async fn notify_approval(shared: &Shared, story_number: i64) {
     }
 }
 
-fn acp_failure(failure: AcpFailure) -> RunFailure {
+fn acp_failure(failure: AcpFailure, agent: AcpAgent) -> RunFailure {
     match failure {
         AcpFailure::Disconnected => RunFailure::AgentDisconnected,
         AcpFailure::Protocol => RunFailure::AgentProtocolError,
         AcpFailure::VersionUnsupported => RunFailure::AgentVersionUnsupported,
-        AcpFailure::AuthRequired => RunFailure::AgentAuthRequired,
+        AcpFailure::AuthRequired => RunFailure::AgentAuthRequired(agent),
         AcpFailure::ModeUnavailable => RunFailure::AgentModeUnavailable,
         AcpFailure::Refused => RunFailure::AgentRefused,
         AcpFailure::LimitReached => RunFailure::AgentLimitReached,

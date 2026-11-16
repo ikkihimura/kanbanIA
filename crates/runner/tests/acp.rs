@@ -19,7 +19,7 @@ use kanbania_core::features::projects::{CreateProjectInput, Project, create_proj
 use kanbania_core::features::relations::{SetStoryAgentInput, set_story_agent};
 use kanbania_core::features::repositories::{LinkRepositoryInput, link_repository};
 use kanbania_core::features::runs::{
-    APPROVAL_TTL_MS, AcpSessionInfo, ApprovalDecision, ApprovalState, CancelRunInput,
+    APPROVAL_TTL_MS, AcpAgent, AcpSessionInfo, ApprovalDecision, ApprovalState, CancelRunInput,
     CreateRunInput, DecideApprovalInput, RunApproval, RunDetail, RunEvent, RunExecutor,
     RunOutputKind, RunOutputLine, RunOutputStream, RunState, RunSummary, StartRunInput,
     SupervisorToken, UpdateRunSettingsInput, cancel_run, create_run, decide_approval, get_run,
@@ -32,7 +32,10 @@ use kanbania_core::features::team::{
 use kanbania_core::platform::actor::Actor;
 use kanbania_core::platform::clock::ManualClock;
 use kanbania_core::platform::storage::Store;
-use kanbania_runner::acp::{AcpClient, AcpLimits, CLAUDE_CODE_PROFILE, ProbeError, probe_adapter};
+use kanbania_runner::acp::{
+    AcpClient, AcpLimits, CLAUDE_CODE_PROFILE, CODEX_HOME_NOTE, ISOLATION_NOTE, ProbeError,
+    TurnEnd, codex_env, probe_adapter,
+};
 use kanbania_runner::output::{AgentKind, OutputLog, read_tail};
 use kanbania_runner::process::{ProcessSpec, RunningProcess, cancel_pair};
 use kanbania_runner::supervisor::{
@@ -208,7 +211,9 @@ impl Env {
                 expected_revision: current.revision,
                 max_concurrency: current.max_concurrency,
                 timeout_minutes: current.timeout_minutes,
-                claude_acp_path: path,
+                // El mismo agente falso para los dos: su variante la decide el entorno.
+                claude_acp_path: path.clone(),
+                codex_acp_path: path,
                 approval_notifications,
             },
         )
@@ -283,6 +288,11 @@ impl Env {
 
     /// Crea una historia lista con agente, un intento y pide iniciarlo con Claude Code (ACP).
     async fn queued(&self, supervisor: &Supervisor) -> RunSummary {
+        self.queued_as(supervisor, RunExecutor::ClaudeAcp).await
+    }
+
+    /// Igual, con el ejecutor indicado.
+    async fn queued_as(&self, supervisor: &Supervisor, executor: RunExecutor) -> RunSummary {
         let story = create_story(
             &self.store,
             UI,
@@ -327,7 +337,7 @@ impl Env {
                 project_id: self.project.id.clone(),
                 run_id: run.id.clone(),
                 repository_id: None,
-                executor: RunExecutor::ClaudeAcp,
+                executor,
             },
         )
         .await
@@ -405,6 +415,22 @@ impl Env {
             .collect()
     }
 
+    /// Repositorio vinculado (git real).
+    fn repo(&self) -> PathBuf {
+        self.base.join("repositorio con espacios")
+    }
+
+    /// Añade un archivo al repositorio y hace commit (antes de crear el intento: la
+    /// instantánea toma ese HEAD).
+    fn commit_file(&self, relative: &str, content: &str) {
+        let repo = self.repo();
+        let path = repo.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+        git(&repo, &["add", "-f", "."]);
+        git(&repo, &["commit", "-q", "-m", "añade archivo"]);
+    }
+
     /// Todo el JSONL del intento, en bruto.
     fn raw_output(&self, run: &RunSummary) -> String {
         let dir = self.data_dir.join("runs").join(&run.id);
@@ -417,8 +443,13 @@ impl Env {
 
     /// Ejecuta un escenario hasta un estado terminal.
     async fn scenario(&self, args: &[&str]) -> (RunSummary, RunDetail) {
+        self.scenario_as(RunExecutor::ClaudeAcp, args).await
+    }
+
+    /// Igual, con el ejecutor indicado.
+    async fn scenario_as(&self, executor: RunExecutor, args: &[&str]) -> (RunSummary, RunDetail) {
         let supervisor = self.supervisor(self.config(args)).await;
-        let run = self.queued(&supervisor).await;
+        let run = self.queued_as(&supervisor, executor).await;
         let detail = self.wait_terminal(&run).await;
         supervisor.shutdown().await;
         (run, detail)
@@ -520,6 +551,7 @@ async fn full_turn_is_normalized_and_session_recorded() {
             mode: Some("default".into()),
             prompt_sha256: Some(sha256),
             prompt_chars: Some(chars),
+            model: None,
         }
     );
 
@@ -1062,6 +1094,7 @@ async fn probe_reports_initialize_only() {
         env.adapter.clone(),
         vec!["ok".into()],
         cwd.clone(),
+        Vec::new(),
         Duration::from_secs(20),
     )
     .await
@@ -1076,6 +1109,7 @@ async fn probe_reports_initialize_only() {
         env.adapter.clone(),
         vec!["version2".into()],
         cwd.clone(),
+        Vec::new(),
         Duration::from_secs(20),
     )
     .await;
@@ -1084,6 +1118,7 @@ async fn probe_reports_initialize_only() {
         env.base.join("no existe"),
         Vec::new(),
         cwd.clone(),
+        Vec::new(),
         Duration::from_secs(5),
     )
     .await;
@@ -1093,6 +1128,7 @@ async fn probe_reports_initialize_only() {
         env.adapter.clone(),
         Vec::new(),
         cwd,
+        Vec::new(),
         Duration::from_secs(20),
     )
     .await;
@@ -1122,7 +1158,7 @@ async fn cancel_before_the_session_kills_without_session_cancel() {
     assert!(started.elapsed() < Duration::from_secs(20));
     assert!(sessions(&detail).is_empty());
     // Sin sesión no se negocia nada: el árbol se mata directamente.
-    assert_eq!(received(&log), ["initialize"]);
+    assert_eq!(received(&log), ["arranque", "initialize"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1259,7 +1295,7 @@ async fn reject_all_policy_answers_without_asking() {
     drop(client);
     let (report, log) = process.close(limits.close_wait).await;
     drop(log);
-    assert_eq!(ended, Ok(()), "{report:?}");
+    assert_eq!(ended, Ok(TurnEnd::EndTurn), "{report:?}");
     let permissions: Vec<String> = read_tail(&output_dir, 100)
         .unwrap()
         .lines
@@ -1342,4 +1378,629 @@ async fn a_timeout_while_waiting_closes_the_request() {
         .unwrap();
     assert_eq!(approval.state, ApprovalState::Cancelled);
     assert!(!approval.delivered);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Suite contractual compartida (HU-021, CA-3): los mismos casos con el perfil de Claude Code y
+// con el de Codex, cada uno con la variante del agente falso que imita su adaptador (la de Codex
+// se activa por el entorno que fija el supervisor: `CODEX_HOME`). Prueba el contrato de la app
+// con cada perfil, no la compatibilidad con los proveedores reales (eso es `acp_real.rs`).
+// ---------------------------------------------------------------------------------------------
+
+/// Lo que cambia entre perfiles en la suite compartida.
+#[derive(Debug, Clone, Copy)]
+struct Flavor {
+    executor: RunExecutor,
+    agent: AcpAgent,
+    /// Modo que fija la app (perfil).
+    mode: &'static str,
+    /// `optionId` que la app debe elegir para permitir una vez y para rechazar.
+    allow: &'static str,
+    reject: &'static str,
+    /// Modelo que declara la variante del agente falso.
+    model: Option<&'static str>,
+    /// Modo al que se escapa la variante en `mode_change` / `config_mode_change`.
+    escapes: [&'static str; 2],
+    auth_reason: &'static str,
+    missing_reason: &'static str,
+}
+
+const CLAUDE: Flavor = Flavor {
+    executor: RunExecutor::ClaudeAcp,
+    agent: AcpAgent::ClaudeCode,
+    mode: "default",
+    allow: "permitir-1",
+    reject: "rechazar-1",
+    model: None,
+    escapes: ["bypassPermissions", "acceptEdits"],
+    auth_reason: "El agente necesita iniciar sesión: abre Claude Code en una terminal y usa /login.",
+    missing_reason: "No se encontró el adaptador de Claude Code configurado o no es ejecutable.",
+};
+
+const CODEX: Flavor = Flavor {
+    executor: RunExecutor::CodexAcp,
+    agent: AcpAgent::Codex,
+    mode: "read-only",
+    allow: "allow_once",
+    // `cancel` va antes en las opciones del agente falso: la app debe preferir `decline`.
+    reject: "decline",
+    model: Some("gpt-falso-1[medium]"),
+    escapes: ["agent-full-access", "agent"],
+    auth_reason: "Codex necesita iniciar sesión en la carpeta de Codex de la app: usa el comando \
+                  que muestra Sistema → Ejecuciones.",
+    missing_reason: "No se encontró el adaptador de Codex configurado o no es ejecutable.",
+};
+
+const MODE_REASON: &str =
+    "El agente no permite fijar un modo que pida permiso antes de actuar: no se ejecuta.";
+
+async fn contract_ends_turn(f: Flavor) {
+    let env = Env::new().await;
+    let (run, detail) = env.scenario_as(f.executor, &["ok"]).await;
+    assert_eq!(detail.run.state, RunState::Completed, "{:?}", detail.run);
+    assert_eq!(
+        detail.run.end_reason.as_deref(),
+        Some("El agente terminó su turno.")
+    );
+    let sessions = sessions(&detail);
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].mode.as_deref(), Some(f.mode));
+    assert_eq!(sessions[0].model.as_deref(), f.model);
+    assert_eq!(
+        env.agent_lines(&run, RunOutputKind::Message),
+        ["He leído el README.", "Fin."]
+    );
+    let system = env.texts(&run, RunOutputStream::System);
+    let claude_note = system.iter().any(|l| l == ISOLATION_NOTE);
+    let codex_note = system.iter().any(|l| l == CODEX_HOME_NOTE);
+    assert_eq!(
+        (claude_note, codex_note),
+        (f.agent == AcpAgent::ClaudeCode, f.agent == AcpAgent::Codex),
+        "{system:?}"
+    );
+    assert!(system[0].starts_with(&format!("{} vía ACP.", f.agent.label())));
+    let raw = env.raw_output(&run);
+    assert_nothing_hidden(&raw);
+    // Ninguna ruta del directorio de datos en las líneas de la app (tampoco `CODEX_HOME`).
+    assert!(
+        !system.iter().any(|l| l.contains("codex-home")),
+        "{system:?}"
+    );
+}
+
+async fn contract_allow_once_runs_the_action(f: Flavor) {
+    let env = Env::new().await;
+    let log = env.base.join("registro del falso.txt");
+    let supervisor = env
+        .supervisor(env.config(&["approval", "--log", log.to_str().unwrap()]))
+        .await;
+    let run = env.queued_as(&supervisor, f.executor).await;
+    let pending = env.wait_pending(&run).await;
+    assert!(pending.can_allow);
+    assert_eq!(pending.scope.as_deref(), Some("touch nota.txt"));
+    let worktree = env.worktree(&run).await;
+    env.decide_pending(&run, ApprovalDecision::AllowOnce).await;
+    supervisor.wake();
+    let detail = env.wait_terminal(&run).await;
+    supervisor.shutdown().await;
+    assert_eq!(detail.run.state, RunState::Completed, "{:?}", detail.run);
+    assert!(received(&log).contains(&format!("permiso: {}", f.allow)));
+    assert!(worktree.join("nota.txt").exists());
+    assert_eq!(detail.approvals[0].state, ApprovalState::Allowed);
+}
+
+async fn contract_reject_keeps_the_turn(f: Flavor) {
+    let env = Env::new().await;
+    let log = env.base.join("registro del falso.txt");
+    let supervisor = env
+        .supervisor(env.config(&["approval", "--log", log.to_str().unwrap()]))
+        .await;
+    let run = env.queued_as(&supervisor, f.executor).await;
+    env.wait_pending(&run).await;
+    let worktree = env.worktree(&run).await;
+    env.decide_pending(&run, ApprovalDecision::Reject).await;
+    supervisor.wake();
+    let detail = env.wait_terminal(&run).await;
+    supervisor.shutdown().await;
+    assert_eq!(detail.run.state, RunState::Completed, "{:?}", detail.run);
+    assert_eq!(
+        detail.run.end_reason.as_deref(),
+        Some("El agente terminó su turno.")
+    );
+    assert!(
+        received(&log).contains(&format!("permiso: {}", f.reject)),
+        "{:?}",
+        received(&log)
+    );
+    assert!(!worktree.join("nota.txt").exists());
+    assert_eq!(detail.approvals[0].state, ApprovalState::Rejected);
+}
+
+async fn contract_cancel_while_waiting(f: Flavor) {
+    let env = Env::new().await;
+    let log = env.base.join("registro del falso.txt");
+    let supervisor = env
+        .supervisor(env.config(&["approval", "--log", log.to_str().unwrap()]))
+        .await;
+    let run = env.queued_as(&supervisor, f.executor).await;
+    env.wait_pending(&run).await;
+    let worktree = env.worktree(&run).await;
+    env.cancel(&run).await;
+    supervisor.wake();
+    let detail = env.wait_terminal(&run).await;
+    supervisor.shutdown().await;
+    assert_eq!(detail.run.state, RunState::Cancelled, "{:?}", detail.run);
+    assert!(received(&log).contains(&"permiso: cancelled".to_owned()));
+    assert!(!worktree.join("nota.txt").exists());
+    assert_eq!(detail.approvals[0].state, ApprovalState::Cancelled);
+}
+
+async fn contract_mode_is_enforced(f: Flavor) {
+    let env = Env::new().await;
+    for (scenario, escaped) in [
+        ("mode_change", f.escapes[0]),
+        ("config_mode_change", f.escapes[1]),
+    ] {
+        let (run, detail) = env.scenario_as(f.executor, &[scenario]).await;
+        assert_failed(&detail, MODE_REASON);
+        assert!(
+            env.texts(&run, RunOutputStream::System)
+                .iter()
+                .any(|l| l.contains(&format!("cambió por su cuenta al modo «{escaped}»"))),
+            "{scenario}"
+        );
+    }
+    let (_, detail) = env.scenario_as(f.executor, &["no_modes"]).await;
+    assert_failed(&detail, MODE_REASON);
+}
+
+async fn contract_auth_required(f: Flavor) {
+    let env = Env::new().await;
+    let (run, detail) = env.scenario_as(f.executor, &["auth"]).await;
+    assert_failed(&detail, f.auth_reason);
+    assert!(sessions(&detail).is_empty());
+    assert_nothing_hidden(&env.raw_output(&run));
+    let (_, detail) = env.scenario_as(f.executor, &["auth_other_error"]).await;
+    assert_failed(&detail, REQUEST_FAILED);
+}
+
+async fn contract_unrequested_cancelled_is_a_protocol_error(f: Flavor) {
+    let env = Env::new().await;
+    let (_, detail) = env.scenario_as(f.executor, &["cancelled_unasked"]).await;
+    assert_failed(&detail, "El agente envió una respuesta ACP no válida.");
+}
+
+/// Responder `cancelled` (sin opción de rechazo) no cuenta como rechazo que termina el turno:
+/// un `stopReason: cancelled` posterior sigue siendo error de protocolo.
+async fn contract_cancelled_answer_is_not_a_turn_ending_rejection(f: Flavor) {
+    let env = Env::new().await;
+    let (_, detail) = env
+        .scenario_as(f.executor, &["cancelled_after_cancelled_answer"])
+        .await;
+    assert_failed(&detail, "El agente envió una respuesta ACP no válida.");
+}
+
+async fn contract_missing_adapter(f: Flavor) {
+    let env = Env::new().await;
+    std::fs::remove_file(&env.adapter).unwrap();
+    let (_, detail) = env.scenario_as(f.executor, &["ok"]).await;
+    assert_failed(&detail, f.missing_reason);
+}
+
+/// Un módulo por perfil con los mismos casos.
+macro_rules! shared_contract {
+    ($($case:ident),* $(,)?) => {
+        mod shared_claude_code {
+            $(
+                #[tokio::test(flavor = "multi_thread")]
+                async fn $case() {
+                    super::$case(super::CLAUDE).await;
+                }
+            )*
+        }
+        mod shared_codex {
+            $(
+                #[tokio::test(flavor = "multi_thread")]
+                async fn $case() {
+                    super::$case(super::CODEX).await;
+                }
+            )*
+        }
+    };
+}
+
+shared_contract!(
+    contract_ends_turn,
+    contract_allow_once_runs_the_action,
+    contract_reject_keeps_the_turn,
+    contract_cancel_while_waiting,
+    contract_mode_is_enforced,
+    contract_auth_required,
+    contract_unrequested_cancelled_is_a_protocol_error,
+    contract_missing_adapter,
+    contract_cancelled_answer_is_not_a_turn_ending_rejection,
+);
+
+// ---------------------------------------------------------------------------------------------
+// Propio de Codex (HU-021).
+// ---------------------------------------------------------------------------------------------
+
+const CONFIG_IN_REPOSITORY: &str = "El repositorio contiene configuración de Codex (.codex/), que \
+                                    podría saltarse los permisos o lanzar programas: la app no \
+                                    ejecuta Codex en él.";
+
+/// `.codex/` en el repositorio: Codex la cargaría al abrir la sesión (servidores MCP que se
+/// lanzan antes de cualquier permiso). No se lanza el adaptador (su registro ni existe). A
+/// Claude Code no le afecta.
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_config_in_the_repository_is_refused_before_spawning() {
+    let env = Env::new().await;
+    env.commit_file(
+        ".codex/config.toml",
+        "[mcp_servers.testigo]\ncommand = \"/no/existe/servidor\"\n",
+    );
+    let log = env.base.join("registro del falso.txt");
+    let (run, detail) = env
+        .scenario_as(
+            RunExecutor::CodexAcp,
+            &["ok", "--log", log.to_str().unwrap()],
+        )
+        .await;
+    assert_failed(&detail, CONFIG_IN_REPOSITORY);
+    assert!(!log.exists(), "se lanzó el adaptador: {:?}", received(&log));
+    assert!(sessions(&detail).is_empty());
+    assert!(
+        env.texts(&run, RunOutputStream::System)
+            .iter()
+            .any(|l| l.contains("contiene configuración del agente (.codex)"))
+    );
+    // El mismo repositorio con Claude Code sí se ejecuta.
+    let (_, detail) = env.scenario_as(RunExecutor::ClaudeAcp, &["ok"]).await;
+    assert_eq!(detail.run.state, RunState::Completed, "{:?}", detail.run);
+}
+
+/// `.codex` en cualquier forma (aquí, un enlace roto) también se rechaza.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_config_as_a_dangling_link_is_refused() {
+    let env = Env::new().await;
+    let repo = env.repo();
+    std::os::unix::fs::symlink("/no/existe/codex", repo.join(".codex")).unwrap();
+    git(&repo, &["add", ".codex"]);
+    git(&repo, &["commit", "-q", "-m", "enlace"]);
+    let log = env.base.join("registro del falso.txt");
+    let (_, detail) = env
+        .scenario_as(
+            RunExecutor::CodexAcp,
+            &["ok", "--log", log.to_str().unwrap()],
+        )
+        .await;
+    assert_failed(&detail, CONFIG_IN_REPOSITORY);
+    assert!(!log.exists());
+}
+
+/// Entorno de Codex: su carpeta propia (0700) en el directorio de datos, modo inicial, sin
+/// navegador y `CODEX_CONFIG`; nada más que la lista de adaptadores. El agente falso además
+/// termina con error si recibe una variable prohibida o un valor distinto.
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_gets_its_own_home_and_a_minimal_environment() {
+    let env = Env::new().await;
+    let log = env.base.join("registro del falso.txt");
+    let (_, detail) = env
+        .scenario_as(
+            RunExecutor::CodexAcp,
+            &["ok", "--log", log.to_str().unwrap()],
+        )
+        .await;
+    assert_eq!(detail.run.state, RunState::Completed, "{:?}", detail.run);
+    let lines = received(&log);
+    let home = env.data_dir.join("codex-home");
+    assert!(
+        lines.contains(&format!("codex_home: {}", home.display())),
+        "{lines:?}"
+    );
+    // `HOME` es la carpeta personal de Codex dentro de su carpeta, nunca la del usuario (el
+    // agente falso también comprueba `USERPROFILE` en Windows y `remote_plugin: false`).
+    let personal = home.join("home");
+    assert!(
+        lines.contains(&format!("home: {}", personal.display())),
+        "{lines:?}"
+    );
+    assert_ne!(
+        Some(personal.as_os_str()),
+        std::env::var_os("HOME").as_deref()
+    );
+    assert!(personal.is_dir());
+    assert!(home.is_dir());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&home).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+    let names: Vec<String> = lines
+        .iter()
+        .find_map(|l| l.strip_prefix("entorno: "))
+        .unwrap()
+        .split(',')
+        .map(str::to_owned)
+        .collect();
+    for required in [
+        "CODEX_HOME",
+        "HOME",
+        "INITIAL_AGENT_MODE",
+        "NO_BROWSER",
+        "CODEX_CONFIG",
+    ] {
+        assert!(names.contains(&required.to_owned()), "{names:?}");
+    }
+    let mut allowed: Vec<&str> = kanbania_runner::adapter_env_names();
+    allowed.extend([
+        "CODEX_HOME",
+        "INITIAL_AGENT_MODE",
+        "NO_BROWSER",
+        "CODEX_CONFIG",
+    ]);
+    for name in &names {
+        // macOS añade `__CF_USER_TEXT_ENCODING` a todo proceso.
+        assert!(
+            allowed.contains(&name.as_str()) || name.starts_with("__CF"),
+            "variable no permitida: {name}"
+        );
+        assert!(!kanbania_runner::is_adapter_forbidden(
+            std::ffi::OsStr::new(name)
+        ));
+    }
+}
+
+/// Permisos adicionales de Codex: sus únicos `allow_once` valen para todo el turno; la app no
+/// los elige nunca (la persona solo puede rechazar) y rechaza con `reject_permissions`.
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_turn_wide_allow_options_are_never_chosen() {
+    let env = Env::new().await;
+    let log = env.base.join("registro del falso.txt");
+    let supervisor = env
+        .supervisor(env.config(&["permissions_turn", "--log", log.to_str().unwrap()]))
+        .await;
+    let run = env.queued_as(&supervisor, RunExecutor::CodexAcp).await;
+    let pending = env.wait_pending(&run).await;
+    assert!(!pending.can_allow);
+    env.decide_pending(&run, ApprovalDecision::Reject).await;
+    supervisor.wake();
+    let detail = env.wait_terminal(&run).await;
+    supervisor.shutdown().await;
+    assert_eq!(detail.run.state, RunState::Completed, "{:?}", detail.run);
+    assert!(received(&log).contains(&"permiso: reject_permissions".to_owned()));
+    assert!(
+        env.agent_lines(&run, RunOutputKind::Permission)[0]
+            .contains("la app solo puede rechazarlo")
+    );
+}
+
+/// Ediciones de Codex: la única opción de rechazo (`cancel`) termina el turno. El agente
+/// responde `stopReason: cancelled` sin que la app cancelara: `completed` con su propio motivo,
+/// no error de protocolo.
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_edit_rejection_stops_the_turn() {
+    let env = Env::new().await;
+    let log = env.base.join("registro del falso.txt");
+    let supervisor = env
+        .supervisor(env.config(&["edit_reject", "--log", log.to_str().unwrap()]))
+        .await;
+    let run = env.queued_as(&supervisor, RunExecutor::CodexAcp).await;
+    let pending = env.wait_pending(&run).await;
+    assert!(pending.can_allow);
+    assert_eq!(pending.scope.as_deref(), Some("nota.txt"));
+    let worktree = env.worktree(&run).await;
+    env.decide_pending(&run, ApprovalDecision::Reject).await;
+    supervisor.wake();
+    let detail = env.wait_terminal(&run).await;
+    supervisor.shutdown().await;
+    assert_eq!(detail.run.state, RunState::Completed, "{:?}", detail.run);
+    assert_eq!(
+        detail.run.end_reason.as_deref(),
+        Some("El agente detuvo su turno tras un permiso rechazado.")
+    );
+    assert!(received(&log).contains(&"permiso: cancel".to_owned()));
+    assert!(!worktree.join("nota.txt").exists());
+    let permissions = env.agent_lines(&run, RunOutputKind::Permission);
+    assert!(
+        permissions[0].contains("el agente termina su turno"),
+        "{permissions:?}"
+    );
+}
+
+/// Igual al caducar: se responde el rechazo (`cancel`) y el turno termina.
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_expired_edit_stops_the_turn() {
+    let clock = Arc::new(ManualClock::new(1_794_744_000_000));
+    let env = Env::with_clock(clock.clone()).await;
+    let log = env.base.join("registro del falso.txt");
+    let supervisor = env
+        .supervisor(env.config(&["edit_reject", "--log", log.to_str().unwrap()]))
+        .await;
+    let run = env.queued_as(&supervisor, RunExecutor::CodexAcp).await;
+    env.wait_pending(&run).await;
+    clock.advance(Duration::from_millis(
+        u64::try_from(APPROVAL_TTL_MS).unwrap(),
+    ));
+    supervisor.wake();
+    let detail = env.wait_terminal(&run).await;
+    supervisor.shutdown().await;
+    assert_eq!(
+        detail.run.end_reason.as_deref(),
+        Some("El agente detuvo su turno tras un permiso rechazado.")
+    );
+    assert!(received(&log).contains(&"permiso: cancel".to_owned()));
+    assert_eq!(detail.approvals[0].state, ApprovalState::Expired);
+}
+
+/// «Comprobar adaptador» con el entorno de Codex: el agente falso responde como Codex.
+#[tokio::test(flavor = "multi_thread")]
+async fn probe_with_the_codex_environment() {
+    let env = Env::new().await;
+    let home = env.data_dir.join("codex-home");
+    kanbania_runner::acp::ensure_codex_home(&home).unwrap();
+    let declared = probe_adapter(
+        env.adapter.clone(),
+        vec!["ok".into()],
+        env.base.clone(),
+        codex_env(&home),
+        Duration::from_secs(20),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        declared.title.as_deref(),
+        Some("Agente ACP falso tipo Codex (pruebas)")
+    );
+    assert_eq!(declared.auth_methods, 2);
+}
+
+/// Carrera: la persona rechaza una edición de Codex (`cancel`, que terminaría el turno) y
+/// cancela el intento antes de que se entregue el rechazo. Determinista: cancelar cierra la
+/// decisión sin entregar (núcleo), así que el agente solo recibe `session/cancel` y `cancelled`.
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_rejection_followed_by_a_cancel_ends_cancelled() {
+    let env = Env::new().await;
+    let log = env.base.join("registro del falso.txt");
+    let supervisor = env
+        .supervisor(env.config(&["edit_reject", "--log", log.to_str().unwrap()]))
+        .await;
+    let run = env.queued_as(&supervisor, RunExecutor::CodexAcp).await;
+    env.wait_pending(&run).await;
+    // Sin `wake` entre medias: el rechazo aún no se ha entregado al cancelar.
+    env.decide_pending(&run, ApprovalDecision::Reject).await;
+    env.cancel(&run).await;
+    supervisor.wake();
+    let detail = env.wait_terminal(&run).await;
+    supervisor.shutdown().await;
+    assert_eq!(detail.run.state, RunState::Cancelled, "{:?}", detail.run);
+    assert!(received(&log).contains(&"permiso: cancelled".to_owned()));
+    assert!(!received(&log).contains(&"permiso: cancel".to_owned()));
+    assert!(!detail.approvals[0].delivered);
+}
+
+const CONFIG_IN_CODEX_HOME: &str = "La carpeta de Codex de la app contiene configuración \
+                                    (config.toml, reglas, AGENTS.md…) que podría saltarse los \
+                                    permisos: bórrala o vuelve a crear la carpeta e inicia sesión \
+                                    de nuevo.";
+
+/// Configuración en la carpeta de Codex de la app: cada entrada de la lista (como archivo, como
+/// carpeta o como enlace roto) y skills propias impiden lanzar el adaptador. Las skills del
+/// sistema que crea Codex solo (`skills/.system`) y `auth.json` no.
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_plugin_caches_are_cleared_before_each_launch() {
+    // Codex 2.5.0 descarga los plugins remotos de la cuenta en su carpeta en cada sesión: la
+    // app los borra antes de lanzar (sin seguir enlaces) y el intento sigue adelante.
+    let env = Env::new().await;
+    let home = env.data_dir.join("codex-home");
+    kanbania_runner::acp::ensure_codex_home(&home).unwrap();
+    std::fs::write(home.join("auth.json"), "{}").unwrap();
+    let plugin = home.join("plugins/cache/openai-curated-remote/sites");
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::write(plugin.join("SKILL.md"), "x").unwrap();
+    std::fs::create_dir_all(home.join("cache")).unwrap();
+    let outside = env.base.join("fuera de codex-home");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("testigo.txt"), "x").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, home.join("cache/remote_plugin_catalog")).unwrap();
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(home.join("cache/remote_plugin_catalog")).unwrap();
+
+    let log = env.base.join("registro del falso (plugins).txt");
+    let args = ["ok", "--log", log.to_str().unwrap()];
+    let (_, detail) = env.scenario_as(RunExecutor::CodexAcp, &args).await;
+    assert_eq!(detail.run.state, RunState::Completed, "{:?}", detail.run);
+    for name in kanbania_runner::acp::CODEX_PLUGIN_CACHES {
+        assert!(
+            std::fs::symlink_metadata(home.join(name)).is_err(),
+            "{name} sigue ahí"
+        );
+    }
+    assert!(outside.join("testigo.txt").exists(), "se siguió el enlace");
+    assert!(home.join("auth.json").exists(), "se borró la sesión");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_home_config_is_refused_before_spawning() {
+    let env = Env::new().await;
+    let home = env.data_dir.join("codex-home");
+    kanbania_runner::acp::ensure_codex_home(&home).unwrap();
+    std::fs::create_dir_all(home.join("skills").join(".system").join("imagegen")).unwrap();
+    std::fs::write(home.join("auth.json"), "{}").unwrap();
+    let log = env.base.join("registro del falso.txt");
+    let args = ["ok", "--log", log.to_str().unwrap()];
+    let (_, detail) = env.scenario_as(RunExecutor::CodexAcp, &args).await;
+    assert_eq!(detail.run.state, RunState::Completed, "{:?}", detail.run);
+    std::fs::remove_file(&log).unwrap();
+
+    type Create = Box<dyn Fn(&Path)>;
+    let mut cases: Vec<(String, Create)> = Vec::new();
+    // También `home/.agents` y `home/.codex` en la carpeta personal de Codex.
+    for name in kanbania_runner::acp::CODEX_HOME_DENYLIST
+        .iter()
+        .chain(kanbania_runner::acp::CODEX_PERSONAL_DENYLIST)
+    {
+        cases.push((
+            format!("{name} (archivo)"),
+            Box::new(move |home: &Path| std::fs::write(home.join(name), "x").unwrap()),
+        ));
+        cases.push((
+            format!("{name} (carpeta)"),
+            Box::new(move |home: &Path| std::fs::create_dir(home.join(name)).unwrap()),
+        ));
+        #[cfg(unix)]
+        cases.push((
+            format!("{name} (enlace roto)"),
+            Box::new(move |home: &Path| {
+                std::os::unix::fs::symlink("/no/existe", home.join(name)).unwrap();
+            }),
+        ));
+    }
+    cases.push((
+        "skills propia".into(),
+        Box::new(|home: &Path| std::fs::create_dir(home.join("skills").join("mia")).unwrap()),
+    ));
+    for (case, create) in cases {
+        let snapshot: Vec<_> = std::fs::read_dir(&home)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        create(&home);
+        let (run, detail) = env.scenario_as(RunExecutor::CodexAcp, &args).await;
+        assert_failed(&detail, CONFIG_IN_CODEX_HOME);
+        assert!(!log.exists(), "{case}: se lanzó el adaptador");
+        assert!(
+            !env.texts(&run, RunOutputStream::System)
+                .iter()
+                .any(|l| l.contains(home.to_str().unwrap())),
+            "{case}: ruta en la salida"
+        );
+        // Deja la carpeta como estaba.
+        for entry in std::fs::read_dir(&home).unwrap() {
+            let entry = entry.unwrap();
+            if !snapshot.contains(&entry.file_name()) {
+                let path = entry.path();
+                if std::fs::symlink_metadata(&path).unwrap().is_dir() {
+                    std::fs::remove_dir_all(&path).unwrap();
+                } else {
+                    std::fs::remove_file(&path).unwrap();
+                }
+            }
+        }
+        let user_skill = home.join("skills").join("mia");
+        if user_skill.exists() {
+            std::fs::remove_dir(&user_skill).unwrap();
+        }
+        for name in kanbania_runner::acp::CODEX_PERSONAL_DENYLIST {
+            let path = home.join(name);
+            match std::fs::symlink_metadata(&path) {
+                Ok(m) if m.is_dir() => std::fs::remove_dir_all(&path).unwrap(),
+                Ok(_) => std::fs::remove_file(&path).unwrap(),
+                Err(_) => {}
+            }
+        }
+    }
 }

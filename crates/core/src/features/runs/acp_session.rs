@@ -61,6 +61,11 @@ pub struct AcpSessionInfo {
     /// Caracteres del prompt enviado.
     #[serde(default)]
     pub prompt_chars: Option<u32>,
+    /// Modelo que el agente **declaró** al crear la sesión (`models.currentModelId` de ACP, ≤ 50
+    /// caracteres ASCII imprimibles; HU-021). La app no lo elige ni lo verifica; `null` si no
+    /// lo informó o no cumplía los límites.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// Resultado de [`AcpSessionInfo::from_reported`]: la sesión normalizada y lo que se omitió.
@@ -214,6 +219,7 @@ impl AcpSessionInfo {
                 mode,
                 prompt_sha256: None,
                 prompt_chars: None,
+                model: None,
             },
             identity_dropped,
             mode_dropped,
@@ -226,6 +232,13 @@ impl AcpSessionInfo {
         let (sha256, chars) = prompt_digest(text);
         self.prompt_sha256 = Some(sha256);
         self.prompt_chars = Some(chars);
+        self
+    }
+
+    /// Añade el modelo que declaró el agente; si no cumple los límites, se omite.
+    #[must_use]
+    pub fn with_model(mut self, model: Option<&str>) -> Self {
+        self.model = ascii_token("El modelo", model).ok().flatten();
         self
     }
 
@@ -266,6 +279,7 @@ impl AcpSessionInfo {
             mode: ascii_token("El modo", self.mode.as_deref())?,
             prompt_sha256,
             prompt_chars,
+            model: ascii_token("El modelo", self.model.as_deref())?,
         })
     }
 }

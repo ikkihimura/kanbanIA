@@ -127,6 +127,55 @@ describe("TeamView", () => {
     ).toBeInTheDocument();
   });
 
+  it("HU-021: cambiar proveedor y modelo conserva nombre, avatar, rol y capacidades", async () => {
+    const user = userEvent.setup();
+    mocked.updateAgent.mockImplementation((input) => {
+      const saved = agent({
+        provider: input.provider,
+        model: input.model,
+        revision: 2,
+      });
+      // La lista que se vuelve a leer tras guardar ya trae el agente editado.
+      mocked.listAgents.mockResolvedValue([saved]);
+      return Promise.resolve(saved);
+    });
+    render(<TeamView />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Editar A-1 Robota" }),
+    );
+    const provider = screen.getByLabelText("Proveedor (informativo)");
+    const model = screen.getByLabelText("Modelo (informativo)");
+    await user.clear(provider);
+    await user.type(provider, "OpenAI");
+    await user.clear(model);
+    await user.type(model, "gpt-5-codex");
+    await user.click(screen.getByRole("button", { name: "Guardar agente" }));
+
+    await waitFor(() => {
+      expect(mocked.updateAgent).toHaveBeenCalledTimes(1);
+    });
+    expect(mocked.updateAgent).toHaveBeenCalledWith({
+      id: "a1",
+      expectedRevision: 1,
+      name: "Robota",
+      role: "Backend",
+      provider: "OpenAI",
+      model: "gpt-5-codex",
+      capabilities: ["implement"],
+      avatar: agent().avatar,
+    });
+    expect(
+      await screen.findByText("✓ Agente A-1 Robota guardado."),
+    ).toBeInTheDocument();
+    // La ficha sigue siendo la del mismo agente, ahora con el proveedor y el modelo nuevos.
+    expect(
+      screen.getByRole("button", { name: "Editar A-1 Robota" }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("OpenAI")).toBeInTheDocument();
+    expect(screen.getByText("gpt-5-codex")).toBeInTheDocument();
+  });
+
   it("muestra el error de nombre duplicado junto al campo", async () => {
     const user = userEvent.setup();
     mocked.createAgent.mockRejectedValue({

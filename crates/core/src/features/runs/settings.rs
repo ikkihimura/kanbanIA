@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqliteConnection;
 use ts_rs::TS;
 
+use super::start::AcpAgent;
 use crate::error::CoreError;
 use crate::platform::actor::Actor;
 use crate::platform::revision;
@@ -36,11 +37,23 @@ pub struct RunSettings {
     /// Ruta absoluta del ejecutable del adaptador de Claude Code (`claude-agent-acp`), tal como
     /// la escribió la persona; `null` = no configurado. Ruta local: nunca para agentes.
     pub claude_acp_path: Option<String>,
+    /// Igual, para el adaptador de Codex (`codex-acp`, HU-021).
+    pub codex_acp_path: Option<String>,
     /// Notificación del sistema cuando un agente pide permiso (HU-020; por defecto, no). El
     /// texto nunca lleva el comando ni la ruta.
     pub approval_notifications: bool,
     #[ts(type = "number")]
     pub revision: i64,
+}
+
+impl RunSettings {
+    /// Ruta configurada del adaptador de ese agente.
+    pub fn adapter_path(&self, agent: AcpAgent) -> Option<&str> {
+        match agent {
+            AcpAgent::ClaudeCode => self.claude_acp_path.as_deref(),
+            AcpAgent::Codex => self.codex_acp_path.as_deref(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, TS)]
@@ -55,21 +68,25 @@ pub struct UpdateRunSettingsInput {
     pub timeout_minutes: i64,
     /// Vacía o `null` → no configurado. Si no, absoluta y de un archivo ejecutable.
     pub claude_acp_path: Option<String>,
+    /// Igual, para Codex (HU-021).
+    pub codex_acp_path: Option<String>,
     pub approval_notifications: bool,
 }
 
 const ENTITY: &str = "Configuración de ejecución";
 
 pub(super) async fn load_settings(conn: &mut SqliteConnection) -> Result<RunSettings, CoreError> {
-    let (max_concurrency, timeout_minutes, claude_acp_path, approval_notifications, revision): (
-        i64,
-        i64,
-        Option<String>,
-        bool,
-        i64,
-    ) = sqlx::query_as(
-        "SELECT max_concurrency, timeout_minutes, claude_acp_path, approval_notifications, \
-         revision FROM run_settings WHERE id = 1",
+    #[allow(clippy::type_complexity)]
+    let (
+        max_concurrency,
+        timeout_minutes,
+        claude_acp_path,
+        codex_acp_path,
+        approval_notifications,
+        revision,
+    ): (i64, i64, Option<String>, Option<String>, bool, i64) = sqlx::query_as(
+        "SELECT max_concurrency, timeout_minutes, claude_acp_path, codex_acp_path, \
+         approval_notifications, revision FROM run_settings WHERE id = 1",
     )
     .fetch_optional(&mut *conn)
     .await?
@@ -78,6 +95,7 @@ pub(super) async fn load_settings(conn: &mut SqliteConnection) -> Result<RunSett
         max_concurrency,
         timeout_minutes,
         claude_acp_path,
+        codex_acp_path,
         approval_notifications,
         revision,
     })
@@ -93,7 +111,8 @@ pub async fn get_run_settings(store: &Store) -> Result<RunSettings, CoreError> {
 /// `conflict` con la vigente). Fuera de rango → `validation` con el campo. La ruta del
 /// adaptador se comprueba en disco **antes** de la transacción (fuera del runtime, con límite
 /// de tiempo): relativa, de red, inexistente, que no sea un archivo normal tras resolver enlaces
-/// o (en Unix) sin permiso de ejecución → `validation` (`claudeAcpPath`); solo si la ruta cambia
+/// o (en Unix) sin permiso de ejecución → `validation` (`claudeAcpPath`/`codexAcpPath`); solo si
+/// esa ruta cambia
 /// respecto a la guardada en `expectedRevision`. Se guarda tal como la
 /// escribió la persona (recortada), no la ruta resuelta. Una transacción
 /// `BEGIN IMMEDIATE`; sin `requestId`: aplicar dos veces los mismos valores con la revisión
@@ -121,34 +140,37 @@ pub async fn update_run_settings(
             ),
         });
     }
-    let adapter_path = match input.claude_acp_path.as_deref().map(str::trim) {
-        None | Some("") => None,
-        Some(path) => {
-            // Solo se comprueba en disco si cambia: guardar otra cosa (p. ej. la concurrencia)
-            // no puede fallar porque el adaptador ya guardado se movió. Se compara con la
-            // revisión que la persona editaba; si no coincide, la transacción da `conflict`.
-            let current = get_run_settings(store).await?;
-            let unchanged = current.revision == input.expected_revision
-                && current.claude_acp_path.as_deref() == Some(path);
-            if !unchanged {
-                validate_adapter_path_text(path)?;
-                check_adapter_on_disk(path.to_owned()).await?;
-            }
-            Some(path.to_owned())
-        }
-    };
+    // Solo se comprueba en disco una ruta que cambia: guardar otra cosa (p. ej. la concurrencia)
+    // no puede fallar porque el adaptador ya guardado se movió. Se compara con la revisión que
+    // la persona editaba; si no coincide, la transacción da `conflict`.
+    let current = get_run_settings(store).await?;
+    let claude_path = checked_path(
+        &current,
+        input,
+        AcpAgent::ClaudeCode,
+        input.claude_acp_path.as_deref(),
+    )
+    .await?;
+    let codex_path = checked_path(
+        &current,
+        input,
+        AcpAgent::Codex,
+        input.codex_acp_path.as_deref(),
+    )
+    .await?;
     let input = input.clone();
     store
         .write(move |conn| {
             Box::pin(async move {
                 let updated = sqlx::query(
                     "UPDATE run_settings SET max_concurrency = ?, timeout_minutes = ?, \
-                     claude_acp_path = ?, approval_notifications = ?, revision = revision + 1 \
-                     WHERE id = 1 AND revision = ?",
+                     claude_acp_path = ?, codex_acp_path = ?, approval_notifications = ?, \
+                     revision = revision + 1 WHERE id = 1 AND revision = ?",
                 )
                 .bind(input.max_concurrency)
                 .bind(input.timeout_minutes)
-                .bind(adapter_path)
+                .bind(claude_path)
+                .bind(codex_path)
                 .bind(input.approval_notifications)
                 .bind(input.expected_revision)
                 .execute(&mut *conn)
@@ -164,42 +186,70 @@ pub async fn update_run_settings(
         .await
 }
 
+/// Ruta del adaptador de `agent` tal como se guardará: vacía → `None`; si cambia respecto a la
+/// revisión que se editaba, comprobada en texto y en disco.
+async fn checked_path(
+    current: &RunSettings,
+    input: &UpdateRunSettingsInput,
+    agent: AcpAgent,
+    typed: Option<&str>,
+) -> Result<Option<String>, CoreError> {
+    match typed.map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(path) => {
+            let unchanged = current.revision == input.expected_revision
+                && current.adapter_path(agent) == Some(path);
+            if !unchanged {
+                validate_adapter_path_text(agent, path)?;
+                check_adapter_on_disk(agent, path.to_owned()).await?;
+            }
+            Ok(Some(path.to_owned()))
+        }
+    }
+}
+
 /// Valida una ruta de adaptador como al guardarla (texto y disco, fuera del runtime y con
 /// límite de tiempo) y la devuelve recortada. La usa «Comprobar adaptador» antes de lanzarlo.
-/// Errores → `validation` (`claudeAcpPath`) con un mensaje sin la ruta.
-pub async fn check_adapter_path(path: &str) -> Result<std::path::PathBuf, CoreError> {
+/// Errores → `validation` (`claudeAcpPath`/`codexAcpPath`) con un mensaje sin la ruta.
+pub async fn check_adapter_path(
+    agent: AcpAgent,
+    path: &str,
+) -> Result<std::path::PathBuf, CoreError> {
     let path = path.trim();
     if path.is_empty() {
-        return Err(invalid_path("Indica la ruta del adaptador."));
+        return Err(invalid_path(agent, "Indica la ruta del adaptador."));
     }
-    validate_adapter_path_text(path)?;
-    check_adapter_on_disk(path.to_owned()).await?;
+    validate_adapter_path_text(agent, path)?;
+    check_adapter_on_disk(agent, path.to_owned()).await?;
     Ok(std::path::PathBuf::from(path))
 }
 
-fn invalid_path(reason: impl Into<String>) -> CoreError {
+fn invalid_path(agent: AcpAgent, reason: impl Into<String>) -> CoreError {
     CoreError::Validation {
-        field: "claudeAcpPath",
+        field: agent.settings_field(),
         reason: reason.into(),
     }
 }
 
 /// Comprobaciones sin tocar el disco: longitud, caracteres, absoluta, normalizada y local.
-fn validate_adapter_path_text(path: &str) -> Result<(), CoreError> {
+fn validate_adapter_path_text(agent: AcpAgent, path: &str) -> Result<(), CoreError> {
     if path.chars().count() > MAX_ADAPTER_PATH_CHARS {
-        return Err(invalid_path(format!(
-            "La ruta del adaptador admite hasta {MAX_ADAPTER_PATH_CHARS} caracteres."
-        )));
+        return Err(invalid_path(
+            agent,
+            format!("La ruta del adaptador admite hasta {MAX_ADAPTER_PATH_CHARS} caracteres."),
+        ));
     }
     if path.chars().any(char::is_control) || has_invisible_formatting(path) {
         return Err(invalid_path(
+            agent,
             "La ruta del adaptador contiene caracteres no válidos.",
         ));
     }
     if !Path::new(path).is_absolute() {
         return Err(invalid_path(
+            agent,
             "Escribe la ruta absoluta del ejecutable del adaptador (p. ej. la que muestra \
-             `which claude-agent-acp`).",
+             `which claude-agent-acp` o `which codex-acp`).",
         ));
     }
     // `.`/`..` permitirían esconder una ruta de red tras un prefijo local.
@@ -208,6 +258,7 @@ fn validate_adapter_path_text(path: &str) -> Result<(), CoreError> {
         .any(|part| part == "." || part == "..")
     {
         return Err(invalid_path(
+            agent,
             "La ruta del adaptador contiene «.» o «..»: escribe la ruta normalizada.",
         ));
     }
@@ -216,6 +267,7 @@ fn validate_adapter_path_text(path: &str) -> Result<(), CoreError> {
     let lower = path.to_ascii_lowercase();
     if path.starts_with("\\\\") || path.starts_with("//") || lower.starts_with("/net/") {
         return Err(invalid_path(
+            agent,
             "La ruta del adaptador es una ruta de red: usa un ejecutable local.",
         ));
     }
@@ -233,7 +285,7 @@ enum AdapterCheck {
 /// Comprueba en disco, fuera del runtime asíncrono y con límite de tiempo, que la ruta lleva a
 /// un archivo normal (tras resolver enlaces simbólicos: la instalación npm usa un enlace en
 /// `.bin`) y, en Unix, con permiso de ejecución. En Windows basta con que sea un archivo.
-async fn check_adapter_on_disk(path: String) -> Result<(), CoreError> {
+async fn check_adapter_on_disk(agent: AcpAgent, path: String) -> Result<(), CoreError> {
     let task = tokio::task::spawn_blocking(move || {
         let Ok(resolved) = std::fs::canonicalize(&path) else {
             return AdapterCheck::Missing;
@@ -253,15 +305,19 @@ async fn check_adapter_on_disk(path: String) -> Result<(), CoreError> {
     match tokio::time::timeout(ADAPTER_CHECK_TIMEOUT, task).await {
         Ok(Ok(AdapterCheck::Ok)) => Ok(()),
         Ok(Ok(AdapterCheck::Missing)) => Err(invalid_path(
+            agent,
             "No existe ningún archivo en esa ruta (o no se puede leer).",
         )),
         Ok(Ok(AdapterCheck::NotFile)) => Err(invalid_path(
+            agent,
             "Esa ruta no es un archivo: indica el ejecutable del adaptador, no su carpeta.",
         )),
-        Ok(Ok(AdapterCheck::NotExecutable)) => {
-            Err(invalid_path("Ese archivo no tiene permiso de ejecución."))
-        }
+        Ok(Ok(AdapterCheck::NotExecutable)) => Err(invalid_path(
+            agent,
+            "Ese archivo no tiene permiso de ejecución.",
+        )),
         Ok(Err(_)) | Err(_) => Err(invalid_path(
+            agent,
             "No se pudo comprobar la ruta a tiempo: comprueba que el disco está disponible.",
         )),
     }

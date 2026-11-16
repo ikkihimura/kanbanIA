@@ -15,9 +15,23 @@
 //!
 //! Escenarios: `ok`, `permission`, `disconnect`, `malformed`, `oversize`, `bad_response`,
 //! `no_modes`, `version2`, `auth`, `set_mode_error`, `cancel`, `ignore_cancel`, `refusal`,
-//! `max_tokens`, `cancelled_unasked`, `mode_change`, `config_mode_change`, `flood`, `child`,
+//! `max_tokens`, `cancelled_unasked`, `cancelled_after_cancelled_answer`, `mode_change`, `config_mode_change`, `flood`, `child`,
 //! `slow_init`, `hang_init`, `permission_on_cancel`, `unknown_id`, `other_session`,
 //! `mode_no_session`, `auth_other_error`, `approval`, `approval_withdraw`.
+//!
+//! Variante **tipo Codex** (HU-021): se activa sola si el entorno trae `CODEX_HOME` (lo fija el
+//! supervisor para Codex). Comprueba el entorno de Codex (`CODEX_HOME` carpeta absoluta,
+//! `HOME` = `<CODEX_HOME>/home` (y `USERPROFILE` en Windows), `INITIAL_AGENT_MODE=read-only`,
+//! `NO_BROWSER=1`, `CODEX_CONFIG` = el de la app (con `remote_plugin: false`) y ninguna de
+//! `OPENAI_*`, `CODEX_API_KEY`, `CODEX_PATH`, `MODEL_PROVIDER`, `DEFAULT_AUTH_REQUEST`,
+//! `APP_SERVER_LOGS`; si no, [`FORBIDDEN_ENV_EXIT`]) y anota en `--log` `entorno: <nombres>` y
+//! `codex_home: <valor>`. Sin `_meta` en `session/new`; modos de Codex (`read-only`, `agent`,
+//! `agent-full-access`…) con `read-only` obligatorio; `models.currentModelId`; opciones de
+//! permiso de Codex (`allow_for_session`, `decline`, `cancel`…): rechazar con `cancel` (o
+//! `cancelled`) **aborta el turno** con `stopReason: cancelled`, como `codex-acp`. Escenarios
+//! propios: `edit_reject` (edición: solo `cancel` para rechazar) y `permissions_turn` (permisos
+//! adicionales: `allow_once` solo para todo el turno). La variante Claude falla si recibe
+//! variables de Codex. Al arrancar anota `arranque` en `--log`.
 //!
 //! `approval` (HU-020) pide permiso para `touch nota.txt` y espera la respuesta tanto como
 //! haga falta (también durante una cancelación); anota el resultado en `--log`
@@ -46,7 +60,23 @@ const FORBIDDEN_ENV_EXIT: i32 = 8;
 const SLEEP_CHILD: &str = "sleep-child";
 
 const USAGE: &str = "uso: kanbania-fake-acp <escenario> [--pids <archivo>] [--log <archivo>] [--prompt-file <archivo>]";
-const FORBIDDEN_PREFIXES: [&str; 3] = ["KANBANIA_", "ANTHROPIC_", "CLAUDE_"];
+const FORBIDDEN_PREFIXES: [&str; 4] = ["KANBANIA_", "ANTHROPIC_", "CLAUDE_", "OPENAI_"];
+const FORBIDDEN_NAMES: [&str; 5] = [
+    "CODEX_API_KEY",
+    "CODEX_PATH",
+    "MODEL_PROVIDER",
+    "DEFAULT_AUTH_REQUEST",
+    "APP_SERVER_LOGS",
+];
+/// Variables que solo debe recibir la variante Codex.
+const CODEX_ONLY: [&str; 4] = [
+    "CODEX_HOME",
+    "INITIAL_AGENT_MODE",
+    "NO_BROWSER",
+    "CODEX_CONFIG",
+];
+/// Modelo que declara la variante Codex.
+const CODEX_MODEL: &str = "gpt-falso-1[medium]";
 
 /// Ejecuta el escenario y devuelve el código de salida.
 pub fn run(args: &[String]) -> i32 {
@@ -61,6 +91,7 @@ pub fn run(args: &[String]) -> i32 {
     if let Some((name, _)) = std::env::vars_os().find(|(name, _)| {
         let name = name.to_string_lossy().to_ascii_uppercase();
         FORBIDDEN_PREFIXES.iter().any(|p| name.starts_with(p))
+            || FORBIDDEN_NAMES.contains(&name.as_str())
     }) {
         eprintln!(
             "FAKE: variable prohibida en el entorno: {}",
@@ -73,13 +104,20 @@ pub fn run(args: &[String]) -> i32 {
             .find(|pair| pair[0] == name)
             .map(|pair| pair[1].clone())
     };
+    let codex = std::env::var_os("CODEX_HOME").is_some();
     let mut fake = Fake {
         scenario: scenario.clone(),
         lines: std::io::stdin().lock().lines(),
         pids: option("--pids"),
         log: option("--log"),
         prompt_file: option("--prompt-file"),
+        codex,
     };
+    fake.note("arranque");
+    if let Err(problem) = fake.check_flavor_env() {
+        eprintln!("FAKE: entorno inesperado: {problem}");
+        return FORBIDDEN_ENV_EXIT;
+    }
     fake.serve()
 }
 
@@ -89,11 +127,77 @@ struct Fake {
     pids: Option<String>,
     log: Option<String>,
     prompt_file: Option<String>,
+    /// Variante tipo Codex (ver la documentación del módulo).
+    codex: bool,
 }
 
 impl Fake {
     fn is(&self, scenario: &str) -> bool {
         self.scenario == scenario
+    }
+
+    /// Modo obligatorio de la variante.
+    fn required_mode(&self) -> &'static str {
+        if self.codex { "read-only" } else { "default" }
+    }
+
+    /// Modo al que «se escapa» la variante en `mode_change`/`config_mode_change`.
+    fn escape_mode(&self, config: bool) -> &'static str {
+        match (self.codex, config) {
+            (true, false) => "agent-full-access",
+            (true, true) => "agent",
+            (false, false) => "bypassPermissions",
+            (false, true) => "acceptEdits",
+        }
+    }
+
+    /// Entorno propio de cada variante (además de la lista común de adaptadores).
+    fn check_flavor_env(&self) -> Result<(), String> {
+        let var = |name: &str| std::env::var(name).ok();
+        if !self.codex {
+            return match CODEX_ONLY
+                .iter()
+                .find(|name| std::env::var_os(name).is_some())
+            {
+                Some(name) => Err(format!("{name} fuera de Codex")),
+                None => Ok(()),
+            };
+        }
+        let mut names: Vec<String> = std::env::vars_os()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        self.note(&format!("entorno: {}", names.join(",")));
+        let home = var("CODEX_HOME").unwrap_or_default();
+        self.note(&format!("codex_home: {home}"));
+        if !std::path::Path::new(&home).is_absolute() || !std::path::Path::new(&home).is_dir() {
+            return Err("CODEX_HOME no es una carpeta absoluta".into());
+        }
+        // Carpeta personal propia dentro de `CODEX_HOME`, nunca la del usuario.
+        let personal = std::path::Path::new(&home).join("home");
+        let personal_text = personal.to_string_lossy().into_owned();
+        self.note(&format!("home: {}", var("HOME").unwrap_or_default()));
+        if var("HOME").as_deref() != Some(personal_text.as_str()) || !personal.is_dir() {
+            return Err("HOME no es la carpeta personal de Codex".into());
+        }
+        if cfg!(windows) && var("USERPROFILE").as_deref() != Some(personal_text.as_str()) {
+            return Err("USERPROFILE no es la carpeta personal de Codex".into());
+        }
+        if var("INITIAL_AGENT_MODE").as_deref() != Some("read-only") {
+            return Err("INITIAL_AGENT_MODE".into());
+        }
+        if var("NO_BROWSER").as_deref() != Some("1") {
+            return Err("NO_BROWSER".into());
+        }
+        let config = var("CODEX_CONFIG")
+            .and_then(|c| serde_json::from_str::<Value>(&c).ok())
+            .unwrap_or(Value::Null);
+        let expected: Value =
+            serde_json::from_str(kanbania_runner::acp::CODEX_CONFIG).unwrap_or(Value::Null);
+        if config.is_null() || config != expected || config["features"]["remote_plugin"] != false {
+            return Err("CODEX_CONFIG".into());
+        }
+        Ok(())
     }
 
     fn serve(&mut self) -> i32 {
@@ -170,14 +274,22 @@ impl Fake {
             std::thread::sleep(Duration::from_secs(30));
         }
         let version = if self.is("version2") { 2 } else { 1 };
-        let auth = if self.is("auth") || self.is("auth_other_error") {
+        let title = if self.codex {
+            "Agente ACP falso tipo Codex (pruebas)"
+        } else {
+            "Agente ACP falso (pruebas)"
+        };
+        let auth = if self.codex {
+            // Como `codex-acp`: siempre los anuncia.
+            json!([{ "id": "api-key", "name": "API key" }, { "id": "chat-gpt", "name": "ChatGPT" }])
+        } else if self.is("auth") || self.is("auth_other_error") {
             json!([{ "id": "claude-login", "name": "Iniciar sesión" }])
         } else {
             json!([])
         };
         send(&json!({"jsonrpc":"2.0","id":id,"result":{
             "protocolVersion": version,
-            "agentInfo": {"name":"kanbania-fake-acp","title":"Agente ACP falso (pruebas)","version":"0.0.1-prueba"},
+            "agentInfo": {"name":"kanbania-fake-acp","title":title,"version":"0.0.1-prueba"},
             "authMethods": auth,
             "agentCapabilities": {
                 "loadSession": true,
@@ -194,10 +306,12 @@ impl Fake {
         let cwd_ok = params["cwd"].as_str().is_some_and(|cwd| {
             std::path::Path::new(cwd).is_absolute() && std::path::Path::new(cwd).is_dir()
         });
-        if !cwd_ok
-            || params["mcpServers"] != json!([])
-            || params["_meta"] != kanbania_runner::acp::claude_code_isolation_meta()
-        {
+        let meta_ok = if self.codex {
+            params.get("_meta").is_none()
+        } else {
+            params["_meta"] == kanbania_runner::acp::claude_code_isolation_meta()
+        };
+        if !cwd_ok || params["mcpServers"] != json!([]) || !meta_ok {
             eprintln!("FAKE: session/new inesperado");
             return Some(WRONG_INPUT_EXIT);
         }
@@ -230,6 +344,30 @@ impl Fake {
             send(&json!({"jsonrpc":"2.0","id":id,"result":{"sessionId":SESSION_ID}}));
             return None;
         }
+        if self.codex {
+            // Como `codex-acp` 2.5.0 con `INITIAL_AGENT_MODE=read-only`.
+            send(&json!({"jsonrpc":"2.0","id":id,"result":{
+                "sessionId": SESSION_ID,
+                "modes": {
+                    "currentModeId": "read-only",
+                    "availableModes": [
+                        {"id":"read-only","name":"Read Only"},
+                        {"id":"workspace-write","name":"Workspace Write"},
+                        {"id":"agent","name":"Agent"},
+                        {"id":"agent-full-access","name":"Agent (full access)"}
+                    ]
+                },
+                "models": {
+                    "currentModelId": CODEX_MODEL,
+                    "availableModels": [{"modelId": CODEX_MODEL, "name": "Modelo falso"}]
+                },
+                "configOptions": [
+                    {"id":"mode","name":"Modo","category":"mode","type":"select","currentValue":"read-only","options":[]},
+                    {"id":"model","name":"Modelo","category":"model","type":"select","currentValue":CODEX_MODEL,"options":[]}
+                ]
+            }}));
+            return None;
+        }
         send(&json!({"jsonrpc":"2.0","id":id,"result":{
             "sessionId": SESSION_ID,
             "modes": {
@@ -247,7 +385,7 @@ impl Fake {
 
     fn set_mode(&mut self, id: &Value, message: &Value) -> Option<i32> {
         let params = &message["params"];
-        if params["sessionId"] != SESSION_ID || params["modeId"] != "default" {
+        if params["sessionId"] != SESSION_ID || params["modeId"] != self.required_mode() {
             eprintln!("FAKE: session/set_mode inesperado");
             return Some(WRONG_INPUT_EXIT);
         }
@@ -258,7 +396,10 @@ impl Fake {
             return None;
         }
         send(&json!({"jsonrpc":"2.0","id":id,"result":{}}));
-        update(json!({"sessionUpdate":"current_mode_update","currentModeId":"default"}));
+        // `codex-acp` no notifica al fijar el modo; Claude Code sí.
+        if !self.codex {
+            update(json!({"sessionUpdate":"current_mode_update","currentModeId":"default"}));
+        }
         None
     }
 
@@ -309,13 +450,13 @@ impl Fake {
             "config_mode_change" => {
                 update(
                     json!({"sessionUpdate":"config_option_update","configOptions":[
-                    {"id":"mode","name":"Modo","category":"mode","type":"select","currentValue":"acceptEdits","options":[]}]}),
+                    {"id":"mode","name":"Modo","category":"mode","type":"select","currentValue":self.escape_mode(true),"options":[]}]}),
                 );
                 None
             }
             "mode_change" => {
                 update(
-                    json!({"sessionUpdate":"current_mode_update","currentModeId":"bypassPermissions"}),
+                    json!({"sessionUpdate":"current_mode_update","currentModeId":self.escape_mode(false)}),
                 );
                 None
             }
@@ -327,8 +468,12 @@ impl Fake {
             }
             "child" => self.child(id),
             "permission_on_cancel" => self.permission_on_cancel(id),
+            "approval" if self.codex => self.codex_approval(id, "execute"),
             "approval" => self.approval(id),
+            "edit_reject" if self.codex => self.codex_approval(id, "edit"),
+            "permissions_turn" if self.codex => self.permissions_turn(id),
             "approval_withdraw" => self.approval_withdraw(id),
+            "cancelled_after_cancelled_answer" => self.cancelled_after_cancelled_answer(id),
             "unknown_id" => {
                 send(&json!({"jsonrpc":"2.0","id":4242,"result":{}}));
                 None
@@ -395,10 +540,10 @@ impl Fake {
             json!({"sessionUpdate":"usage_update","used":1200,"size":200000,"cost":{"amount":0.01,"currency":"USD"}}),
         );
         update(json!({"sessionUpdate":"available_commands_update","availableCommands":[]}));
-        // Opción de modo que sigue en `default`: no detiene el turno.
+        // Opción de modo que sigue en el obligatorio: no detiene el turno.
         update(
             json!({"sessionUpdate":"config_option_update","configOptions":[
-            {"id":"mode","name":"Modo","category":"mode","type":"select","currentValue":"default","options":[]},
+            {"id":"mode","name":"Modo","category":"mode","type":"select","currentValue":self.required_mode(),"options":[]},
             {"id":"model","name":"Modelo","type":"select","currentValue":"PRUEBA","options":[]}]}),
         );
         send(
@@ -496,6 +641,127 @@ impl Fake {
             }
             return end(id, if cancelled { "cancelled" } else { "end_turn" });
         }
+    }
+
+    /// Variante Codex de `approval` (`kind = execute`: comando con `decline` y `cancel`, este
+    /// primero para comprobar que la app prefiere `decline`) y de `edit_reject` (`kind = edit`:
+    /// edición con solo `cancel`). Como `codex-acp`: `allow_once` ejecuta la acción (crea
+    /// `nota.txt`), `decline` sigue el turno, y `cancel` o `cancelled` lo abortan con
+    /// `stopReason: cancelled`. Anota `permiso: <optionId|cancelled>` en `--log`.
+    fn codex_approval(&mut self, id: &Value, kind: &str) -> Option<i32> {
+        let (title, raw_input, options) = if kind == "edit" {
+            (
+                "Editar nota.txt",
+                json!({"path":"nota.txt"}),
+                json!([
+                    {"optionId":"allow_once","name":"Yes, proceed","kind":"allow_once"},
+                    {"optionId":"allow_for_session","name":"Yes, and don't ask again for these files","kind":"allow_always"},
+                    {"optionId":"cancel","name":"No, and tell Codex what to do differently","kind":"reject_once"}
+                ]),
+            )
+        } else {
+            (
+                "Crear nota.txt",
+                json!({"command":"touch nota.txt"}),
+                json!([
+                    {"optionId":"allow_once","name":"Yes, proceed","kind":"allow_once"},
+                    {"optionId":"allow_for_session","name":"Yes, and don't ask again","kind":"allow_always"},
+                    {"optionId":"accept_execpolicy_amendment","name":"Yes, and don't ask again for touch","kind":"allow_always"},
+                    {"optionId":"cancel","name":"No, and tell Codex what to do differently","kind":"reject_once"},
+                    {"optionId":"decline","name":"No, continue without running it","kind":"reject_once"}
+                ]),
+            )
+        };
+        send(
+            &json!({"jsonrpc":"2.0","id":"permiso-codex","method":"session/request_permission","params":{
+                "sessionId": SESSION_ID,
+                "toolCall": {"toolCallId":"c1","title":title,"kind":kind,"status":"pending","rawInput":raw_input},
+                "options": options
+            }}),
+        );
+        loop {
+            let message = self.recv()?;
+            if message["method"] == "session/cancel" {
+                continue;
+            }
+            if message["id"] != "permiso-codex" {
+                continue;
+            }
+            let outcome = &message["result"]["outcome"];
+            let choice = if outcome["outcome"] == "cancelled" {
+                "cancelled".to_owned()
+            } else {
+                outcome["optionId"].as_str().unwrap_or("?").to_owned()
+            };
+            self.note(&format!("permiso: {choice}"));
+            return match choice.as_str() {
+                "allow_once" => {
+                    if std::fs::write("nota.txt", "hola\n").is_err() {
+                        eprintln!("FAKE: no se pudo crear nota.txt");
+                    }
+                    message_chunk("m1", "Creé nota.txt.");
+                    end(id, "end_turn")
+                }
+                "decline" => {
+                    message_chunk("m1", "No lo ejecuto: termino sin cambios.");
+                    end(id, "end_turn")
+                }
+                // `cancel` (o cualquier otra respuesta) aborta el turno, como `codex-acp`.
+                _ => end(id, "cancelled"),
+            };
+        }
+    }
+
+    /// Permisos adicionales de Codex: los únicos `allow_once` valen para todo el turno; la app
+    /// no debe elegirlos. Espera `reject_permissions` y sigue el turno.
+    fn permissions_turn(&mut self, id: &Value) -> Option<i32> {
+        send(
+            &json!({"jsonrpc":"2.0","id":"permiso-turno","method":"session/request_permission","params":{
+                "sessionId": SESSION_ID,
+                "toolCall": {"toolCallId":"c2","title":"Acceso a la red","kind":"other","status":"pending"},
+                "options": [
+                    {"optionId":"allow_permissions_turn","name":"Yes, grant these permissions for this turn","kind":"allow_once"},
+                    {"optionId":"allow_permissions_turn_strict_auto_review","name":"Yes, grant for this turn with strict auto review","kind":"allow_once"},
+                    {"optionId":"allow_permissions_session","name":"Yes, grant these permissions for this session","kind":"allow_always"},
+                    {"optionId":"reject_permissions","name":"No, continue without permissions","kind":"reject_once"}
+                ]
+            }}),
+        );
+        loop {
+            let message = self.recv()?;
+            if message["id"] != "permiso-turno" {
+                continue;
+            }
+            let outcome = &message["result"]["outcome"];
+            let choice = if outcome["outcome"] == "cancelled" {
+                "cancelled".to_owned()
+            } else {
+                outcome["optionId"].as_str().unwrap_or("?").to_owned()
+            };
+            self.note(&format!("permiso: {choice}"));
+            message_chunk("m1", "Sigo sin esos permisos.");
+            return end(id, "end_turn");
+        }
+    }
+
+    /// Pide un permiso sin `reject_once` (la app responde `cancelled`) y termina el turno con
+    /// `stopReason: cancelled` por su cuenta: para la app sigue siendo error de protocolo.
+    fn cancelled_after_cancelled_answer(&mut self, id: &Value) -> Option<i32> {
+        send(
+            &json!({"jsonrpc":"2.0","id":"permiso-sin-rechazo","method":"session/request_permission","params":{
+                "sessionId": SESSION_ID,
+                "toolCall": {"toolCallId":"c3","title":"Ejecutar pruebas","kind":"execute"},
+                "options": [{"optionId":"allow_once","name":"Permitir","kind":"allow_once"}]
+            }}),
+        );
+        let reply = self.recv()?;
+        if reply["id"] != "permiso-sin-rechazo"
+            || reply["result"]["outcome"] != json!({"outcome":"cancelled"})
+        {
+            eprintln!("FAKE: el permiso sin reject_once no se respondió como cancelado");
+            return Some(WRONG_INPUT_EXIT);
+        }
+        end(id, "cancelled")
     }
 
     /// Pide permiso y lo retira con `$/cancel_request`.

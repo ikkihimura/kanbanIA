@@ -1,5 +1,7 @@
-//! Cliente ACP v1 propio (HU-019) para lanzar un agente compatible (hoy, Claude Code vía
-//! `@agentclientprotocol/claude-agent-acp`) como proceso supervisado.
+//! Cliente ACP v1 propio (HU-019) para lanzar un agente compatible (Claude Code vía
+//! `@agentclientprotocol/claude-agent-acp`; desde HU-021, Codex vía
+//! `@agentclientprotocol/codex-acp`) como proceso supervisado. Lo propio de cada agente vive en
+//! su [`AcpProfile`] ([`CLAUDE_CODE_PROFILE`], [`CODEX_PROFILE`]); el cliente es genérico.
 //!
 //! Especificación: <https://agentclientprotocol.com/protocol/v1/> (initialization,
 //! session-setup, session-modes, prompt-turn, tool-calls, cancellation, schema). Se usa un
@@ -10,14 +12,16 @@
 //! - negociación ([`AcpClient::initialize`], [`AcpClient::open_session`]): `initialize`
 //!   (versión 1, `clientCapabilities: {}`: sin `fs` ni `terminal`), `session/new` con el
 //!   worktree como `cwd` y sin servidores MCP, y **modo obligatorio** del perfil
-//!   ([`AcpProfile`]: `default` en Claude Code, que pide permiso antes de actuar) con
+//!   ([`AcpProfile`]: `default` en Claude Code, `read-only` en Codex) con
 //!   `session/set_mode {sessionId, modeId}`. Cada petición ≤ 60 s;
 //! - turno ([`AcpClient::prompt`]): un único bloque `text` con las instrucciones de la
 //!   instantánea; `session/update` → salida normalizada (`agent`, [`normalize`]); permisos →
 //!   según la [`PermissionPolicy`]: rechazar en el acto (`reject_once`) o preguntar a una
 //!   persona (HU-020) y responder `allow_once`/`reject_once` cuando decide (`cancelled` si no
 //!   hay `reject_once`, si se cancela el turno o si se cierra sin decisión; nunca
-//!   `allow_always` ni `reject_always`); `$/cancel_request` del agente retira una pendiente;
+//!   `allow_always` ni `reject_always`; el perfil excluye opciones `allow_once` que valen para
+//!   más que una acción y prefiere un `reject_once` que no termine el turno);
+//!   `$/cancel_request` del agente retira una pendiente;
 //!   otras peticiones del agente → `-32601`; otras notificaciones → solo su
 //!   nombre en `sys`, una vez (el adaptador real envía el correo de la cuenta en
 //!   `_auth/status_update`: nunca se copian parámetros);
@@ -39,60 +43,27 @@ pub(crate) mod jsonrpc;
 pub(crate) mod normalize;
 mod permission;
 mod probe;
+mod profile;
 
 use std::time::Duration;
 
-pub use client::{AcpClient, AgentDeclaration, OpenedSession};
+pub use client::{AcpClient, AgentDeclaration, OpenedSession, TurnEnd};
 pub use framing::MAX_LINE_BYTES;
 pub use permission::{
     MAX_PENDING_PERMISSIONS, MAX_SCOPE_CHARS, PermissionAnswer, PermissionAsk, PermissionBridge,
     PermissionEvent, PermissionPolicy, PermissionReply, permission_bridge,
 };
 pub use probe::{ProbeError, probe_adapter};
+pub use profile::{
+    AcpProfile, CLAUDE_CODE_PROFILE, CODEX_CONFIG, CODEX_HOME_DENYLIST, CODEX_HOME_NOTE,
+    CODEX_PERSONAL_DENYLIST, CODEX_PERSONAL_HOME, CODEX_PLUGIN_CACHES, CODEX_PROFILE,
+    CODEX_REPOSITORY_CONFIG, ISOLATION_NOTE, SessionIsolation, claude_code_isolation_meta,
+    clear_codex_plugin_cache, codex_env, codex_home_config, ensure_codex_home,
+    has_repository_config,
+};
 
 /// Versión de ACP que habla este cliente.
 pub const PROTOCOL_VERSION: u16 = 1;
-
-/// Perfil de un adaptador ACP: lo que la app exige además del protocolo. HU-021 añadirá otros
-/// sin tocar el cliente.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AcpProfile {
-    /// Modo de sesión que se fija con `session/set_mode` y que el agente no puede abandonar
-    /// (ni con `current_mode_update` ni con `config_option_update` de la opción de modo).
-    /// Si el agente no lo ofrece → [`AcpFailure::ModeUnavailable`].
-    pub required_mode: &'static str,
-    /// Claude Code: enviar en `session/new` el `_meta` de [`claude_code_isolation_meta`] para
-    /// que no cargue la configuración del usuario, del proyecto ni local (sus reglas `allow`,
-    /// hooks o `.mcp.json` evitarían `session/request_permission`).
-    pub isolate_claude_code_settings: bool,
-}
-
-/// `_meta` de `session/new` que aísla Claude Code (adaptador `claude-agent-acp`, comprobado en
-/// su `dist/new-session-meta.d.ts` 0.107.0: `_meta.claudeCode.options` son opciones del SDK
-/// `@anthropic-ai/claude-agent-sdk`). `settingSources: []` = no cargar ajustes de usuario,
-/// proyecto ni local (la política gestionada sí se aplica);
-/// `allowDangerouslySkipPermissions: false` quita `bypassPermissions`.
-pub fn claude_code_isolation_meta() -> serde_json::Value {
-    serde_json::json!({
-        "claudeCode": {
-            "options": {
-                "settingSources": [],
-                "allowDangerouslySkipPermissions": false
-            }
-        }
-    })
-}
-
-/// Línea `sys` fija cuando se pide el aislamiento.
-pub const ISOLATION_NOTE: &str =
-    "La app pidió no cargar la configuración de Claude Code (usuario, proyecto ni local).";
-
-/// Claude Code (`@agentclientprotocol/claude-agent-acp`): `default` = «Always ask before making
-/// changes» (comprobado con el adaptador real 0.107.0; su modo inicial es `auto`).
-pub const CLAUDE_CODE_PROFILE: AcpProfile = AcpProfile {
-    required_mode: "default",
-    isolate_claude_code_settings: true,
-};
 
 /// Límites de tiempo del cliente.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,7 +99,8 @@ pub enum AcpFailure {
     /// El proceso cerró su salida (o terminó) antes de responder.
     Disconnected,
     /// JSON o JSON-RPC inválido, línea demasiado larga o respuesta con forma inesperada
-    /// (incluido `stopReason: cancelled` sin que la app cancelara).
+    /// (incluido `stopReason: cancelled` sin que la app cancelara ni rechazara un permiso con
+    /// una respuesta que termina el turno).
     Protocol,
     /// `initialize` respondió con otra versión de protocolo.
     VersionUnsupported,

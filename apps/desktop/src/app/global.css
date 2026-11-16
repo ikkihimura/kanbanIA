@@ -1240,6 +1240,50 @@ fieldset.run-start__scenarios legend {
   margin: 0;
 }
 
+/* ---------- comparación de agentes y carpeta de Codex (HU-021) ---------- */
+
+.agent-compare {
+  overflow-x: auto;
+}
+
+.agent-compare table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.agent-compare caption {
+  margin-bottom: 4px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.agent-compare th,
+.agent-compare td {
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+  border: 1px solid var(--color-border);
+}
+
+.agent-compare thead th,
+.agent-compare tbody th {
+  color: var(--color-muted);
+  font-weight: 600;
+}
+
+/* Comando para copiar a mano: se selecciona entero y se corta en cualquier punto. */
+.codex-home__command {
+  display: block;
+  padding: 8px 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  background: var(--color-bg);
+  border: 2px solid var(--color-border);
+  user-select: all;
+}
+
 .checkbox:has(input:disabled),
 .checkbox input:disabled {
   cursor: not-allowed;

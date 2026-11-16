@@ -39,4 +39,10 @@ promptSha256: string | null,
 /**
  * Caracteres del prompt enviado.
  */
-promptChars: number | null, };
+promptChars: number | null, 
+/**
+ * Modelo que el agente **declaró** al crear la sesión (`models.currentModelId` de ACP, ≤ 50
+ * caracteres ASCII imprimibles; HU-021). La app no lo elige ni lo verifica; `null` si no
+ * lo informó o no cumplía los límites.
+ */
+model: string | null, };

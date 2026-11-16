@@ -18,6 +18,10 @@ timeoutMinutes: number,
  */
 claudeAcpPath: string | null, 
 /**
+ * Igual, para el adaptador de Codex (`codex-acp`, HU-021).
+ */
+codexAcpPath: string | null, 
+/**
  * Notificación del sistema cuando un agente pide permiso (HU-020; por defecto, no). El
  * texto nunca lleva el comando ni la ruta.
  */

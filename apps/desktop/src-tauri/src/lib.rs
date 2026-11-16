@@ -100,6 +100,7 @@ pub fn register_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
             commands::runs::get_run_settings,
             commands::runs::update_run_settings,
             commands::runs::check_acp_adapter,
+            commands::runs::get_codex_home_status,
         ])
 }
 

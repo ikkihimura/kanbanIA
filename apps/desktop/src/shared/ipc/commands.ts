@@ -14,6 +14,8 @@ import type { AgentChange } from "../../contracts/generated/AgentChange";
 import type { StoryActivity } from "../../contracts/generated/StoryActivity";
 import type { StoryActivityInput } from "../../contracts/generated/StoryActivityInput";
 import type { AcpAdapterCheck } from "../../contracts/generated/AcpAdapterCheck";
+import type { AcpAgent } from "../../contracts/generated/AcpAgent";
+import type { CodexHomeStatus } from "../../contracts/generated/CodexHomeStatus";
 import type { CancelRunInput } from "../../contracts/generated/CancelRunInput";
 import type { DecideApprovalInput } from "../../contracts/generated/DecideApprovalInput";
 import type { RunApproval } from "../../contracts/generated/RunApproval";
@@ -413,14 +415,28 @@ export function updateRunSettings(
 }
 
 /**
- * «Comprobar adaptador» (HU-019): lanza el adaptador ACP, solo hace `initialize` y devuelve lo
- * que declaró. Con `path` comprueba esa ruta (sin guardarla); sin ella, la configurada. Los
- * fallos son `validation` en el campo `claudeAcpPath`.
+ * «Comprobar adaptador» (HU-019/021): lanza el adaptador ACP del agente, solo hace
+ * `initialize` y devuelve lo que declaró. Con `path` comprueba esa ruta (sin guardarla); sin
+ * ella, la configurada. Los fallos son `validation` en el campo de ese agente
+ * (`claudeAcpPath` o `codexAcpPath`).
  */
 export function checkAcpAdapter(
-  path: string | null = null,
+  agent: AcpAgent,
+  path?: string,
 ): Promise<AcpAdapterCheck> {
-  return call("check_acp_adapter", { path });
+  return call(
+    "check_acp_adapter",
+    path === undefined ? { agent } : { agent, path },
+  );
+}
+
+/**
+ * Carpeta de Codex propia de la app (HU-021, `CODEX_HOME`) y si hay sesión iniciada en ella
+ * (solo se comprueba que exista el archivo; puede haber caducado). Ruta local: solo para la
+ * persona.
+ */
+export function getCodexHomeStatus(): Promise<CodexHomeStatus> {
+  return call("get_codex_home_status");
 }
 
 // --- permisos del agente (HU-020) ---

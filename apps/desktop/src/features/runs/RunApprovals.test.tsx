@@ -22,6 +22,7 @@ vi.mock("../../shared/ipc/commands", async (importOriginal) => ({
   getRunSettings: vi.fn(),
   updateRunSettings: vi.fn(),
   checkAcpAdapter: vi.fn(),
+  getCodexHomeStatus: vi.fn(),
   setUnsavedChanges: vi.fn(),
 }));
 
@@ -140,6 +141,10 @@ async function permissions() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocked.getCodexHomeStatus.mockResolvedValue({
+    path: "/datos/codex-home",
+    signedIn: false,
+  });
   mocked.getRunOutput.mockResolvedValue({
     lines: [],
     skippedCorrupt: 0,
@@ -443,6 +448,7 @@ describe("Sistema → Ejecuciones: notificaciones de permisos", () => {
       maxConcurrency: 2,
       timeoutMinutes: 30,
       claudeAcpPath: null,
+      codexAcpPath: null,
       approvalNotifications: false,
       revision: 1,
       ...overrides,
@@ -478,6 +484,7 @@ describe("Sistema → Ejecuciones: notificaciones de permisos", () => {
       maxConcurrency: 2,
       timeoutMinutes: 30,
       claudeAcpPath: null,
+      codexAcpPath: null,
       approvalNotifications: true,
     });
     expect(

@@ -5,9 +5,10 @@
 //! Se para (matando los árboles de procesos y marcando `interrupted` lo que quedara) antes de
 //! restaurar una copia y al salir.
 //!
-//! Ejecutores: el proceso de prueba (sin IA: la propia app con `--kanbania-test-process`) y
-//! Claude Code vía ACP (HU-019: el adaptador de la configuración, lanzado sin argumentos; el
-//! host nunca le pasa `acp_args` ni variables `KANBANIA_*`, `ANTHROPIC_*` o `CLAUDE_*`).
+//! Ejecutores: el proceso de prueba (sin IA: la propia app con `--kanbania-test-process`) y un
+//! agente vía ACP (HU-019: Claude Code; HU-021: Codex, con su carpeta propia
+//! `<datos>/codex-home`): el adaptador de la configuración, lanzado sin argumentos; el host
+//! nunca le pasa `acp_args` ni variables `KANBANIA_*`, `ANTHROPIC_*`, `CLAUDE_*` u `OPENAI_*`.
 
 use std::path::PathBuf;
 use std::sync::Arc;

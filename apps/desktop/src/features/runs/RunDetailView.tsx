@@ -15,11 +15,14 @@ import { CAPABILITY_LABEL } from "../team/TeamView";
 import { ApprovalsSection } from "./ApprovalsSection";
 import { RunOutputPanel } from "./RunOutputPanel";
 import {
+  ACP_AGENT_NAME,
   NOT_AVAILABLE,
   SCENARIO_LABEL,
+  acpAgentOf,
   canStartRun,
   describeAgentIdentity,
   describeAgentMode,
+  describeAgentModel,
   describeCapabilities,
   describeRunEvent,
   executorLabel,
@@ -186,7 +189,9 @@ function DetailBody({
   const requestRepo =
     request && snapshot.repositories.find((r) => r.id === request.repositoryId);
   const executor = request?.executor ?? null;
-  const acp = executor?.kind === "claudeAcp";
+  const acpAgent = executor === null ? null : acpAgentOf(executor);
+  const acp = acpAgent !== null;
+  const agentName = acpAgent === null ? "" : ACP_AGENT_NAME[acpAgent];
   const session = lastAgentSession(detail);
   const live =
     run.state === "preparing" ||
@@ -202,7 +207,7 @@ function DetailBody({
         {executor === null
           ? "."
           : acp
-            ? " (lo ejecuta Claude Code por ACP con las instrucciones de la instantánea)."
+            ? ` (lo ejecuta ${agentName} por ACP con las instrucciones de la instantánea).`
             : " (no participa: lo ejecuta el proceso de prueba)."}
         {run.endedAt !== null &&
           ` Terminado el ${formatDateTime(run.endedAt)}.`}
@@ -275,7 +280,7 @@ function DetailBody({
         )}
         {acp && (
           <p className="field__hint">
-            Ejecutor: Claude Code por ACP. Lo que aparece como «agente
+            Ejecutor: {agentName} por ACP. Lo que aparece como «agente
             (reportado)» es lo que el agente dice, no algo comprobado por la
             app. Un intento completado no acepta la historia.
           </p>
@@ -449,10 +454,10 @@ function DetailBody({
 
         <h5 className="run-detail__subtitle">Instrucciones generadas</h5>
         <p className="field__hint">
-          Instrucciones congeladas en la instantánea. Con Claude Code (ACP) se
-          envían las mismas, salvo la sección de repositorios, que se sustituye
-          por la carpeta del worktree (sin rutas de tu disco); la huella del
-          texto enviado aparece en la sesión del agente.
+          Instrucciones congeladas en la instantánea. Con Claude Code (ACP) o
+          Codex (ACP) se envían las mismas, salvo la sección de repositorios,
+          que se sustituye por la carpeta del worktree (sin rutas de tu disco);
+          la huella del texto enviado aparece en la sesión del agente.
         </p>
         <MarkdownPreview source={snapshot.instructions} />
       </div>
@@ -514,6 +519,8 @@ function AgentSessionFacts({ session }: { session: AcpSessionInfo }) {
       <dl className="facts facts--compact">
         <dt>Agente</dt>
         <dd>{describeAgentIdentity(session)}</dd>
+        <dt>Modelo (reportado por el agente)</dt>
+        <dd>{describeAgentModel(session.model)}</dd>
         <dt>Protocolo</dt>
         <dd>ACP v{session.protocolVersion}</dd>
         <dt>Modo fijado por la app</dt>

@@ -1,10 +1,14 @@
 import { useId, useRef, useState, type Ref } from "react";
+import type { AcpAgent } from "../../contracts/generated/AcpAgent";
+import type { CodexHomeStatus } from "../../contracts/generated/CodexHomeStatus";
+import type { RunSettings } from "../../contracts/generated/RunSettings";
 import type { RunExecutor } from "../../contracts/generated/RunExecutor";
 import type { RunSummary } from "../../contracts/generated/RunSummary";
 import type { SnapshotRepository } from "../../contracts/generated/SnapshotRepository";
 import type { StartRunInput } from "../../contracts/generated/StartRunInput";
 import type { TestScenario } from "../../contracts/generated/TestScenario";
 import {
+  getCodexHomeStatus,
   getRunSettings,
   newRequestId,
   startRun,
@@ -16,8 +20,12 @@ import {
 } from "../../shared/ipc/useIpcResource";
 import { useMutation } from "../../shared/ipc/useMutation";
 import { FieldError } from "../../shared/ui/FieldError";
+import { AgentComparison } from "./AgentComparison";
 import {
+  ACP_AGENT_NAME,
+  acpAgentOf,
   CLAUDE_ACP_LABEL,
+  CODEX_ACP_LABEL,
   SCENARIOS,
   SCENARIO_LABEL,
   TEST_PROCESS_LABEL,
@@ -43,10 +51,11 @@ interface Props {
 }
 
 /**
- * Pedir el inicio de un intento en cola (HU-018/019) con el ejecutor elegido: el proceso de
- * prueba incluido (sin IA) o Claude Code vía ACP. El núcleo es la autoridad: valida el
- * ejecutor (ACP exige un adaptador configurado), el repositorio y que la historia siga
- * ejecutable. La configuración solo sirve para explicar por qué ACP no está disponible.
+ * Pedir el inicio de un intento en cola (HU-018/019/021) con el ejecutor elegido: el proceso
+ * de prueba incluido (sin IA), Claude Code o Codex vía ACP. El núcleo es la autoridad: valida
+ * el ejecutor (ACP exige un adaptador configurado), el repositorio y que la historia siga
+ * ejecutable. La configuración y la sesión de Codex solo sirven para deshabilitar lo que no
+ * se puede usar y explicar por qué.
  */
 export function StartRunForm({
   projectId,
@@ -59,9 +68,16 @@ export function StartRunForm({
 }: Props) {
   const id = useId();
   const settings = useIpcResource(getRunSettings);
-  const acpConfigured =
-    settings.state.status === "ready" &&
-    settings.state.data.claudeAcpPath !== null;
+  const codexHome = useIpcResource(getCodexHomeStatus);
+  const ready = settings.state.status === "ready" ? settings.state.data : null;
+  const available: Record<AcpAgent, boolean> = {
+    claudeCode: ready !== null && ready.claudeAcpPath !== null,
+    codex:
+      ready !== null &&
+      ready.codexAcpPath !== null &&
+      codexHome.state.status === "ready" &&
+      codexHome.state.data.signedIn,
+  };
   // Por defecto, el proceso de prueba: no lanza IA ni consume saldo sin elegirlo.
   const [kind, setKind] = useState<ExecutorKind>("testProcess");
   const [scenario, setScenario] = useState<TestScenario>("success");
@@ -87,9 +103,23 @@ export function StartRunForm({
   const generalError =
     error && !executorError && !repositoryError ? error : null;
   const executor: RunExecutor =
-    kind === "claudeAcp" ? { kind: "claudeAcp" } : { kind, scenario };
+    kind === "testProcess" ? { kind, scenario } : { kind };
+
+  // La opción marcada puede dejar de estar disponible después de elegirla (al volver a
+  // comprobar la sesión de Codex o al releer la configuración): nunca se envía.
+  const selectedAgent = acpAgentOf(executor);
+  const selectedUnavailable =
+    selectedAgent !== null && !available[selectedAgent];
 
   async function handleSubmit() {
+    if (selectedAgent !== null && selectedUnavailable) {
+      setLocalError({
+        code: "validation",
+        field: "executor",
+        message: `${ACP_AGENT_NAME[selectedAgent]} ya no está disponible (el motivo está junto a su opción): elige otro ejecutor.`,
+      });
+      return;
+    }
     if (choose && repositoryId === "") {
       setLocalError({
         code: "validation",
@@ -165,33 +195,72 @@ export function StartRunForm({
           />
           {TEST_PROCESS_LABEL}
         </label>
-        <label className="checkbox">
-          <input
-            type="radio"
-            name={`${id}-executor-kind`}
-            value="claudeAcp"
-            ref={kind === "claudeAcp" ? focusRef : undefined}
-            checked={kind === "claudeAcp"}
-            disabled={!acpConfigured}
-            aria-describedby={
-              acpConfigured ? undefined : `${id}-acp-unavailable`
-            }
-            onChange={() => {
-              setKind("claudeAcp");
-              touch();
-            }}
-          />
-          {CLAUDE_ACP_LABEL}
-        </label>
-        {!acpConfigured && (
-          <AcpUnavailable
-            id={`${id}-acp-unavailable`}
-            state={settings.state}
-            onRetry={() => {
-              settings.run();
-            }}
-          />
+        {settings.state.status === "error" && (
+          <div className="field__hint">
+            <p id={`${id}-settings-error`}>
+              Claude Code y Codex no disponibles: no se pudo leer la
+              configuración ({settings.state.message}).
+            </p>
+            <button
+              type="button"
+              className="button button--secondary"
+              onClick={() => {
+                settings.run();
+              }}
+            >
+              Volver a leer la configuración
+            </button>
+          </div>
         )}
+        {ACP_OPTIONS.map(({ agent, kind: optionKind, label }) => {
+          const reasonId =
+            settings.state.status === "error"
+              ? `${id}-settings-error`
+              : `${id}-${agent}-unavailable`;
+          return (
+            <div key={agent}>
+              <label className="checkbox">
+                <input
+                  type="radio"
+                  name={`${id}-executor-kind`}
+                  value={optionKind}
+                  ref={kind === optionKind ? focusRef : undefined}
+                  checked={kind === optionKind}
+                  disabled={!available[agent]}
+                  aria-describedby={available[agent] ? undefined : reasonId}
+                  onChange={() => {
+                    setKind(optionKind);
+                    touch();
+                  }}
+                />
+                {label}
+              </label>
+              {!available[agent] && settings.state.status !== "error" && (
+                <AcpUnavailable
+                  id={reasonId}
+                  agent={agent}
+                  settings={settings.state}
+                  codexHome={codexHome.state}
+                />
+              )}
+              {/* Siempre que haya adaptador: tras iniciar (o cerrar) sesión en una terminal,
+                  se vuelve a comprobar sin cerrar el formulario. */}
+              {agent === "codex" &&
+                ready?.codexAcpPath != null &&
+                codexHome.state.status !== "loading" && (
+                  <button
+                    type="button"
+                    className="button button--secondary"
+                    onClick={() => {
+                      codexHome.run(getCodexHomeStatus, { keepData: true });
+                    }}
+                  >
+                    Volver a comprobar la sesión de Codex
+                  </button>
+                )}
+            </div>
+          );
+        })}
         <FieldError id={`${id}-executor-error`} error={executorError} />
       </fieldset>
 
@@ -222,7 +291,7 @@ export function StartRunForm({
             ))}
           </fieldset>
         </>
-      ) : (
+      ) : kind === "claudeAcp" ? (
         <p className="run-detail__info">
           Lanza Claude Code en el worktree con las instrucciones de la
           instantánea. El agente trabaja con tu sesión de Claude Code. Cada
@@ -230,7 +299,32 @@ export function StartRunForm({
           intento para que la permitas una vez o la rechaces; sin respuesta en
           10 minutos, se rechaza.
         </p>
+      ) : (
+        <div className="run-detail__info">
+          <p>
+            Lanza Codex en el worktree con las instrucciones de la instantánea y
+            la carpeta de Codex de la app. Cada petición de permiso para editar
+            o ejecutar comandos con efectos aparece en el detalle del intento
+            para que la permitas una vez o la rechaces; sin respuesta en 10
+            minutos, se rechaza.
+          </p>
+          <p>
+            Atención (comprobado con Codex real): lee archivos sin pedir
+            permiso, también fuera del worktree (podría leer los datos de la
+            app), y rechazar una escritura detiene su turno.
+          </p>
+        </div>
       )}
+
+      <p className="field__hint">
+        Con Claude Code o Codex, el intento se atribuye al agente del equipo
+        asignado a la historia: su nombre y su avatar no cambian según el
+        ejecutor que elijas.
+      </p>
+      <details>
+        <summary>Comparar Claude Code y Codex</summary>
+        <AgentComparison />
+      </details>
 
       {choose ? (
         <div className="field">
@@ -294,40 +388,70 @@ export function StartRunForm({
   );
 }
 
+const ACP_OPTIONS: readonly {
+  agent: AcpAgent;
+  kind: Exclude<ExecutorKind, "testProcess">;
+  label: string;
+}[] = [
+  { agent: "claudeCode", kind: "claudeAcp", label: CLAUDE_ACP_LABEL },
+  { agent: "codex", kind: "codexAcp", label: CODEX_ACP_LABEL },
+];
+
+const ADAPTER_EXECUTABLE: Record<AcpAgent, string> = {
+  claudeCode: "claude-agent-acp",
+  codex: "codex-acp",
+};
+
 interface UnavailableProps {
   id: string;
-  state: ResourceState<unknown>;
-  onRetry: () => void;
+  agent: AcpAgent;
+  settings: ResourceState<RunSettings>;
+  codexHome: ResourceState<CodexHomeStatus>;
 }
 
-/** Por qué «Claude Code (ACP)» no se puede elegir, siempre en texto. */
-function AcpUnavailable({ id, state, onRetry }: UnavailableProps) {
-  if (state.status === "loading")
+/**
+ * Por qué una opción ACP no se puede elegir, siempre en texto. El error al leer la
+ * configuración lo muestra el formulario una sola vez (sirve para los dos agentes).
+ */
+function AcpUnavailable({ id, agent, settings, codexHome }: UnavailableProps) {
+  const name = ACP_AGENT_NAME[agent];
+  if (settings.status === "loading")
     return (
       <p id={id} className="field__hint">
-        Comprobando si hay un adaptador de Claude Code configurado…
+        Comprobando si hay un adaptador de {name} configurado…
       </p>
     );
-  if (state.status === "error")
+  if (settings.status !== "ready") return null;
+  const path =
+    agent === "claudeCode"
+      ? settings.data.claudeAcpPath
+      : settings.data.codexAcpPath;
+  if (path === null)
     return (
-      <div className="field__hint">
-        <p id={id}>
-          No disponible: no se pudo leer la configuración ({state.message}).
-        </p>
-        <button
-          type="button"
-          className="button button--secondary"
-          onClick={onRetry}
-        >
-          Volver a leer la configuración
-        </button>
-      </div>
+      <p id={id} className="field__hint">
+        No disponible: configura el adaptador de {name} en Sistema → Ejecuciones
+        (ruta de <code>{ADAPTER_EXECUTABLE[agent]}</code>, al final de la
+        ventana).
+      </p>
+    );
+  // Solo Codex llega aquí: necesita además sesión iniciada en la carpeta de la app.
+  if (codexHome.status === "loading")
+    return (
+      <p id={id} className="field__hint">
+        Comprobando si hay sesión iniciada en la carpeta de Codex de la app…
+      </p>
+    );
+  if (codexHome.status === "error")
+    return (
+      <p id={id} className="field__hint">
+        No disponible: no se pudo comprobar la sesión de Codex (
+        {codexHome.message}).
+      </p>
     );
   return (
     <p id={id} className="field__hint">
-      No disponible: no hay ningún adaptador de Claude Code configurado. Indica
-      la ruta de <code>claude-agent-acp</code> en «Sistema → Ejecuciones» (al
-      final de la ventana).
+      No disponible: inicia sesión en la carpeta de Codex de la app (Sistema →
+      Ejecuciones).
     </p>
   );
 }

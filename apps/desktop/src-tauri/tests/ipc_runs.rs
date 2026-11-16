@@ -326,7 +326,8 @@ fn runs_execute_through_the_host_supervisor() {
         &app,
         "update_run_settings",
         json!({ "input": {
-            "expectedRevision": settings["revision"], "maxConcurrency": 3, "timeoutMinutes": 10, "approvalNotifications": false,
+            "expectedRevision": settings["revision"], "maxConcurrency": 3, "timeoutMinutes": 10,
+            "claudeAcpPath": null, "codexAcpPath": null, "approvalNotifications": false,
         } }),
     )
     .unwrap();
@@ -335,7 +336,8 @@ fn runs_execute_through_the_host_supervisor() {
         &app,
         "update_run_settings",
         json!({ "input": {
-            "expectedRevision": updated["revision"], "maxConcurrency": 9, "timeoutMinutes": 10, "approvalNotifications": false,
+            "expectedRevision": updated["revision"], "maxConcurrency": 9, "timeoutMinutes": 10,
+            "claudeAcpPath": null, "codexAcpPath": null, "approvalNotifications": false,
         } }),
     )
     .unwrap_err();
@@ -811,7 +813,11 @@ fn acp_adapter_check_through_ipc() {
     let app = build_app(data.path());
 
     // Sin ruta y sin adaptador configurado.
-    let none = invoke(&app, "check_acp_adapter", json!({})).unwrap_err();
+    // El agente es obligatorio y solo admite los conocidos.
+    assert!(invoke(&app, "check_acp_adapter", json!({})).is_err());
+    assert!(invoke(&app, "check_acp_adapter", json!({ "agent": "gemini" })).is_err());
+    let none = invoke(&app, "check_acp_adapter", json!({ "agent": "claudeCode" })).unwrap_err();
+    assert_eq!(none["field"], "claudeAcpPath");
     assert_eq!(none["code"], "validation");
     assert!(
         none["message"]
@@ -824,7 +830,7 @@ fn acp_adapter_check_through_ipc() {
     let relative = invoke(
         &app,
         "check_acp_adapter",
-        json!({ "path": "bin/claude-agent-acp" }),
+        json!({ "agent": "claudeCode", "path": "bin/claude-agent-acp" }),
     )
     .unwrap_err();
     assert_eq!(relative["code"], "validation");
@@ -832,7 +838,7 @@ fn acp_adapter_check_through_ipc() {
     let missing = invoke(
         &app,
         "check_acp_adapter",
-        json!({ "path": missing_path.to_str().unwrap() }),
+        json!({ "agent": "claudeCode", "path": missing_path.to_str().unwrap() }),
     )
     .unwrap_err();
     assert_eq!(missing["code"], "validation");
@@ -847,7 +853,7 @@ fn acp_adapter_check_through_ipc() {
         let check = invoke(
             &app,
             "check_acp_adapter",
-            json!({ "path": adapter.to_str().unwrap() }),
+            json!({ "agent": "claudeCode", "path": adapter.to_str().unwrap() }),
         )
         .unwrap();
         // Solo `initialize`: no espera a que el adaptador termine (duerme 30 s).
@@ -874,19 +880,26 @@ fn acp_adapter_check_through_ipc() {
                 "maxConcurrency": settings["maxConcurrency"],
                 "timeoutMinutes": settings["timeoutMinutes"],
                 "claudeAcpPath": adapter.to_str().unwrap(),
+                "codexAcpPath": null,
                 "approvalNotifications": false,
             } }),
         )
         .unwrap();
-        let configured = invoke(&app, "check_acp_adapter", json!({})).unwrap();
+        let configured =
+            invoke(&app, "check_acp_adapter", json!({ "agent": "claudeCode" })).unwrap();
         assert_eq!(configured["agentName"], "adaptador-prueba");
+        // Codex no tiene ruta configurada: su propio campo.
+        let codex_none =
+            invoke(&app, "check_acp_adapter", json!({ "agent": "codex" })).unwrap_err();
+        assert_eq!(codex_none["code"], "validation");
+        assert_eq!(codex_none["field"], "codexAcpPath");
 
         // Otra versión de ACP → `validation` con un mensaje fijo, sin la ruta.
         let v2 = fake_adapter(&base, "adaptador v2", 2);
         let error = invoke(
             &app,
             "check_acp_adapter",
-            json!({ "path": v2.to_str().unwrap() }),
+            json!({ "agent": "claudeCode", "path": v2.to_str().unwrap() }),
         )
         .unwrap_err();
         assert_eq!(error["code"], "validation");
@@ -898,6 +911,97 @@ fn acp_adapter_check_through_ipc() {
         );
         assert!(!error.to_string().contains("carpeta con espacios"));
     }
+}
+
+/// Adaptador mínimo en shell que declara en su identidad parte del entorno que recibió: el modo
+/// inicial y `NO_BROWSER`, y el nombre de la carpeta de `CODEX_HOME`.
+#[cfg(unix)]
+fn env_echo_adapter(dir: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("adaptador codex");
+    std::fs::write(
+        &path,
+        "#!/bin/sh\nread line\nid=$(printf '%s' \"$line\" | sed 's/.*\"id\":\\([0-9]*\\).*/\\1/')\n\
+         printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"protocolVersion\":1,\
+         \"agentInfo\":{\"name\":\"modo-%s\",\"title\":\"navegador-%s\",\"version\":\"%s\"},\
+         \"authMethods\":[],\"agentCapabilities\":{}}}\\n' \"$id\" \"$INITIAL_AGENT_MODE\" \"$NO_BROWSER\" \"${CODEX_HOME##*/}\"\nsleep 30\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// HU-021: «Comprobar adaptador» de Codex lanza con su entorno (carpeta propia creada 0700,
+/// modo inicial, sin navegador) y el estado de la carpeta de Codex por IPC.
+#[test]
+fn codex_adapter_check_and_home_status_through_ipc() {
+    let data = tempfile::tempdir().unwrap();
+    let app = build_app(data.path());
+    let home = data.path().join("codex-home");
+
+    let status = invoke(&app, "get_codex_home_status", json!({})).unwrap();
+    assert_eq!(
+        status,
+        json!({ "path": home.to_str().unwrap(), "signedIn": false })
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let base = data.path().join("carpeta con espacios");
+        std::fs::create_dir(&base).unwrap();
+        let adapter = env_echo_adapter(&base);
+        let check = invoke(
+            &app,
+            "check_acp_adapter",
+            json!({ "agent": "codex", "path": adapter.to_str().unwrap() }),
+        )
+        .unwrap();
+        assert_eq!(check["agentName"], "modo-read-only");
+        assert_eq!(check["agentTitle"], "navegador-1");
+        assert_eq!(check["agentVersion"], "codex-home");
+        let mode = std::fs::metadata(&home).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        // Claude Code no recibe nada de Codex.
+        let claude = invoke(
+            &app,
+            "check_acp_adapter",
+            json!({ "agent": "claudeCode", "path": adapter.to_str().unwrap() }),
+        )
+        .unwrap();
+        // (Con valores vacíos el núcleo omite toda la identidad declarada.)
+        assert_ne!(claude["agentName"], "modo-read-only");
+        assert_ne!(claude["agentVersion"], "codex-home");
+        assert_eq!(claude["protocolVersion"], 1);
+
+        // Configurada como ruta de Codex: sin `path`, la de ese agente.
+        let settings = invoke(&app, "get_run_settings", json!({})).unwrap();
+        let saved = invoke(
+            &app,
+            "update_run_settings",
+            json!({ "input": {
+                "expectedRevision": settings["revision"],
+                "maxConcurrency": settings["maxConcurrency"],
+                "timeoutMinutes": settings["timeoutMinutes"],
+                "claudeAcpPath": null,
+                "codexAcpPath": adapter.to_str().unwrap(),
+                "approvalNotifications": false,
+            } }),
+        )
+        .unwrap();
+        assert_eq!(saved["codexAcpPath"], adapter.to_str().unwrap());
+        let configured = invoke(&app, "check_acp_adapter", json!({ "agent": "codex" })).unwrap();
+        assert_eq!(configured["agentName"], "modo-read-only");
+        let missing_claude =
+            invoke(&app, "check_acp_adapter", json!({ "agent": "claudeCode" })).unwrap_err();
+        assert_eq!(missing_claude["field"], "claudeAcpPath");
+    }
+
+    // Solo se mira que exista `auth.json` (nunca se lee).
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("auth.json"), "{}").unwrap();
+    let status = invoke(&app, "get_codex_home_status", json!({})).unwrap();
+    assert_eq!(status["signedIn"], true);
 }
 
 /// Aprobaciones (HU-020) por IPC: listar las que esperan y decidir. El recorrido completo con un

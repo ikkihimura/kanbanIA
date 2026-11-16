@@ -1,4 +1,4 @@
-// HU-018/019: iniciar con el proceso de prueba o Claude Code (ACP), estados, cancelación
+// HU-018/019/021: iniciar con el proceso de prueba, Claude Code o Codex (ACP), estados, cancelación
 // solicitada, worktree, salida, sesión del agente, avisos `run-change` y configuración.
 import {
   act,
@@ -21,7 +21,11 @@ import type { SnapshotRepository } from "../../contracts/generated/SnapshotRepos
 import type { StoryRelations } from "../../contracts/generated/StoryRelations";
 import * as commands from "../../shared/ipc/commands";
 import { OUTPUT_POLL_MS, RunOutputPanel } from "./RunOutputPanel";
-import { RunSettingsPanel } from "./RunSettingsPanel";
+import {
+  RunSettingsPanel,
+  codexLoginCommand,
+  codexLoginCommandPowerShell,
+} from "./RunSettingsPanel";
 import { useUnsavedChangesGuard } from "../../shared/ui/useUnsavedChangesGuard";
 import { RunsPanel } from "./RunsPanel";
 import { RUN_CHANGE_BATCH_MS } from "./useRunChanges";
@@ -42,6 +46,7 @@ vi.mock("../../shared/ipc/commands", async (importOriginal) => ({
   getRunSettings: vi.fn(),
   updateRunSettings: vi.fn(),
   checkAcpAdapter: vi.fn(),
+  getCodexHomeStatus: vi.fn(),
   onRunChange: vi.fn(),
   setUnsavedChanges: vi.fn(),
 }));
@@ -185,11 +190,15 @@ const relations: StoryRelations = {
   pendingPrerequisites: 0,
 };
 
+const CODEX_HOME =
+  "/Users/ana/Library/Application Support/dev.ikkidev.kanbania/codex-home";
+
 function settings(overrides: Partial<RunSettings> = {}): RunSettings {
   return {
     maxConcurrency: 2,
     timeoutMinutes: 30,
     claudeAcpPath: null,
+    codexAcpPath: null,
     approvalNotifications: false,
     revision: 1,
     ...overrides,
@@ -237,6 +246,10 @@ beforeEach(() => {
     earlierDropped: false,
   });
   mocked.getRunSettings.mockResolvedValue(settings());
+  mocked.getCodexHomeStatus.mockResolvedValue({
+    path: CODEX_HOME,
+    signedIn: false,
+  });
 });
 
 afterEach(() => {
@@ -1357,6 +1370,7 @@ describe("Sistema → Ejecuciones", () => {
       maxConcurrency: 3,
       timeoutMinutes: 45,
       claudeAcpPath: null,
+      codexAcpPath: null,
       approvalNotifications: false,
     });
     expect(
@@ -1393,7 +1407,7 @@ describe("Sistema → Ejecuciones", () => {
     await user.click(screen.getByRole("button", { name: "Guardar" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "La configuración cambió mientras la editabas. Ahora es: 4 a la vez, 60 min, sin adaptador de Claude Code y sin notificaciones de permisos.",
+      "La configuración cambió mientras la editabas. Ahora es: 4 a la vez, 60 min, sin adaptador de Claude Code, sin adaptador de Codex y sin notificaciones de permisos.",
     );
     // Lo escrito se conserva.
     expect(concurrency).toHaveValue(1);
@@ -1404,6 +1418,7 @@ describe("Sistema → Ejecuciones", () => {
       maxConcurrency: 1,
       timeoutMinutes: 30,
       claudeAcpPath: null,
+      codexAcpPath: null,
       approvalNotifications: false,
     });
     expect(
@@ -1511,7 +1526,7 @@ describe("Iniciar con Claude Code (ACP)", () => {
     });
     await waitFor(() => {
       expect(acp).toHaveAccessibleDescription(
-        /No disponible: no hay ningún adaptador de Claude Code configurado\. Indica la ruta de claude-agent-acp en «Sistema → Ejecuciones»/,
+        /No disponible: configura el adaptador de Claude Code en Sistema → Ejecuciones \(ruta de claude-agent-acp/,
       );
     });
     expect(acp).toBeDisabled();
@@ -1545,7 +1560,7 @@ describe("Iniciar con Claude Code (ACP)", () => {
     });
     await waitFor(() => {
       expect(acp).toHaveAccessibleDescription(
-        /No disponible: no se pudo leer la configuración \(El almacenamiento no está disponible\.\)/,
+        /Claude Code y Codex no disponibles: no se pudo leer la configuración \(El almacenamiento no está disponible\.\)/,
       );
     });
     await user.click(
@@ -1709,6 +1724,7 @@ describe("Detalle con Claude Code (ACP)", () => {
           promptSha256:
             "0123456789abcccccccccccccccccccccccccccccccccccccccccccccccccccc",
           promptChars: 12345,
+          model: "claude-opus-4-5",
         },
       },
     ],
@@ -1738,6 +1754,9 @@ describe("Detalle con Claude Code (ACP)", () => {
     // El texto del agente se muestra literal, sin interpretar HTML.
     expect(session).toHaveTextContent("AgenteClaude <b>Agent</b> 0.107.0");
     expect(container.querySelector("b")).toBeNull();
+    expect(session).toHaveTextContent(
+      "Modelo (reportado por el agente)claude-opus-4-5",
+    );
     expect(session).toHaveTextContent("ProtocoloACP v1");
     expect(session).toHaveTextContent(
       "Modo fijado por la appManual: pide permiso",
@@ -1756,7 +1775,7 @@ describe("Detalle con Claude Code (ACP)", () => {
     ).toHaveTextContent("0123456789ab…");
     // Las instrucciones congeladas no se presentan como lo que recibió el agente.
     expect(region).toHaveTextContent(
-      "Instrucciones congeladas en la instantánea. Con Claude Code (ACP) se envían las mismas, salvo la sección de repositorios",
+      "Instrucciones congeladas en la instantánea. Con Claude Code (ACP) o Codex (ACP) se envían las mismas, salvo la sección de repositorios",
     );
     expect(region).not.toHaveTextContent("lo que recibiría el agente");
 
@@ -1911,6 +1930,7 @@ describe("Sistema → Ejecuciones: adaptador de Claude Code", () => {
       maxConcurrency: 3,
       timeoutMinutes: 30,
       claudeAcpPath: null,
+      codexAcpPath: null,
       approvalNotifications: false,
     });
     await screen.findByText("✓ Configuración guardada.");
@@ -1962,9 +1982,11 @@ describe("Sistema → Ejecuciones: adaptador de Claude Code", () => {
 
     const path = await screen.findByLabelText("Adaptador de Claude Code (ACP)");
     await user.type(path, ACP_PATH);
-    const button = screen.getByRole("button", { name: "Comprobar adaptador" });
+    const button = screen.getByRole("button", {
+      name: "Comprobar adaptador de Claude Code",
+    });
     await user.click(button);
-    expect(mocked.checkAcpAdapter).toHaveBeenCalledWith(ACP_PATH);
+    expect(mocked.checkAcpAdapter).toHaveBeenCalledWith("claudeCode", ACP_PATH);
     expect(
       await screen.findByText(
         "✓ Responde: Claude Agent 0.107.0 · ACP v1 · capacidades: retomar sesión, imágenes, contexto incrustado, MCP por HTTP",
@@ -1984,7 +2006,9 @@ describe("Sistema → Ejecuciones: adaptador de Claude Code", () => {
     render(<RunSettingsPanel />);
 
     await screen.findByLabelText("Adaptador de Claude Code (ACP)");
-    const button = screen.getByRole("button", { name: "Comprobar adaptador" });
+    const button = screen.getByRole("button", {
+      name: "Comprobar adaptador de Claude Code",
+    });
     expect(button).toBeDisabled();
     expect(button).toHaveAccessibleDescription(
       "Escribe la ruta para comprobarla.",
@@ -2005,17 +2029,525 @@ describe("Sistema → Ejecuciones: adaptador de Claude Code", () => {
     render(<RunSettingsPanel />);
 
     await screen.findByLabelText("Adaptador de Claude Code (ACP)");
-    const button = screen.getByRole("button", { name: "Comprobar adaptador" });
+    const button = screen.getByRole("button", {
+      name: "Comprobar adaptador de Claude Code",
+    });
     expect(button).toBeEnabled();
-    expect(
-      screen.queryByText("Escribe la ruta para comprobarla."),
-    ).not.toBeInTheDocument();
+    // El aviso de campo vacío solo queda en el adaptador de Codex (vacío).
+    expect(button).not.toHaveAccessibleDescription(
+      "Escribe la ruta para comprobarla.",
+    );
     await user.click(button);
     // La ruta mostrada (la guardada) es la que se comprueba.
-    expect(mocked.checkAcpAdapter).toHaveBeenCalledWith(ACP_PATH);
+    expect(mocked.checkAcpAdapter).toHaveBeenCalledWith("claudeCode", ACP_PATH);
     expect(
       await screen.findByText(`No se pudo comprobar el adaptador: ${message}`),
     ).toBeInTheDocument();
     expect(screen.queryByText(/Responde:/)).not.toBeInTheDocument();
+  });
+});
+
+// --- HU-021: segundo agente real (Codex por ACP) ---
+
+const CODEX_PATH = "/Users/ana/bin/codex-acp";
+
+describe("Iniciar con Codex (ACP)", () => {
+  it("sin adaptador de Codex, la opción está deshabilitada y explica dónde configurarlo", async () => {
+    const user = userEvent.setup();
+    mocked.getRunSettings.mockResolvedValue(
+      settings({ claudeAcpPath: ACP_PATH }),
+    );
+    mocked.getCodexHomeStatus.mockResolvedValue({
+      path: CODEX_HOME,
+      signedIn: true,
+    });
+    renderPanel();
+
+    const region = await openDetail(user);
+    const executors = await within(region).findByRole("group", {
+      name: "Ejecutor",
+    });
+    const claude = within(executors).getByRole("radio", {
+      name: "Claude Code (ACP)",
+    });
+    const codex = within(executors).getByRole("radio", {
+      name: "Codex (ACP)",
+    });
+    await waitFor(() => {
+      expect(claude).toBeEnabled();
+    });
+    expect(codex).toBeDisabled();
+    expect(codex).toHaveAccessibleDescription(
+      "No disponible: configura el adaptador de Codex en Sistema → Ejecuciones (ruta de codex-acp, al final de la ventana).",
+    );
+  });
+
+  it("con adaptador pero sin sesión en la carpeta de Codex, sigue deshabilitada y se puede volver a comprobar", async () => {
+    const user = userEvent.setup();
+    mocked.getRunSettings.mockResolvedValue(
+      settings({ codexAcpPath: CODEX_PATH }),
+    );
+    mocked.getCodexHomeStatus
+      .mockResolvedValueOnce({ path: CODEX_HOME, signedIn: false })
+      .mockResolvedValue({ path: CODEX_HOME, signedIn: true });
+    renderPanel();
+
+    const region = await openDetail(user);
+    const codex = await within(region).findByRole("radio", {
+      name: "Codex (ACP)",
+    });
+    await waitFor(() => {
+      expect(codex).toHaveAccessibleDescription(
+        "No disponible: inicia sesión en la carpeta de Codex de la app (Sistema → Ejecuciones).",
+      );
+    });
+    expect(codex).toBeDisabled();
+    // Claude Code sin adaptador: deshabilitado por su propio motivo.
+    expect(
+      within(region).getByRole("radio", { name: "Claude Code (ACP)" }),
+    ).toHaveAccessibleDescription(
+      /configura el adaptador de Claude Code en Sistema → Ejecuciones/,
+    );
+
+    await user.click(
+      within(region).getByRole("button", {
+        name: "Volver a comprobar la sesión de Codex",
+      }),
+    );
+    await waitFor(() => {
+      expect(codex).toBeEnabled();
+    });
+    expect(codex).not.toHaveAccessibleDescription();
+  });
+
+  it("si Codex deja de estar disponible tras elegirlo, «Iniciar» no lo envía y lo explica", async () => {
+    const user = userEvent.setup();
+    mocked.getRunSettings.mockResolvedValue(
+      settings({ codexAcpPath: CODEX_PATH }),
+    );
+    mocked.getCodexHomeStatus
+      .mockResolvedValueOnce({ path: CODEX_HOME, signedIn: true })
+      .mockResolvedValue({ path: CODEX_HOME, signedIn: false });
+    renderPanel();
+
+    const region = await openDetail(user);
+    const codex = await within(region).findByRole("radio", {
+      name: "Codex (ACP)",
+    });
+    await waitFor(() => {
+      expect(codex).toBeEnabled();
+    });
+    await user.click(codex);
+    expect(codex).toBeChecked();
+
+    // Se cerró la sesión en la terminal y se vuelve a comprobar con Codex elegido.
+    await user.click(
+      within(region).getByRole("button", {
+        name: "Volver a comprobar la sesión de Codex",
+      }),
+    );
+    await waitFor(() => {
+      expect(codex).toBeDisabled();
+    });
+    expect(codex).toHaveAccessibleDescription(
+      "No disponible: inicia sesión en la carpeta de Codex de la app (Sistema → Ejecuciones).",
+    );
+
+    await user.click(within(region).getByRole("button", { name: "Iniciar" }));
+    expect(mocked.startRun).not.toHaveBeenCalled();
+    const message =
+      "Codex ya no está disponible (el motivo está junto a su opción): elige otro ejecutor.";
+    const error = within(region).getByText(message);
+    expect(error).toHaveAttribute("role", "alert");
+    const group = within(region).getByRole("group", { name: "Ejecutor" });
+    expect(group.getAttribute("aria-describedby")).toBe(error.id);
+
+    // Elegir otro ejecutor quita el aviso y permite iniciar.
+    await user.click(
+      within(region).getByRole("radio", { name: "Proceso de prueba (sin IA)" }),
+    );
+    expect(within(region).queryByText(message)).not.toBeInTheDocument();
+    mocked.startRun.mockResolvedValue(
+      summary({ startRequestedAt: "2026-11-12T10:02:00Z" }),
+    );
+    await user.click(within(region).getByRole("button", { name: "Iniciar" }));
+    expect(mocked.startRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        executor: { kind: "testProcess", scenario: "success" },
+      }),
+    );
+  });
+
+  it("elegir Codex avisa de lo que no pide permiso y envía codexAcp", async () => {
+    const user = userEvent.setup();
+    mocked.getRunSettings.mockResolvedValue(
+      settings({ codexAcpPath: CODEX_PATH }),
+    );
+    mocked.getCodexHomeStatus.mockResolvedValue({
+      path: CODEX_HOME,
+      signedIn: true,
+    });
+    mocked.startRun.mockResolvedValue(
+      summary({ startRequestedAt: "2026-11-12T10:02:00Z" }),
+    );
+    renderPanel();
+
+    const region = await openDetail(user);
+    const codex = await within(region).findByRole("radio", {
+      name: "Codex (ACP)",
+    });
+    await waitFor(() => {
+      expect(codex).toBeEnabled();
+    });
+    await user.click(codex);
+
+    const form = within(region).getByRole("form", {
+      name: "Iniciar el intento #1",
+    });
+    expect(
+      within(form).queryByRole("group", {
+        name: "Escenario del proceso de prueba",
+      }),
+    ).not.toBeInTheDocument();
+    expect(form).toHaveTextContent(
+      "Atención (comprobado con Codex real): lee archivos sin pedir permiso, también fuera del worktree (podría leer los datos de la app), y rechazar una escritura detiene su turno.",
+    );
+    expect(form).toHaveTextContent(
+      "su nombre y su avatar no cambian según el ejecutor que elijas.",
+    );
+    const submit = within(form).getByRole("button", { name: "Iniciar" });
+    expect(submit).toHaveAccessibleDescription("Codex (ACP)");
+
+    await user.click(submit);
+    expect(mocked.startRun).toHaveBeenCalledWith({
+      requestId: expect.any(String) as string,
+      projectId: "p1",
+      runId: "r1",
+      executor: { kind: "codexAcp" },
+    });
+    expect(
+      await screen.findByText(
+        "✓ Intento #1: inicio pedido con Codex (ACP). Espera turno en la cola.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("la comparación dice qué admite cada agente, en texto y sin afirmar tokens, coste ni reanudación", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+
+    const region = await openDetail(user);
+    const table = await within(region).findByRole("table", {
+      name: "Qué admite cada agente en la app",
+    });
+    const headers = within(table)
+      .getAllByRole("columnheader")
+      .map((h) => h.textContent);
+    expect(headers).toEqual(["Aspecto", "Claude Code", "Codex"]);
+    const row = (name: string) =>
+      within(table)
+        .getByRole("rowheader", { name })
+        .closest("tr")
+        ?.textContent.replace(name, "");
+    expect(row("Leer archivos")).toContain(
+      "Lee sin preguntar, también fuera del worktree",
+    );
+    expect(row("Leer archivos")).toContain(
+      "para leer fuera del worktree pide permiso",
+    );
+    expect(row("Al rechazar una escritura")).toContain(
+      "Su turno se detiene: Codex no admite «rechazar y continuar» al escribir archivos.",
+    );
+    expect(row("Tokens y coste")).toBe(
+      "No se guardan en el intento (no disponible).No se guardan en el intento (no disponible).",
+    );
+    expect(row("Retomar una sesión")).toBe(
+      "No disponible en la app.No disponible en la app.",
+    );
+    expect(row("Red")).toBe(
+      "No comprobado.Pide permiso; sin permiso, su sandbox la bloquea. * (según el código del adaptador 2.5.0; sin comprobar en real)",
+    );
+    // Lo de Claude Code comprobado en real no lleva la marca; lo de Codex deducido del
+    // código, sí (marca visible + leyenda; lectores de pantalla oyen la leyenda en la celda).
+    expect(row("Al rechazar una escritura")).toBe(
+      "El agente sigue con su turno.Su turno se detiene: Codex no admite «rechazar y continuar» al escribir archivos.",
+    );
+    expect(row("Leer archivos")).not.toContain("según el código");
+    expect(row("Llamadas adicionales al modelo")).toMatch(
+      /sesión\. \* \(según/,
+    );
+    expect(region).toHaveTextContent(
+      "* Dato según el código del adaptador 2.5.0; sin comprobar en real.",
+    );
+    expect(row("Tu configuración")).toContain(
+      "No se lanza si el repositorio contiene .codex/.",
+    );
+    expect(row("Llamadas adicionales al modelo")).toContain(
+      "Una, para poner título a la sesión.",
+    );
+  });
+});
+
+describe("Detalle con Codex (ACP)", () => {
+  function codexDetail(model: string | null): RunDetail {
+    const ended = summary({
+      state: "completed",
+      endedAt: "2026-11-12T10:05:00Z",
+      endReason: "El agente detuvo su turno tras un permiso rechazado.",
+    });
+    return detail(ended, {
+      startRequest: {
+        repositoryId: "g1",
+        executor: { kind: "codexAcp" },
+        requestedAt: "2026-11-12T10:02:00Z",
+        dispatchedAt: "2026-11-12T10:02:01Z",
+        voidedAt: null,
+      },
+      events: [
+        {
+          sequence: 1,
+          at: "2026-11-12T10:02:05Z",
+          event: {
+            kind: "acp_session",
+            protocolVersion: 1,
+            agentName: "codex-acp",
+            agentTitle: "Codex <i>ACP</i>",
+            agentVersion: "0.4.0",
+            capabilities: ["image"],
+            mode: "auto",
+            promptSha256: null,
+            promptChars: null,
+            model,
+          },
+        },
+      ],
+    });
+  }
+
+  it("muestra el ejecutor, el motivo y el modelo declarado como texto plano", async () => {
+    const user = userEvent.setup();
+    mocked.getRun.mockResolvedValue(codexDetail("gpt-5-codex <b>x</b>"));
+    const { container } = renderPanel();
+
+    const region = await openDetail(user);
+    const execution = within(region).getByRole("region", { name: "Ejecución" });
+    expect(execution).toHaveTextContent("EjecutorCodex (ACP)");
+    expect(region).toHaveTextContent(
+      "(lo ejecuta Codex por ACP con las instrucciones de la instantánea).",
+    );
+    expect(region).toHaveTextContent(
+      "Motivo: El agente detuvo su turno tras un permiso rechazado.",
+    );
+    expect(region).toHaveTextContent("Ejecutor: Codex por ACP.");
+    expect(region).not.toHaveTextContent("Claude Code por ACP");
+    const session = within(region).getByRole("region", {
+      name: "Sesión del agente (reportado por el agente)",
+    });
+    expect(session).toHaveTextContent(
+      "Modelo (reportado por el agente)gpt-5-codex <b>x</b>",
+    );
+    expect(session).toHaveTextContent("AgenteCodex <i>ACP</i> 0.4.0");
+    expect(container.querySelector("b, i")).toBeNull();
+  });
+
+  it("sin modelo declarado dice «no informado»", async () => {
+    const user = userEvent.setup();
+    mocked.getRun.mockResolvedValue(codexDetail(null));
+    renderPanel();
+
+    const region = await openDetail(user);
+    const session = within(region).getByRole("region", {
+      name: "Sesión del agente (reportado por el agente)",
+    });
+    expect(session).toHaveTextContent(
+      "Modelo (reportado por el agente)no informado",
+    );
+  });
+});
+
+describe("Sistema → Ejecuciones: Codex", () => {
+  it("guarda la ruta de Codex sin tocar la de Claude Code", async () => {
+    const user = userEvent.setup();
+    mocked.getRunSettings.mockResolvedValue(
+      settings({ claudeAcpPath: ACP_PATH }),
+    );
+    mocked.updateRunSettings.mockResolvedValue(
+      settings({
+        claudeAcpPath: ACP_PATH,
+        codexAcpPath: CODEX_PATH,
+        revision: 2,
+      }),
+    );
+    render(<RunSettingsPanel />);
+
+    const path = await screen.findByLabelText("Adaptador de Codex (ACP)");
+    expect(path).toHaveValue("");
+    expect(path).toHaveAccessibleDescription(
+      /Ruta absoluta del ejecutable codex-acp.*Comprobado con Codex real: lee archivos sin preguntar, también fuera del worktree, y rechazar una escritura detiene su turno\./,
+    );
+    await user.type(path, `  ${CODEX_PATH} `);
+    expect(mocked.setUnsavedChanges).toHaveBeenLastCalledWith(true);
+    await user.click(screen.getByRole("button", { name: "Guardar" }));
+    expect(mocked.updateRunSettings).toHaveBeenCalledWith({
+      expectedRevision: 1,
+      maxConcurrency: 2,
+      timeoutMinutes: 30,
+      claudeAcpPath: ACP_PATH,
+      codexAcpPath: CODEX_PATH,
+      approvalNotifications: false,
+    });
+    expect(
+      await screen.findByText("✓ Configuración guardada."),
+    ).toBeInTheDocument();
+    expect(path).toHaveValue(CODEX_PATH);
+  });
+
+  it("un error del núcleo en codexAcpPath aparece junto al campo de Codex", async () => {
+    const user = userEvent.setup();
+    const message = "La ruta del adaptador de Codex debe ser absoluta.";
+    mocked.updateRunSettings.mockRejectedValue(
+      validation("codexAcpPath", message),
+    );
+    render(<RunSettingsPanel />);
+
+    const codex = await screen.findByLabelText("Adaptador de Codex (ACP)");
+    const claude = screen.getByLabelText("Adaptador de Claude Code (ACP)");
+    await user.type(codex, "bin/codex-acp");
+    await user.click(screen.getByRole("button", { name: "Guardar" }));
+    const error = await screen.findByText(message);
+    expect(codex).toHaveAttribute("aria-invalid", "true");
+    expect(codex.getAttribute("aria-describedby")).toContain(error.id);
+    expect(claude).not.toHaveAttribute("aria-invalid");
+    expect(screen.queryByText(/No se pudo guardar/)).not.toBeInTheDocument();
+  });
+
+  it("cada adaptador se comprueba con su agente y su resultado es independiente", async () => {
+    const user = userEvent.setup();
+    mocked.getRunSettings.mockResolvedValue(
+      settings({ claudeAcpPath: ACP_PATH, codexAcpPath: CODEX_PATH }),
+    );
+    const failure = "El adaptador no respondió a tiempo.";
+    // Primero se comprueba Codex (responde) y después Claude Code (falla).
+    mocked.checkAcpAdapter
+      .mockResolvedValueOnce({
+        protocolVersion: 1,
+        agentName: "codex-acp",
+        agentTitle: "Codex",
+        agentVersion: "0.4.0",
+        capabilities: ["image"],
+      })
+      .mockRejectedValueOnce(validation("claudeAcpPath", failure));
+    render(<RunSettingsPanel />);
+
+    await screen.findByLabelText("Adaptador de Codex (ACP)");
+    const checkCodex = screen.getByRole("button", {
+      name: "Comprobar adaptador de Codex",
+    });
+    const checkClaude = screen.getByRole("button", {
+      name: "Comprobar adaptador de Claude Code",
+    });
+    await user.click(checkCodex);
+    expect(mocked.checkAcpAdapter).toHaveBeenCalledWith("codex", CODEX_PATH);
+    await waitFor(() => {
+      expect(checkCodex).toHaveAccessibleDescription(
+        "✓ Responde: Codex 0.4.0 · ACP v1 · capacidades: imágenes",
+      );
+    });
+    expect(checkClaude).not.toHaveAccessibleDescription(/Responde/);
+
+    await user.click(checkClaude);
+    expect(mocked.checkAcpAdapter).toHaveBeenLastCalledWith(
+      "claudeCode",
+      ACP_PATH,
+    );
+    await waitFor(() => {
+      expect(checkClaude).toHaveAccessibleDescription(
+        `No se pudo comprobar el adaptador: ${failure}`,
+      );
+    });
+    // El resultado de Codex sigue ahí.
+    expect(checkCodex).toHaveAccessibleDescription(/Responde: Codex 0\.4\.0/);
+  });
+
+  it("muestra la carpeta de Codex, su sesión y el comando para iniciarla, y vuelve a comprobar", async () => {
+    const user = userEvent.setup();
+    mocked.getCodexHomeStatus
+      .mockResolvedValueOnce({ path: CODEX_HOME, signedIn: false })
+      .mockResolvedValue({ path: CODEX_HOME, signedIn: true });
+    render(<RunSettingsPanel />);
+
+    const section = await screen.findByRole("region", {
+      name: "Carpeta de Codex de la app",
+    });
+    expect(section).toHaveTextContent(
+      "no con tu ~/.codex: no carga tu configuración, tus servidores MCP, tus reglas ni tu historial de Codex.",
+    );
+    expect(await within(section).findByText(CODEX_HOME)).toBeInTheDocument();
+    expect(section).toHaveTextContent(
+      "SesiónNo hay credenciales guardadas en la carpeta de Codex",
+    );
+    expect(section).toHaveTextContent(
+      "Necesitas la CLI de Codex (codex) instalada.",
+    );
+    const posix = within(section).getByText(
+      `CODEX_HOME='${CODEX_HOME}' codex login`,
+    );
+    expect(posix).toHaveClass("codex-home__command");
+    expect(posix).toHaveAccessibleDescription("macOS / Linux (zsh, bash)");
+    const pwsh = within(section).getByText(
+      `$env:CODEX_HOME='${CODEX_HOME}'; codex login`,
+    );
+    expect(pwsh).toHaveClass("codex-home__command");
+    expect(pwsh).toHaveAccessibleDescription("Windows (PowerShell)");
+
+    await user.click(
+      within(section).getByRole("button", { name: "Volver a comprobar" }),
+    );
+    await waitFor(() => {
+      expect(section).toHaveTextContent(
+        "SesiónHay credenciales guardadas en la carpeta de Codex (no se comprueba si siguen siendo válidas)",
+      );
+    });
+    expect(mocked.getCodexHomeStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it("si no se puede comprobar la carpeta de Codex, lo dice y permite reintentar", async () => {
+    const user = userEvent.setup();
+    mocked.getCodexHomeStatus
+      .mockRejectedValueOnce({
+        code: "storage_unavailable",
+        message: "El almacenamiento no está disponible.",
+        recoverable: true,
+      } satisfies ErrorPayload)
+      .mockResolvedValue({ path: CODEX_HOME, signedIn: true });
+    render(<RunSettingsPanel />);
+
+    expect(
+      await screen.findByText(
+        "No se pudo comprobar la carpeta de Codex: El almacenamiento no está disponible.",
+      ),
+    ).toHaveAttribute("role", "alert");
+    await user.click(
+      screen.getByRole("button", { name: "Volver a comprobar" }),
+    );
+    expect(
+      await screen.findByText(
+        "Hay credenciales guardadas en la carpeta de Codex (no se comprueba si siguen siendo válidas)",
+      ),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("comandos de inicio de sesión de Codex", () => {
+  it("entrecomilla la ruta y escapa lo que la shell interpretaría", () => {
+    // POSIX: comillas simples (nada se expande); una ' se escribe '\''.
+    expect(codexLoginCommand("/a b/c")).toBe("CODEX_HOME='/a b/c' codex login");
+    expect(codexLoginCommand('/x/$HOME/"q"/`id`/\\/it\'s')).toBe(
+      "CODEX_HOME='/x/$HOME/\"q\"/`id`/\\/it'\\''s' codex login",
+    );
+    // PowerShell: comillas simples; una ' se escribe ''.
+    expect(codexLoginCommandPowerShell("C:\\Users\\o'brien\\$x")).toBe(
+      "$env:CODEX_HOME='C:\\Users\\o''brien\\$x'; codex login",
+    );
   });
 });

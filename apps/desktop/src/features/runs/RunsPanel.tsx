@@ -27,11 +27,11 @@ import {
 import { useRunChanges } from "./useRunChanges";
 
 /**
- * HU-018/019: al iniciar se elige el ejecutor, un proceso de prueba incluido (sin IA) o Claude
- * Code vía ACP. Se dice siempre, para no dar a entender que trabaja un agente sin elegirlo.
+ * HU-018/019/021: al iniciar se elige el ejecutor, un proceso de prueba incluido (sin IA),
+ * Claude Code o Codex vía ACP. Se dice siempre, para no dar a entender que trabaja un agente sin elegirlo.
  */
 export const RUNNER_NOTICE =
-  "«Iniciar» lanza, en un worktree propio, el ejecutor que elijas: un proceso de prueba (sin IA) para probar la supervisión o Claude Code (ACP) si configuraste su adaptador. Que un intento termine bien no acepta la historia.";
+  "«Iniciar» lanza, en un worktree propio, el ejecutor que elijas: un proceso de prueba (sin IA) para probar la supervisión o Claude Code (ACP) o Codex (ACP) si configuraste su adaptador. Que un intento termine bien no acepta la historia.";
 
 /** Cuándo se detendrá un intento con la cancelación pedida (sin prometer plazos falsos). */
 function cancelEta(state: RunState): string {
@@ -501,7 +501,7 @@ export function RunsPanel({
             onClose={closeDetail}
             onStarted={(run, executor) => {
               setMessage(
-                `Intento #${String(run.number)}: inicio pedido con ${executor.kind === "claudeAcp" ? executorLabel(executor) : "el proceso de prueba (sin IA)"}. Espera turno en la cola.`,
+                `Intento #${String(run.number)}: inicio pedido con ${executor.kind === "testProcess" ? "el proceso de prueba (sin IA)" : executorLabel(executor)}. Espera turno en la cola.`,
               );
               reloadRuns();
             }}

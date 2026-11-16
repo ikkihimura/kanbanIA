@@ -1,3 +1,4 @@
+import type { AcpAgent } from "../../contracts/generated/AcpAgent";
 import type { AcpSessionInfo } from "../../contracts/generated/AcpSessionInfo";
 import type { ApprovalState } from "../../contracts/generated/ApprovalState";
 import type { RunApproval } from "../../contracts/generated/RunApproval";
@@ -76,15 +77,38 @@ export const TEST_PROCESS_LABEL = "Proceso de prueba (sin IA)";
 /** Ejecutor real de HU-019: Claude Code a través del adaptador ACP que configura la persona. */
 export const CLAUDE_ACP_LABEL = "Claude Code (ACP)";
 
+/** Segundo ejecutor real (HU-021): Codex a través de su adaptador ACP. */
+export const CODEX_ACP_LABEL = "Codex (ACP)";
+
+/** Nombre del agente real de cada ejecutor ACP, para frases («el adaptador de …»). */
+export const ACP_AGENT_NAME: Record<AcpAgent, string> = {
+  claudeCode: "Claude Code",
+  codex: "Codex",
+};
+
+/** Ejecutor ACP → agente real; `null` para el proceso de prueba. */
+export function acpAgentOf(executor: RunExecutor): AcpAgent | null {
+  if (executor.kind === "claudeAcp") return "claudeCode";
+  if (executor.kind === "codexAcp") return "codex";
+  return null;
+}
+
 export function executorLabel(executor: RunExecutor): string {
-  return executor.kind === "claudeAcp" ? CLAUDE_ACP_LABEL : TEST_PROCESS_LABEL;
+  if (executor.kind === "claudeAcp") return CLAUDE_ACP_LABEL;
+  if (executor.kind === "codexAcp") return CODEX_ACP_LABEL;
+  return TEST_PROCESS_LABEL;
 }
 
 /** Ejecutor con su escenario, en una línea («Proceso de prueba (sin IA) · escenario …»). */
 export function describeExecutor(executor: RunExecutor): string {
-  return executor.kind === "claudeAcp"
-    ? CLAUDE_ACP_LABEL
-    : `${TEST_PROCESS_LABEL} · escenario «${SCENARIO_LABEL[executor.scenario]}»`;
+  return executor.kind === "testProcess"
+    ? `${TEST_PROCESS_LABEL} · escenario «${SCENARIO_LABEL[executor.scenario]}»`
+    : executorLabel(executor);
+}
+
+/** Modelo que declaró el agente (HU-021): reportado, la app no lo elige ni lo verifica. */
+export function describeAgentModel(model: string | null): string {
+  return model ?? "no informado";
 }
 
 export const SCENARIO_LABEL: Record<TestScenario, string> = {

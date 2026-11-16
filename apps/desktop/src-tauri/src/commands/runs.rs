@@ -1,18 +1,19 @@
-//! Intentos de ejecución desde la app (HU-017/HU-018/HU-019). El actor es siempre la persona.
+//! Intentos de ejecución desde la app (HU-017/HU-018/HU-019/HU-021). El actor es siempre la
+//! persona.
 //! Registrar eventos (`record_run_event`) y la API del supervisor no tienen comando. Iniciar,
 //! cancelar y cambiar la configuración despiertan al supervisor. Los errores de Git y de disco
 //! llegan a la UI con mensajes fijos y seguros (sin rutas ni salida de Git).
 
 use kanbania_core::error::{CoreError, ErrorPayload};
 use kanbania_core::features::runs::{
-    self, AcpAdapterCheck, CancelRunInput, CreateRunInput, DecideApprovalInput,
-    RecordWorktreeRemovalInput, RemoveRunWorktreeInput, RunApproval, RunDetail, RunOutputView,
-    RunSettings, RunSummary, RunWorktree, StartRunInput, UpdateRunSettingsInput, WaitingApproval,
-    WorktreeChanges, WorktreeRemoval,
+    self, AcpAdapterCheck, AcpAgent, CancelRunInput, CodexHomeStatus, CreateRunInput,
+    DecideApprovalInput, RecordWorktreeRemovalInput, RemoveRunWorktreeInput, RunApproval,
+    RunDetail, RunOutputView, RunSettings, RunSummary, RunWorktree, StartRunInput,
+    UpdateRunSettingsInput, WaitingApproval, WorktreeChanges, WorktreeRemoval,
 };
 use kanbania_core::platform::actor::Actor;
 use kanbania_runner::acp::probe_adapter;
-use kanbania_runner::supervisor::{git_config, read_run_output};
+use kanbania_runner::supervisor::{adapter_env, git_config, read_run_output};
 use kanbania_runner::worktree::{
     DEFAULT_GIT_TIMEOUT, RemoveOutcome, WorktreeError, WorktreeErrorKind, remove_worktree,
     worktree_status,
@@ -249,15 +250,18 @@ pub async fn update_run_settings(
 /// Límite de «Comprobar adaptador» (solo `initialize`).
 const ADAPTER_CHECK_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// «Comprobar adaptador» (HU-019): lanza el adaptador ACP con el mismo entorno que una
-/// ejecución, hace solo `initialize` (≤ 30 s), termina su árbol y devuelve lo que declaró
-/// (protocolo, nombre, título, versión y capacidades; sin `_meta` ni datos de cuenta). Con
-/// `path`, comprueba esa ruta antes de guardarla (mismas reglas que la configuración); sin
-/// ella, la configurada. No crea sesión ni envía instrucciones. Errores → `validation`
-/// (`claudeAcpPath`) con un mensaje fijo, sin rutas ni texto del adaptador. Nunca para agentes.
+/// «Comprobar adaptador» (HU-019, HU-021): lanza el adaptador ACP de `agent` con el mismo
+/// entorno que una ejecución (Codex: su carpeta propia, `codex-home`, que se crea si falta),
+/// hace solo `initialize` (≤ 30 s), termina su árbol y devuelve lo que declaró (protocolo,
+/// nombre, título, versión y capacidades; sin `_meta` ni datos de cuenta). Con `path`, comprueba
+/// esa ruta antes de guardarla (mismas reglas que la configuración); sin ella, la configurada
+/// para ese agente. No crea sesión ni envía instrucciones (no comprueba la sesión iniciada).
+/// Errores → `validation` (`claudeAcpPath`/`codexAcpPath`) con un mensaje fijo, sin rutas ni
+/// texto del adaptador. Nunca para agentes.
 #[tauri::command]
 pub async fn check_acp_adapter(
     slot: State<'_, StorageSlot>,
+    agent: AcpAgent,
     path: Option<String>,
 ) -> Result<AcpAdapterCheck, ErrorPayload> {
     let requested = match path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
@@ -267,25 +271,39 @@ pub async fn check_acp_adapter(
             runs::get_run_settings(&store)
                 .await
                 .map_err(|e| e.to_payload(None))?
-                .claude_acp_path
+                .adapter_path(agent)
+                .map(str::to_owned)
                 .ok_or_else(|| {
-                    adapter_invalid("No hay ningún adaptador configurado: indica su ruta.")
+                    adapter_invalid(
+                        agent,
+                        "No hay ningún adaptador configurado: indica su ruta.",
+                    )
                 })?
         }
     };
-    let program = runs::check_adapter_path(&requested)
+    let program = runs::check_adapter_path(agent, &requested)
         .await
         .map_err(|e| e.to_payload(None))?;
+    let data_dir = slot.data_dir().to_path_buf();
+    let extra_env = tauri::async_runtime::spawn_blocking(move || adapter_env(agent, &data_dir))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .ok_or_else(|| {
+            eprintln!("[runs] no se pudo preparar el entorno del adaptador");
+            adapter_invalid(agent, "No se pudo preparar la carpeta propia del agente.")
+        })?;
     let declared = probe_adapter(
         program,
         Vec::new(),
         std::env::temp_dir(),
+        extra_env,
         ADAPTER_CHECK_LIMIT,
     )
     .await
     .map_err(|error| {
         eprintln!("[runs] comprobación del adaptador fallida: {error:?}");
-        adapter_invalid(&error.to_string())
+        adapter_invalid(agent, &error.to_string())
     })?;
     // El núcleo omite (no recorta) una identidad fuera de los límites y filtra las capacidades
     // desconocidas.
@@ -303,9 +321,22 @@ pub async fn check_acp_adapter(
     .map_err(|e| e.to_payload(None))
 }
 
-fn adapter_invalid(reason: &str) -> ErrorPayload {
+/// Estado de la carpeta de Codex de la app (HU-021): su ruta (para que la persona inicie sesión
+/// con `CODEX_HOME=<ruta> codex login`) y si hay un `auth.json` (solo se comprueba que exista;
+/// nunca se lee). No crea la carpeta. Ruta local: solo para la persona, nunca para agentes.
+#[tauri::command]
+pub async fn get_codex_home_status(
+    slot: State<'_, StorageSlot>,
+) -> Result<CodexHomeStatus, ErrorPayload> {
+    let data_dir = slot.data_dir().to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || runs::codex_home_status(&data_dir))
+        .await
+        .map_err(|_| io_unavailable())
+}
+
+fn adapter_invalid(agent: AcpAgent, reason: &str) -> ErrorPayload {
     CoreError::Validation {
-        field: "claudeAcpPath",
+        field: agent.settings_field(),
         reason: reason.to_owned(),
     }
     .to_payload(None)

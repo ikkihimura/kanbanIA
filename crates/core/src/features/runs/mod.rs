@@ -81,7 +81,10 @@ pub use snapshot::{
     RunSnapshot, SNAPSHOT_SCHEMA_VERSION, SnapshotAgent, SnapshotColumn, SnapshotCriterion,
     SnapshotEpic, SnapshotRepository, SnapshotStory, SnapshotStoryRef,
 };
-pub use start::{RunExecutor, StartRunInput, TestScenario, start_run};
+pub use start::{
+    AcpAgent, CODEX_HOME_DIR, CodexHomeStatus, RunExecutor, StartRunInput, TestScenario,
+    codex_home, codex_home_status, start_run,
+};
 pub use supervisor::{
     Dispatch, DispatchExecutor, DispatchOutcome, InterruptCause, PendingCancellation, PendingStart,
     RunFailure, RunOutcome, SupervisorToken, begin_dispatch, discard_unused_worktree, finish_run,

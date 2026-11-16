@@ -20,7 +20,7 @@ use super::permission::{
     PermissionEvent, PermissionPolicy, PermissionReply,
 };
 use super::{
-    AcpFailure, AcpLimits, AcpProfile, AcpStop, ISOLATION_NOTE, PROTOCOL_VERSION,
+    AcpFailure, AcpLimits, AcpProfile, AcpStop, ISOLATION_NOTE, PROTOCOL_VERSION, SessionIsolation,
     claude_code_isolation_meta,
 };
 use crate::output::AgentKind;
@@ -56,6 +56,22 @@ pub struct OpenedSession {
     pub mode: String,
     /// Las de `initialize` más `modes`.
     pub capabilities: Vec<&'static str>,
+    /// Modelo actual que declaró el agente en `session/new` (`models.currentModelId`), sin
+    /// validar (el núcleo lo valida al registrarlo). Dato reportado.
+    pub model: Option<String>,
+}
+
+/// Cómo terminó un turno que no falló.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnEnd {
+    /// `stopReason: end_turn`.
+    EndTurn,
+    /// `stopReason: cancelled` sin que la app cancelara, justo después de que la app
+    /// respondiera un permiso con una opción que termina el turno (perfil:
+    /// `turn_ending_reject_options`, p. ej. `cancel` de Codex; nunca tras responder
+    /// `cancelled`, que sigue siendo error de protocolo). Codex no
+    /// tiene «rechazar y seguir» para las ediciones: el turno termina ahí.
+    StoppedAfterRejection,
 }
 
 /// Petición de permiso que espera la decisión de una persona.
@@ -66,6 +82,8 @@ struct PendingPermission {
     title: String,
     allow_once: Option<String>,
     reject_once: String,
+    /// `reject_once` termina además el turno (perfil).
+    reject_ends_turn: bool,
 }
 
 /// Lo que despertó la espera de un mensaje.
@@ -105,6 +123,10 @@ pub struct AcpClient {
     permissions: Option<PermissionBridge>,
     pending: Vec<PendingPermission>,
     next_key: u64,
+    /// Perfil de la sesión (reglas de elección de opciones de permiso), fijado al abrirla.
+    profile: Option<AcpProfile>,
+    /// La app envió una opción de `turn_ending_reject_options` del perfil (nunca `cancelled`).
+    turn_ending_reply: bool,
 }
 
 impl std::fmt::Debug for AcpClient {
@@ -131,6 +153,8 @@ impl AcpClient {
             permissions: None,
             pending: Vec::new(),
             next_key: 1,
+            profile: None,
+            turn_ending_reply: false,
         }
     }
 
@@ -231,10 +255,14 @@ impl AcpClient {
             return Err(AcpStop::Failed(AcpFailure::RequestFailed));
         };
         let mut params = json!({ "cwd": cwd, "mcpServers": [] });
-        if profile.isolate_claude_code_settings {
-            params["_meta"] = claude_code_isolation_meta();
-            self.system(ISOLATION_NOTE).await;
+        match profile.isolation {
+            SessionIsolation::None => {}
+            SessionIsolation::ClaudeCodeSettings => {
+                params["_meta"] = claude_code_isolation_meta();
+                self.system(ISOLATION_NOTE).await;
+            }
         }
+        self.profile = Some(*profile);
         let result = match self
             .negotiate("session/new", params, cancel, deadline)
             .await?
@@ -321,14 +349,22 @@ impl AcpClient {
         self.required_mode = Some(required.to_owned());
         let mut capabilities = declared.capabilities.clone();
         capabilities.push("modes");
+        let model = result
+            .get("models")
+            .and_then(|m| m.get("currentModelId"))
+            .and_then(Value::as_str)
+            .filter(|m| !m.is_empty() && m.len() <= MAX_IDENTITY_BYTES)
+            .map(str::to_owned);
         Ok(OpenedSession {
             session_id,
             mode: required.to_owned(),
             capabilities,
+            model,
         })
     }
 
-    /// `session/prompt` con un único bloque `text`. `Ok` = `stopReason: end_turn`. La
+    /// `session/prompt` con un único bloque `text`. `Ok` = `stopReason: end_turn` o el agente se
+    /// detuvo tras un rechazo que termina el turno ([`TurnEnd`]). La
     /// cancelación y el tiempo máximo envían `session/cancel` y esperan la respuesta un tiempo
     /// acotado; después devuelven [`AcpStop::Cancelled`] o [`AcpStop::TimedOut`] (quien llama
     /// mata el árbol).
@@ -337,7 +373,7 @@ impl AcpClient {
         text: &str,
         cancel: &mut CancelToken,
         deadline: Instant,
-    ) -> Result<(), AcpStop> {
+    ) -> Result<TurnEnd, AcpStop> {
         let Some(session_id) = self.session_id.clone() else {
             return Err(AcpStop::Failed(AcpFailure::Protocol));
         };
@@ -356,7 +392,7 @@ impl AcpClient {
         }
         let waited = self.await_response(id, None, deadline, Some(cancel)).await;
         let result = match waited {
-            Ok(Ok(result)) => self.stop_reason(&result, false).await,
+            Ok(Ok(result)) => self.stop_reason(&result).await,
             Ok(Err(error)) => {
                 self.note_rpc_error("session/prompt", &error).await;
                 Err(AcpStop::Failed(if error.code == AUTH_REQUIRED {
@@ -445,11 +481,18 @@ impl AcpClient {
         cause
     }
 
-    async fn stop_reason(&mut self, result: &Value, cancelled: bool) -> Result<(), AcpStop> {
+    async fn stop_reason(&mut self, result: &Value) -> Result<TurnEnd, AcpStop> {
         let reason = result.get("stopReason").and_then(Value::as_str);
         let failure = match reason {
-            Some("end_turn") => return Ok(()),
-            Some("cancelled") if cancelled => return Err(AcpStop::Cancelled),
+            Some("end_turn") => return Ok(TurnEnd::EndTurn),
+            Some("cancelled") if self.turn_ending_reply => {
+                self.system(
+                    "El agente detuvo su turno (stopReason: cancelled) después de que la app \
+                     rechazara un permiso con una respuesta que termina el turno.",
+                )
+                .await;
+                return Ok(TurnEnd::StoppedAfterRejection);
+            }
             Some("refusal") => AcpFailure::Refused,
             Some("max_tokens" | "max_turn_requests") => AcpFailure::LimitReached,
             _ => AcpFailure::Protocol,
@@ -630,26 +673,20 @@ impl AcpClient {
                 },
             );
         let duplicate = self.pending.iter().any(|p| &p.rpc_id == id);
-        let option_of = |kind: &str| {
-            params
-                .get("options")
-                .and_then(Value::as_array)
-                .and_then(|options| {
-                    options.iter().find_map(|option| {
-                        (option.get("kind").and_then(Value::as_str) == Some(kind))
-                            .then(|| option.get("optionId").and_then(Value::as_str))
-                            .flatten()
-                    })
-                })
-                .filter(|option| !option.is_empty() && option.len() <= 256)
-                .map(str::to_owned)
-        };
-        let reject_once = option_of("reject_once");
-        let allow_once = option_of("allow_once");
+        let choice = choose_options(params.get("options"), self.profile.as_ref());
+        let reject_ends_turn = choice.reject_ends_turn;
+        let allow_once = choice.allow_once;
+        let reject_once = choice.reject_once;
         let cancelled = json!({ "outcome": { "outcome": "cancelled" } });
+        let ends = if reject_ends_turn {
+            " (con esa respuesta el agente termina su turno)"
+        } else {
+            ""
+        };
         let immediate = match (self.cancelling, &reject_once, &self.permissions) {
             (true, _, _) => Some((
                 cancelled,
+                false,
                 format!(
                     "Permiso pedido para «{title}»: respondido como cancelado (se estaba cancelando el turno)."
                 ),
@@ -661,6 +698,7 @@ impl AcpClient {
                 ));
                 Some((
                     cancelled,
+                    false,
                     format!(
                         "Permiso pedido para «{title}»: sin opción «rechazar una vez», respondido como cancelado."
                     ),
@@ -668,29 +706,33 @@ impl AcpClient {
             }
             (false, Some(option), None) => Some((
                 selected(option),
+                reject_ends_turn,
                 format!(
-                    "Permiso pedido para «{title}»: rechazado una vez por la política de la app (nadie puede decidir en esta sesión)."
+                    "Permiso pedido para «{title}»: rechazado una vez por la política de la app (nadie puede decidir en esta sesión){ends}."
                 ),
             )),
             (false, Some(option), Some(_)) if duplicate => Some((
                 selected(option),
+                reject_ends_turn,
                 format!(
-                    "Permiso pedido para «{title}»: rechazado sin preguntar (el agente repitió el id de otra petición pendiente)."
+                    "Permiso pedido para «{title}»: rechazado sin preguntar (el agente repitió el id de otra petición pendiente){ends}."
                 ),
             )),
             (false, Some(option), Some(_)) if self.pending.len() >= MAX_PENDING_PERMISSIONS => {
                 Some((
                     selected(option),
+                    reject_ends_turn,
                     format!(
-                        "Permiso pedido para «{title}»: rechazado sin preguntar (hay ya {MAX_PENDING_PERMISSIONS} peticiones sin responder)."
+                        "Permiso pedido para «{title}»: rechazado sin preguntar (hay ya {MAX_PENDING_PERMISSIONS} peticiones sin responder){ends}."
                     ),
                 ))
             }
             (false, Some(_), Some(_)) => None,
         };
-        if let Some((response, line)) = immediate {
+        if let Some((response, ends_turn, line)) = immediate {
             out.push(Out::Agent(AgentKind::Permission, line));
             self.emit(out).await;
+            self.turn_ending_reply |= ends_turn;
             let _ = self.send(&jsonrpc::result(id, response)).await;
             return;
         }
@@ -718,19 +760,28 @@ impl AcpClient {
             out.push(Out::Agent(
                 AgentKind::Permission,
                 format!(
-                    "Permiso pedido para «{title}»: rechazado una vez (no se pudo pasar la petición a la app)."
+                    "Permiso pedido para «{title}»: rechazado una vez (no se pudo pasar la petición a la app){ends}."
                 ),
             ));
             self.emit(out).await;
+            self.turn_ending_reply |= reject_ends_turn;
             let _ = self
                 .send(&jsonrpc::result(id, selected(&reject_once)))
                 .await;
             return;
         }
-        out.push(Out::Agent(
-            AgentKind::Permission,
-            format!("Permiso pedido para «{title}»: espera la decisión de una persona en la app."),
-        ));
+        let mut line =
+            format!("Permiso pedido para «{title}»: espera la decisión de una persona en la app.");
+        if choice.allow_excluded {
+            line.push_str(
+                " El agente solo ofrece permitirlo para más que esta acción (todo el turno o la \
+                 sesión): la app solo puede rechazarlo.",
+            );
+        }
+        if reject_ends_turn {
+            line.push_str(" Si se rechaza (o caduca), el agente termina su turno.");
+        }
+        out.push(Out::Agent(AgentKind::Permission, line));
         self.emit(out).await;
         self.pending.push(PendingPermission {
             key,
@@ -738,6 +789,7 @@ impl AcpClient {
             title,
             allow_once,
             reject_once,
+            reject_ends_turn,
         });
     }
 
@@ -748,32 +800,39 @@ impl AcpClient {
         };
         let pending = self.pending.remove(index);
         let title = &pending.title;
-        let (response, line) = match (answer.reply, &pending.allow_once) {
+        let rejects_and_ends = pending.reject_ends_turn;
+        let (response, ends_turn, line) = match (answer.reply, &pending.allow_once) {
             (PermissionReply::AllowOnce, Some(option)) => (
                 selected(option),
+                false,
                 format!("Permiso para «{title}»: permitido una vez por una persona."),
             ),
             (PermissionReply::AllowOnce, None) | (PermissionReply::Reject, _) => (
                 selected(&pending.reject_once),
+                rejects_and_ends,
                 format!("Permiso para «{title}»: rechazado por una persona."),
             ),
             (PermissionReply::Expired, _) => (
                 selected(&pending.reject_once),
+                rejects_and_ends,
                 format!("Permiso para «{title}»: caducó sin respuesta; se respondió rechazar."),
             ),
             (PermissionReply::Unrecorded, _) => (
                 selected(&pending.reject_once),
+                rejects_and_ends,
                 format!(
                     "Permiso para «{title}»: rechazado sin preguntar (la app no pudo registrar la petición)."
                 ),
             ),
             (PermissionReply::Cancelled, _) => (
                 json!({ "outcome": { "outcome": "cancelled" } }),
+                false,
                 format!(
                     "Permiso para «{title}»: respondido como cancelado (el intento terminó o se canceló)."
                 ),
             ),
         };
+        self.turn_ending_reply |= ends_turn;
         let mut out = Vec::new();
         self.normalizer.flush(&mut out);
         out.push(Out::Agent(AgentKind::Permission, line));
@@ -973,6 +1032,55 @@ impl AcpClient {
                 Out::System(text) => self.sink.system(&text).await,
             }
         }
+    }
+}
+
+/// Opciones elegidas de una petición de permiso según el perfil.
+struct OptionChoice {
+    /// Primer `allow_once` admitido por el perfil.
+    allow_once: Option<String>,
+    /// Había `allow_once`, pero ninguno en la lista de permitidos del perfil.
+    allow_excluded: bool,
+    /// `reject_once` preferido: el primero que no termina el turno; si no hay, el primero.
+    reject_once: Option<String>,
+    reject_ends_turn: bool,
+}
+
+fn choose_options(options: Option<&Value>, profile: Option<&AcpProfile>) -> OptionChoice {
+    let valid: Vec<(&str, &str)> = options
+        .and_then(Value::as_array)
+        .map(|options| {
+            options
+                .iter()
+                .filter_map(|option| {
+                    let id = option.get("optionId").and_then(Value::as_str)?;
+                    let kind = option.get("kind").and_then(Value::as_str)?;
+                    (!id.is_empty() && id.len() <= 256).then_some((id, kind))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let allowed_allow = profile.and_then(|p| p.allowed_allow_options);
+    let ending_reject = profile.map_or(&[][..], |p| p.turn_ending_reject_options);
+    let allows: Vec<&str> = valid
+        .iter()
+        .filter(|(_, kind)| *kind == "allow_once")
+        .map(|(id, _)| *id)
+        .collect();
+    let allow_once = allows
+        .iter()
+        .find(|id| allowed_allow.is_none_or(|allowed| allowed.contains(id)))
+        .map(|id| (*id).to_owned());
+    // `min_by_key` devuelve el primero de los mínimos: conserva el orden del agente.
+    let reject = valid
+        .iter()
+        .filter(|(_, kind)| *kind == "reject_once")
+        .min_by_key(|(id, _)| ending_reject.contains(id));
+    OptionChoice {
+        allow_excluded: allow_once.is_none() && !allows.is_empty(),
+        allow_once,
+        reject_once: reject.map(|(id, _)| (*id).to_owned()),
+        reject_ends_turn: reject.is_some_and(|(id, _)| ending_reject.contains(id)),
     }
 }
 

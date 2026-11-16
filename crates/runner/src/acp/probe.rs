@@ -55,18 +55,20 @@ impl std::fmt::Display for ProbeError {
 impl std::error::Error for ProbeError {}
 
 /// Lanza `program` (absoluto, sin shell) en `cwd`, hace `initialize` con el límite `limit` y
-/// termina su árbol. `args` solo se usa en pruebas (la app no pasa argumentos).
+/// termina su árbol. `args` solo se usa en pruebas (la app no pasa argumentos). `extra_env`:
+/// las variables propias del agente, las mismas que en una ejecución (Codex: [`super::codex_env`]).
 pub async fn probe_adapter(
     program: PathBuf,
     args: Vec<OsString>,
     cwd: PathBuf,
+    extra_env: Vec<(OsString, OsString)>,
     limit: Duration,
 ) -> Result<AgentDeclaration, ProbeError> {
     let spec = ProcessSpec {
         program,
         args,
         cwd,
-        extra_env: Vec::new(),
+        extra_env,
         timeout: limit,
         grace: PROBE_GRACE,
     };

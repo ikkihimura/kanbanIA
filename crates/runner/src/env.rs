@@ -22,15 +22,25 @@ const ALLOWED: &[&str] = &[
 
 /// Variables que necesita además un adaptador ACP (HU-019): Claude Code usa `USER`/`LOGNAME`
 /// para el llavero de macOS y `SHELL` para sus herramientas; en Windows, las carpetas del
-/// perfil. Nunca `KANBANIA_*`, `ANTHROPIC_*` ni `CLAUDE_*`: la sesión iniciada de Claude Code
-/// basta.
+/// perfil. Nunca `KANBANIA_*`, `ANTHROPIC_*`, `CLAUDE_*` ni `OPENAI_*`: la sesión iniciada del
+/// agente basta. Codex recibe además las suyas (`acp::codex_env`).
 #[cfg(unix)]
 const ADAPTER_EXTRA: &[&str] = &["USER", "LOGNAME", "SHELL"];
 #[cfg(windows)]
 const ADAPTER_EXTRA: &[&str] = &["USERPROFILE", "APPDATA", "LOCALAPPDATA"];
 
 /// Prefijos que nunca pasan a un adaptador, aunque estén en una lista.
-const ADAPTER_FORBIDDEN_PREFIXES: &[&str] = &["KANBANIA_", "ANTHROPIC_", "CLAUDE_"];
+const ADAPTER_FORBIDDEN_PREFIXES: &[&str] = &["KANBANIA_", "ANTHROPIC_", "CLAUDE_", "OPENAI_"];
+/// Nombres exactos que nunca pasan a un adaptador (HU-021, Codex: credenciales, otro binario,
+/// otro proveedor, flujo de autenticación o registros del servidor de la app). Codex sí recibe
+/// `CODEX_HOME`, `CODEX_CONFIG`, `INITIAL_AGENT_MODE` y `NO_BROWSER`, que fija la app.
+const ADAPTER_FORBIDDEN_NAMES: &[&str] = &[
+    "CODEX_API_KEY",
+    "CODEX_PATH",
+    "MODEL_PROVIDER",
+    "DEFAULT_AUTH_REQUEST",
+    "APP_SERVER_LOGS",
+];
 
 fn present(names: &[&str]) -> Vec<(OsString, OsString)> {
     names
@@ -53,13 +63,16 @@ pub(crate) fn adapter_extra_env() -> Vec<(OsString, OsString)> {
 }
 
 /// `true` si el nombre no debe llegar nunca a un adaptador ACP (`KANBANIA_*`, `ANTHROPIC_*`,
-/// `CLAUDE_*`, sin distinguir mayúsculas).
+/// `CLAUDE_*`, `OPENAI_*` y los nombres de [`ADAPTER_FORBIDDEN_NAMES`], sin distinguir
+/// mayúsculas).
 pub fn is_adapter_forbidden(name: &OsStr) -> bool {
     name.to_str().is_none_or(|name| {
         ADAPTER_FORBIDDEN_PREFIXES.iter().any(|prefix| {
             name.get(..prefix.len())
                 .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
-        })
+        }) || ADAPTER_FORBIDDEN_NAMES
+            .iter()
+            .any(|forbidden| name.eq_ignore_ascii_case(forbidden))
     })
 }
 
@@ -107,9 +120,16 @@ mod tests {
             "KANBANIA_AGENT_TOKEN",
             "anthropic_api_key",
             "CLAUDE_CODE_OAUTH_TOKEN",
+            "OPENAI_API_KEY",
+            "codex_api_key",
+            "CODEX_PATH",
+            "MODEL_PROVIDER",
+            "DEFAULT_AUTH_REQUEST",
+            "APP_SERVER_LOGS",
         ] {
             assert!(is_adapter_forbidden(OsStr::new(forbidden)), "{forbidden}");
         }
         assert!(!is_adapter_forbidden(OsStr::new("PATH")));
+        assert!(!is_adapter_forbidden(OsStr::new("CODEX_HOME")));
     }
 }
