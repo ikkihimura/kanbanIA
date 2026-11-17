@@ -39,6 +39,11 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "../../../LICENSE-MIT": "LICENSE-MIT",
+      "../../../LICENSE-APACHE": "LICENSE-APACHE",
+      "../../../THIRD-PARTY-LICENSES.md": "THIRD-PARTY-LICENSES.md"
+    },
     "macOS": {
       "signingIdentity": "-"
     },

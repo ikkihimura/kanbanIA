@@ -44,7 +44,7 @@ Ejecuta lo mismo que CI: contratos TS, formato, lint, typecheck y build web, pru
 - **Pruebas**: con SQLite temporal real, nunca con mocks de la base. Prueba comportamiento y errores a través de la entrada pública del slice.
 - **Rust**: sin `unwrap`/`expect`/`panic` fuera de pruebas y sin `unsafe` (clippy lo impide).
 - **UI**: accesible por teclado, estados con texto (no solo color), sin `style` en línea ni `dangerouslySetInnerHTML`. El Markdown se muestra solo con `MarkdownPreview`.
-- **Dependencias**: versión exacta y verificada; conserva los lockfiles.
+- **Dependencias**: versión exacta y verificada; conserva los lockfiles. Si añades, quitas o actualizas una dependencia que llega a la app (crates no dev o paquetes npm de producción de `apps/desktop`), regenera los avisos con `npm run licenses` (necesita `cargo install cargo-about --locked --version 0.9.3 --features cli`) y versiona `THIRD-PARTY-LICENSES.md`. Solo se aceptan las licencias de `about.toml` (y su equivalente npm en `scripts/third-party-licenses.mjs`); añadir otra es decisión del propietario.
 
 ## Herramientas y secretos
 

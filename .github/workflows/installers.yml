@@ -44,6 +44,14 @@ jobs:
           cargo install cargo-audit --locked --version 0.22.2
           cargo audit
 
+      # Los avisos de licencias de terceros (THIRD-PARTY-LICENSES.md, dentro de los instaladores)
+      # deben corresponder a las dependencias actuales y solo a licencias aceptadas (about.toml).
+      - name: Avisos de licencias al día
+        run: |
+          npm ci
+          cargo install cargo-about --locked --version 0.9.3 --features cli
+          npm run licenses:check
+
   bundle:
     name: instaladores (${{ matrix.os }})
     needs: audit
@@ -59,12 +67,18 @@ jobs:
             paths: |
               target/release/bundle/dmg/*.dmg
               target/release/kanbania-mcp
+              THIRD-PARTY-LICENSES.md
+              LICENSE-MIT
+              LICENSE-APACHE
           - os: windows-2025
             bundles: msi,nsis
             paths: |
               target/release/bundle/msi/*.msi
               target/release/bundle/nsis/*-setup.exe
               target/release/kanbania-mcp.exe
+              THIRD-PARTY-LICENSES.md
+              LICENSE-MIT
+              LICENSE-APACHE
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

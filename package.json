@@ -22,6 +22,8 @@
     "lint:rust": "cargo clippy --workspace --all-targets --locked -- -D warnings && cargo check -p kanbania-runner --no-default-features --locked",
     "test:rust": "cargo test --workspace --locked && npm run check:mcp-deps",
     "check:mcp-deps": "node scripts/check-mcp-deps.mjs",
+    "licenses": "node scripts/third-party-licenses.mjs",
+    "licenses:check": "node scripts/third-party-licenses.mjs --check",
     "check": "npm run contracts && npm run format:check && npm run lint && npm run build:web && npm run test:web && npm run lint:rust && npm run test:rust",
     "test:web": "npm run test -w apps/desktop",
     "contracts": "cargo test -p kanbania-core --lib --locked --quiet"

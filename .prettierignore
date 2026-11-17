@@ -8,3 +8,5 @@ dist/
 apps/desktop/src-tauri/gen/
 apps/desktop/src/contracts/generated/
 package-lock.json
+# Plantilla de cargo-about: su formato es parte de la salida (THIRD-PARTY-LICENSES.md).
+about.hbs
