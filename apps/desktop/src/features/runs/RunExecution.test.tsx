@@ -2210,7 +2210,7 @@ describe("Iniciar con Codex (ACP)", () => {
       }),
     ).not.toBeInTheDocument();
     expect(form).toHaveTextContent(
-      "Atención (comprobado con Codex real): lee archivos sin pedir permiso, también fuera del worktree (podría leer los datos de la app), y rechazar una escritura detiene su turno.",
+      "Atención (comprobado con Codex real): lee archivos sin pedir permiso, también fuera del worktree, salvo los datos de Kanban IA, que la app le niega con un perfil de permisos (Windows sin comprobar); y rechazar una escritura detiene su turno.",
     );
     expect(form).toHaveTextContent(
       "su nombre y su avatar no cambian según el ejecutor que elijas.",
@@ -2255,6 +2255,16 @@ describe("Iniciar con Codex (ACP)", () => {
     expect(row("Leer archivos")).toContain(
       "para leer fuera del worktree pide permiso",
     );
+    const data = row(
+      "Datos de Kanban IA (base, copias, descriptor del servicio)",
+    );
+    expect(data).toContain(
+      "En macOS, un sandbox del sistema le impide leerlos",
+    );
+    expect(data).toContain("En Windows no hay sandbox: podría leerlos.");
+    expect(data).toContain("Windows sin comprobar");
+    expect(data).toContain("podría lanzar procesos fuera del sandbox");
+    expect(data).toContain("en la app, el modelo no intentó leerlos");
     expect(row("Al rechazar una escritura")).toContain(
       "Su turno se detiene: Codex no admite «rechazar y continuar» al escribir archivos.",
     );
@@ -2383,7 +2393,7 @@ describe("Sistema → Ejecuciones: Codex", () => {
     const path = await screen.findByLabelText("Adaptador de Codex (ACP)");
     expect(path).toHaveValue("");
     expect(path).toHaveAccessibleDescription(
-      /Ruta absoluta del ejecutable codex-acp.*Comprobado con Codex real: lee archivos sin preguntar, también fuera del worktree, y rechazar una escritura detiene su turno\./,
+      /Ruta absoluta del ejecutable codex-acp.*Comprobado con Codex real: lee archivos sin preguntar, también fuera del worktree, y rechazar una escritura detiene su turno\. La app le da un perfil de permisos que niega a sus comandos los datos de Kanban IA/,
     );
     await user.type(path, `  ${CODEX_PATH} `);
     expect(mocked.setUnsavedChanges).toHaveBeenLastCalledWith(true);

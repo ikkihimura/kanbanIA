@@ -323,7 +323,11 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
           en 10 minutos, se rechaza. Para que nada se permita sin preguntar, la
           app pide al adaptador que no cargue tu configuración de Claude Code ni
           la del repositorio (reglas «allow», hooks, servidores MCP); tu sesión
-          iniciada sí se usa.
+          iniciada sí se usa. En macOS, la app lo ejecuta en un sandbox del
+          sistema que le impide leer o modificar directamente los datos de
+          Kanban IA (base, copias, descriptor del servicio), salvo el worktree
+          del intento; un comando que apruebes podría lanzar procesos fuera del
+          sandbox. En Windows no hay ese sandbox y podría leerlos.
         </p>
       </AdapterField>
 
@@ -348,7 +352,12 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
           permiso para editar o ejecutar comandos con efectos aparece en el
           detalle del intento para que la permitas una vez o la rechaces.
           Comprobado con Codex real: lee archivos sin preguntar, también fuera
-          del worktree, y rechazar una escritura detiene su turno.
+          del worktree, y rechazar una escritura detiene su turno. La app le da
+          un perfil de permisos que niega a sus comandos los datos de Kanban IA
+          (base, copias, descriptor del servicio, su carpeta de Codex), salvo el
+          worktree del intento. Comprobado con «codex sandbox»; Windows sin
+          comprobar. Un comando que apruebes para salir del sandbox ya no queda
+          limitado.
         </p>
       </AdapterField>
 

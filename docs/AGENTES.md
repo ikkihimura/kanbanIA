@@ -88,13 +88,16 @@ Cuando el agente pide permiso (escribir un archivo, ejecutar un comando…), el 
 - Solo **Permitir una vez** o **Rechazar**; nunca reglas permanentes.
 - Caducan a los **10 minutos**: sin decisión, la app responde «rechazar» y el agente sigue. El tiempo máximo del intento sigue contando.
 - Cancelar el intento invalida las peticiones abiertas y las decididas que aún no se habían entregado.
-- **Permitir un comando lo ejecuta de verdad en tu equipo**, sin sandbox (con el worktree como carpeta de trabajo). Permite solo lo que entiendas.
+- **Permitir un comando lo ejecuta de verdad en tu equipo** (con el worktree como carpeta de trabajo). Solo los datos de Kanban IA quedan protegidos (ver «Limitaciones»). Permite solo lo que entiendas.
 - Notificación del sistema **opcional y desactivada por defecto**: «Sistema» → «Ejecuciones» → «Avisarme…». Solo dice «Un agente pide permiso en #N».
 
 ## Limitaciones
 
 - **Claude Code** ejecuta sin pedir permiso los comandos de solo lectura dentro del worktree (`cat`, `git ls-files`…). Para leer fuera del worktree con su herramienta Read sí pide permiso.
-- **Codex lee archivos sin pedir permiso, también fuera del worktree** (podría leer los datos de la app). Al pedir escribir solo ofrece aceptar o cancelar: **rechazar una escritura detiene su turno**.
+- **Codex lee archivos sin pedir permiso, también fuera del worktree.** Al pedir escribir solo ofrece aceptar o cancelar: **rechazar una escritura detiene su turno**.
+- **Datos de Kanban IA** (base, copias, `service.json`, otros intentos): ningún agente debe leerlos.
+  - Claude Code en **macOS** corre en un sandbox del sistema que le impide leerlos o modificarlos directamente, aunque apruebes el permiso (comprobado). Un comando que apruebes podría lanzar procesos fuera del sandbox (la app bloquea `launchctl`, `open` y `osascript`, pero no es una garantía completa). En **Windows no hay sandbox**: podría leerlos.
+  - Codex recibe un perfil de permisos que su propio sandbox aplica a sus comandos (comprobado con `codex sandbox`; en la app, el modelo no llegó a intentar leerlos). Si apruebas que un comando salga del sandbox, ese comando ya no queda limitado. Windows sin comprobar.
 - Los tokens y el coste que informa el agente se ven en la salida, pero **no se guardan** en el intento: se muestran como «no disponible». Codex no informa del coste.
 - Los adaptadores npm necesitan `node` en `PATH`. Si usas nvm y abres la app desde Finder, no lo encuentran: abre la app desde una terminal donde `node` funcione, por ejemplo `"/Applications/Kanban IA.app/Contents/MacOS/kanbania-desktop"`, o usa el binario autónomo de Claude Code.
 - El aislamiento de cada agente depende de opciones propias de su adaptador: vuelve a comprobarlo al cambiar de versión.

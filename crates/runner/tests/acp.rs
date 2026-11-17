@@ -2004,3 +2004,59 @@ async fn codex_home_config_is_refused_before_spawning() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Aislamiento de los datos de la app (HU-023).
+// ---------------------------------------------------------------------------------------------
+
+/// Claude Code en macOS: el adaptador corre dentro del sandbox y no puede leer la base de la app
+/// desde su worktree; sí escribir en el worktree. Fuera de macOS no hay sandbox y se avisa.
+#[tokio::test(flavor = "multi_thread")]
+async fn claude_code_cannot_read_the_app_data_from_its_worktree() {
+    let env = Env::new().await;
+    let (run, detail) = env.scenario(&["read_app_data"]).await;
+    assert_eq!(detail.run.state, RunState::Completed, "{:?}", detail.run);
+    let note = std::fs::read_to_string(env.worktree(&run).await.join("acceso-datos.txt")).unwrap();
+    let system = env.texts(&run, RunOutputStream::System);
+    if cfg!(target_os = "macos") {
+        assert_eq!(note, "bloqueado: PermissionDenied");
+        assert!(
+            system.iter().any(|l| l.contains("sandbox de macOS")),
+            "{system:?}"
+        );
+    } else {
+        assert_eq!(note, "leido");
+        assert!(
+            system.iter().any(|l| l.contains("no puede impedir")),
+            "{system:?}"
+        );
+    }
+}
+
+/// Codex: no se envuelve (macOS no anida sandboxes); el agente falso comprueba que
+/// `CODEX_CONFIG` trae el perfil de permisos de la app (datos denegados, worktree legible) y
+/// lo aplicaría el sandbox de Codex. Aquí el falso no lo aplica: lee la base.
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_gets_a_permissions_profile_that_denies_the_app_data() {
+    let env = Env::new().await;
+    let log = env.base.join("registro del falso.txt");
+    let (run, detail) = env
+        .scenario_as(
+            RunExecutor::CodexAcp,
+            &["read_app_data", "--log", log.to_str().unwrap()],
+        )
+        .await;
+    assert_eq!(detail.run.state, RunState::Completed, "{:?}", detail.run);
+    let lines = received(&log);
+    assert!(
+        lines.iter().any(|l| l.starts_with("perfil: ")),
+        "el falso no recibió el perfil de permisos: {lines:?}"
+    );
+    let note = std::fs::read_to_string(env.worktree(&run).await.join("acceso-datos.txt")).unwrap();
+    assert_eq!(note, "leido", "Codex no va dentro del sandbox de la app");
+    assert!(
+        env.texts(&run, RunOutputStream::System)
+            .iter()
+            .any(|l| l.contains("perfil de permisos"))
+    );
+}

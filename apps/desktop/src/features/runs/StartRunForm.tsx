@@ -297,7 +297,8 @@ export function StartRunForm({
           instantánea. El agente trabaja con tu sesión de Claude Code. Cada
           petición de permiso (editar, ejecutar…) aparece en el detalle del
           intento para que la permitas una vez o la rechaces; sin respuesta en
-          10 minutos, se rechaza.
+          10 minutos, se rechaza. En macOS se ejecuta en un sandbox que le
+          impide leer directamente los datos de Kanban IA; en Windows, no.
         </p>
       ) : (
         <div className="run-detail__info">
@@ -310,8 +311,9 @@ export function StartRunForm({
           </p>
           <p>
             Atención (comprobado con Codex real): lee archivos sin pedir
-            permiso, también fuera del worktree (podría leer los datos de la
-            app), y rechazar una escritura detiene su turno.
+            permiso, también fuera del worktree, salvo los datos de Kanban IA,
+            que la app le niega con un perfil de permisos (Windows sin
+            comprobar); y rechazar una escritura detiene su turno.
           </p>
         </div>
       )}

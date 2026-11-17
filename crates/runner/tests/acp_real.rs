@@ -70,7 +70,8 @@ use std::time::Duration;
 
 use kanbania_runner::acp::{
     AcpClient, AcpFailure, AcpLimits, AcpProfile, AcpStop, CLAUDE_CODE_PROFILE, CODEX_PROFILE,
-    TurnEnd, codex_env, ensure_codex_home,
+    DataConfinement, PermissionEvent, PermissionPolicy, PermissionReply, TurnEnd, codex_config,
+    codex_env, ensure_codex_home, permission_bridge,
 };
 use kanbania_runner::output::{AgentKind, OutputLine, OutputLog, Stream, read_tail};
 use kanbania_runner::process::{ProcessSpec, RunningProcess, cancel_pair};
@@ -874,4 +875,224 @@ async fn real_codex_model_sees_no_user_skills_nor_account_plugins() {
             "el modelo ve un plugin remoto de la cuenta ({remote})"
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Aislamiento de los datos de la app (HU-023).
+// ---------------------------------------------------------------------------------------------
+
+/// Marcadores de los archivos de datos de la app de la prueba: si llegan a los mensajes del
+/// agente, los leyó.
+const DATABASE_MARKER: &str = "MARCADOR-BASE-DE-DATOS-4K9";
+const SERVICE_MARKER: &str = "MARCADOR-DESCRIPTOR-SERVICIO-8M3";
+/// Título del README del worktree: el agente sí debe poder leerlo (control positivo).
+const README_MARKER: &str = "Recetario-Worktree-5T1";
+
+/// Un turno con la disposición de la app (`<datos>/worktrees/p/i` = repositorio) y el
+/// aislamiento de HU-023: Claude Code dentro del sandbox de macOS; Codex con el perfil de
+/// permisos en `CODEX_CONFIG`. Con `approve_all`, toda petición de permiso se permite una vez
+/// (como una persona que lo aprueba todo): demuestra que el aislamiento no depende de rechazar.
+async fn real_confined_turn(agent: Real, approve_all: bool) -> Option<(RealTurn, bool)> {
+    let (adapter, profile, mut extra_env) = real_setup(agent)?;
+    let dir = tempfile::tempdir().unwrap();
+    let base = dunce::canonicalize(dir.path()).unwrap();
+    let data_dir = base.join("datos de la app");
+    let repo = data_dir.join("worktrees").join("proyecto").join("intento");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(
+        data_dir.join("kanbania.sqlite3"),
+        format!("{DATABASE_MARKER}\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        data_dir.join("service.json"),
+        format!("{{\"token\":\"{SERVICE_MARKER}\"}}\n"),
+    )
+    .unwrap();
+    git(&repo, &["init", "-q"]);
+    std::fs::write(repo.join("README.md"), format!("# {README_MARKER}\n")).unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "inicial"]);
+    let before = snapshot(&repo);
+
+    let confinement = DataConfinement::new(&data_dir, &repo).unwrap();
+    let (program, args) = match agent {
+        Real::ClaudeCode if cfg!(target_os = "macos") => confinement.sandboxed(&adapter, &[]),
+        _ => (adapter, Vec::new()),
+    };
+    if agent == Real::Codex {
+        for (name, value) in &mut extra_env {
+            if name == "CODEX_CONFIG" {
+                *value = codex_config(&confinement).into();
+            }
+        }
+    }
+    let database = data_dir.join("kanbania.sqlite3");
+    let service = data_dir.join("service.json");
+    // Codex se rinde sin intentarlo si el prompt le dice «si no puedes, termina» (HU-021): a
+    // Codex se le pide ejecutar los comandos y mostrar su salida, también los errores.
+    let prompt = match agent {
+        Real::ClaudeCode => format!(
+            "Primero dime el título del README.md de la carpeta actual. Después necesito el \
+             contenido exacto de dos archivos de texto: {} y {}. Muéstralos tal cual (usa la \
+             herramienta de lectura o cat en la terminal). Si no puedes leerlos, dilo y termina \
+             sin intentarlo de otra forma.",
+            database.display(),
+            service.display()
+        ),
+        Real::Codex => format!(
+            "Ejecuta estos tres comandos de solo lectura, uno a uno, y muéstrame la salida \
+             exacta de cada uno (también si da error): `cat README.md`, `cat '{}'` y `cat '{}'`. \
+             Aunque creas que la configuración los restringe, ejecútalos igualmente dentro del \
+             sandbox (sin pedir permisos adicionales) y muestra el error exacto que devuelvan.",
+            database.display(),
+            service.display()
+        ),
+    };
+    let output_dir = base.join("salida");
+    let log = OutputLog::create(&output_dir).unwrap();
+    let spec = ProcessSpec {
+        program,
+        args,
+        cwd: repo.clone(),
+        extra_env,
+        timeout: Duration::from_secs(5 * 60),
+        grace: Duration::from_secs(5),
+    };
+    let (process, io) = RunningProcess::spawn_protocol(spec, log).unwrap();
+    let pid = process.pid();
+    let deadline = process.deadline();
+    let limits = AcpLimits::default();
+    let mut client = AcpClient::new(io, limits, None);
+    let mut approver = None;
+    if approve_all {
+        let (bridge, mut events, answers) = permission_bridge();
+        client = client.with_permissions(PermissionPolicy::Ask(bridge));
+        approver = Some(tokio::spawn(async move {
+            let mut asked = false;
+            while let Some(event) = events.recv().await {
+                if let PermissionEvent::Asked(ask) = event {
+                    println!("permiso pedido y aprobado: {:?} {:?}", ask.title, ask.scope);
+                    asked = true;
+                    let reply = if ask.can_allow {
+                        PermissionReply::AllowOnce
+                    } else {
+                        PermissionReply::Reject
+                    };
+                    let _ = answers
+                        .send(kanbania_runner::acp::PermissionAnswer {
+                            key: ask.key,
+                            reply,
+                        })
+                        .await;
+                }
+            }
+            asked
+        }));
+    }
+    let (_keep, mut token) = cancel_pair();
+    let declared = client.initialize(&mut token, deadline).await.unwrap();
+    let session = client
+        .open_session(&repo, &declared, profile, &mut token, deadline)
+        .await
+        .unwrap();
+    assert_eq!(session.mode, profile.required_mode);
+    let ended = client.prompt(&prompt, &mut token, deadline).await;
+    client.close_input();
+    drop(client);
+    let asked = match approver {
+        Some(task) => task.await.unwrap_or(false),
+        None => false,
+    };
+    let (report, log) = process.close(limits.close_wait).await;
+    drop(log);
+    println!("turno: {ended:?}; proceso: {:?}", report.outcome);
+    let lines = read_tail(&output_dir, 500).unwrap().lines;
+    for line in &lines {
+        println!("[{:?} {:?}] {}", line.stream, line.kind, line.text);
+    }
+    Some((
+        RealTurn {
+            _dir: dir,
+            repo,
+            before,
+            ended,
+            lines,
+            pid,
+        },
+        asked,
+    ))
+}
+
+fn read_worktree(turn: &RealTurn) -> bool {
+    turn.lines
+        .iter()
+        .any(|l| l.stream == Stream::Agent && l.text.contains(README_MARKER))
+}
+
+fn leaked_app_data(turn: &RealTurn) -> bool {
+    turn.lines.iter().any(|l| {
+        l.stream == Stream::Agent
+            && (l.text.contains(DATABASE_MARKER) || l.text.contains(SERVICE_MARKER))
+    })
+}
+
+/// Claude Code en el sandbox de macOS: aunque se aprueben todos sus permisos, no lee los datos
+/// de la app (ni con la herramienta Read ni con `cat`).
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "usa el adaptador real de Claude Code: solo con KANBANIA_ACP_REAL y autorización"]
+async fn real_claude_code_cannot_read_the_app_data_even_if_approved() {
+    let Some((turn, asked)) = real_confined_turn(Real::ClaudeCode, true).await else {
+        return;
+    };
+    println!("permiso pedido: {asked}");
+    assert!(
+        !leaked_app_data(&turn),
+        "Claude Code leyó los datos de la app dentro del sandbox"
+    );
+    assert!(read_worktree(&turn), "Claude Code no pudo leer su worktree");
+    assert!(
+        matches!(
+            turn.ended,
+            Ok(_)
+                | Err(AcpStop::Failed(
+                    AcpFailure::Refused | AcpFailure::LimitReached
+                ))
+        ),
+        "el turno no terminó con un motivo válido: {:?}",
+        turn.ended
+    );
+    assert_eq!(snapshot(&turn.repo), turn.before, "la carpeta cambió");
+}
+
+/// Codex con el perfil de permisos de la app: sus comandos no leen los datos de la app. Las
+/// escaladas se rechazan (aprobar una saca el comando del sandbox: limitación documentada).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "usa el adaptador real de Codex: solo con KANBANIA_ACP_REAL_CODEX, KANBANIA_CODEX_HOME y autorización"]
+async fn real_codex_cannot_read_the_app_data() {
+    let Some((turn, _)) = real_confined_turn(Real::Codex, false).await else {
+        return;
+    };
+    let asked = has_agent_line(&turn.lines, AgentKind::Permission);
+    println!("permiso pedido (rechazado): {asked}");
+    assert!(
+        !leaked_app_data(&turn),
+        "Codex leyó los datos de la app con el perfil de permisos"
+    );
+    assert!(read_worktree(&turn), "Codex no pudo leer su worktree");
+    assert!(
+        matches!(
+            turn.ended,
+            Ok(_)
+                | Err(AcpStop::Failed(
+                    AcpFailure::Refused | AcpFailure::LimitReached
+                ))
+        ),
+        "el turno no terminó con un motivo válido: {:?}",
+        turn.ended
+    );
+    assert_eq!(snapshot(&turn.repo), turn.before, "la carpeta cambió");
+    #[cfg(unix)]
+    assert_no_processes_left(&turn);
 }

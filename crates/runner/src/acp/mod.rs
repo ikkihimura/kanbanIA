@@ -36,6 +36,7 @@
 //! el núcleo a partir de [`AcpFailure`]; los mensajes del agente van recortados a `sys`.
 
 mod client;
+mod confine;
 pub(crate) mod framing;
 #[cfg(all(test, feature = "supervisor"))]
 mod guards;
@@ -48,6 +49,11 @@ mod profile;
 use std::time::Duration;
 
 pub use client::{AcpClient, AgentDeclaration, OpenedSession, TurnEnd};
+pub use confine::{
+    CLAUDE_SANDBOX_AVAILABLE, CLAUDE_SANDBOX_NOTE, CLAUDE_UNCONFINED_NOTE, CODEX_CONFINEMENT_NOTE,
+    CODEX_PERMISSIONS_PROFILE, DATA_DIR_SANDBOX_PROFILE, DataConfinement, SANDBOX_EXEC,
+    codex_config,
+};
 pub use framing::MAX_LINE_BYTES;
 pub use permission::{
     MAX_PENDING_PERMISSIONS, MAX_SCOPE_CHARS, PermissionAnswer, PermissionAsk, PermissionBridge,

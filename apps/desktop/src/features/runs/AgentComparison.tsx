@@ -39,7 +39,18 @@ export const AGENT_COMPARISON: readonly Row[] = [
         "Comandos de solo lectura dentro del worktree sin preguntar; para leer fuera del worktree pide permiso.",
       ),
       codex: said(
-        "Lee sin preguntar, también fuera del worktree: podría leer los datos de la app.",
+        "Lee sin preguntar, también fuera del worktree, salvo los datos de la app (fila siguiente).",
+      ),
+    },
+  },
+  {
+    topic: "Datos de Kanban IA (base, copias, descriptor del servicio)",
+    values: {
+      claudeCode: said(
+        "En macOS, un sandbox del sistema le impide leerlos o modificarlos directamente, aunque apruebes el permiso; un comando aprobado podría lanzar procesos fuera del sandbox. En Windows no hay sandbox: podría leerlos.",
+      ),
+      codex: fromCode(
+        "La app le da un perfil de permisos que su sandbox aplica a sus comandos (comprobado con «codex sandbox»; en la app, el modelo no intentó leerlos). Windows sin comprobar. Un comando que apruebes para salir del sandbox ya no queda limitado.",
       ),
     },
   },

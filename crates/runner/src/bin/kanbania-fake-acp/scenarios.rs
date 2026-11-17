@@ -17,7 +17,7 @@
 //! `no_modes`, `version2`, `auth`, `set_mode_error`, `cancel`, `ignore_cancel`, `refusal`,
 //! `max_tokens`, `cancelled_unasked`, `cancelled_after_cancelled_answer`, `mode_change`, `config_mode_change`, `flood`, `child`,
 //! `slow_init`, `hang_init`, `permission_on_cancel`, `unknown_id`, `other_session`,
-//! `mode_no_session`, `auth_other_error`, `approval`, `approval_withdraw`.
+//! `mode_no_session`, `auth_other_error`, `approval`, `approval_withdraw`, `read_app_data`.
 //!
 //! Variante **tipo Codex** (HU-021): se activa sola si el entorno trae `CODEX_HOME` (lo fija el
 //! supervisor para Codex). Comprueba el entorno de Codex (`CODEX_HOME` carpeta absoluta,
@@ -194,8 +194,60 @@ impl Fake {
             .unwrap_or(Value::Null);
         let expected: Value =
             serde_json::from_str(kanbania_runner::acp::CODEX_CONFIG).unwrap_or(Value::Null);
-        if config.is_null() || config != expected || config["features"]["remote_plugin"] != false {
+        // HU-023: en una ejecución lleva además el perfil de permisos de la app (datos
+        // denegados, `cwd` = worktree legible); al comprobar el adaptador, no.
+        let mut base = config.clone();
+        let permissions = base
+            .as_object_mut()
+            .map(|m| (m.remove("default_permissions"), m.remove("permissions")));
+        if config.is_null() || base != expected || config["features"]["remote_plugin"] != false {
             return Err("CODEX_CONFIG".into());
+        }
+        // Las dos claves juntas o ninguna (ninguna solo al comprobar el adaptador: en
+        // `session/new` se exige el perfil).
+        let permissions = match permissions {
+            Some((None, None)) | None => None,
+            Some((Some(name), Some(profiles))) => Some((name, profiles)),
+            Some(_) => return Err("CODEX_CONFIG (perfil de permisos incompleto)".into()),
+        };
+        if let Some((name, profiles)) = permissions {
+            let cwd = std::env::current_dir()
+                .ok()
+                .and_then(|d| std::fs::canonicalize(d).ok())
+                .and_then(|d| d.to_str().map(str::to_owned))
+                .unwrap_or_default();
+            let profile = &profiles[name.as_str().unwrap_or_default()];
+            // HU-023: todo denegado, la base entre lo denegado y ningún antecesor del `cwd`
+            // (el modelo creería que su carpeta tampoco es legible).
+            let root = std::path::Path::new(&cwd).ancestors().nth(3);
+            let required: Vec<String> = [
+                "kanbania.sqlite3",
+                "service.json",
+                "backups",
+                "runs",
+                "codex-home",
+            ]
+            .iter()
+            .filter_map(|name| root.map(|r| r.join(name)))
+            .filter_map(|p| p.to_str().map(str::to_owned))
+            .collect();
+            let filesystem = profile["filesystem"].as_object();
+            let well_formed = filesystem.is_some_and(|f| {
+                required.len() == 5
+                    && required
+                        .iter()
+                        .all(|p| f.get(p).is_some_and(|a| a == "deny"))
+                    && f.iter().all(|(path, access)| {
+                        access == "deny" && !std::path::Path::new(&cwd).starts_with(path)
+                    })
+            });
+            if profile["extends"] != ":read-only" || !well_formed {
+                return Err("CODEX_CONFIG (perfil de permisos)".into());
+            }
+            self.note(&format!(
+                "perfil: {} rutas negadas",
+                filesystem.map_or(0, serde_json::Map::len)
+            ));
         }
         Ok(())
     }
@@ -315,6 +367,16 @@ impl Fake {
             eprintln!("FAKE: session/new inesperado");
             return Some(WRONG_INPUT_EXIT);
         }
+        // HU-023: una sesión de Codex (no la comprobación del adaptador) exige el perfil de
+        // permisos de la app; su forma ya la validó `check_flavor_env`.
+        let profiled = std::env::var("CODEX_CONFIG")
+            .ok()
+            .and_then(|c| serde_json::from_str::<Value>(&c).ok())
+            .is_some_and(|c| c.get("default_permissions").is_some());
+        if self.codex && !profiled {
+            eprintln!("FAKE: Codex sin perfil de permisos");
+            return Some(WRONG_INPUT_EXIT);
+        }
         // Como el adaptador real: notificaciones no estándar con el correo de la cuenta y un
         // diagnóstico en stderr.
         send(
@@ -423,6 +485,7 @@ impl Fake {
         }
         match self.scenario.as_str() {
             "ok" => self.ok(id),
+            "read_app_data" => Self::read_app_data(id),
             "permission" => self.permission(id),
             "disconnect" => {
                 message_chunk("m1", "Respuesta a medias");
@@ -508,6 +571,29 @@ impl Fake {
                 Some(2)
             }
         }
+    }
+
+    /// HU-023: intenta leer la base de la app desde el worktree (`<datos>/worktrees/<p>/<i>`) y
+    /// deja en `acceso-datos.txt` del worktree `leido` o `bloqueado: <tipo>`.
+    fn read_app_data(id: &Value) -> Option<i32> {
+        let result = std::env::current_dir().and_then(|cwd| {
+            std::fs::read(
+                cwd.join("..")
+                    .join("..")
+                    .join("..")
+                    .join("kanbania.sqlite3"),
+            )
+        });
+        let note = match result {
+            Ok(_) => "leido".to_owned(),
+            Err(error) => format!("bloqueado: {:?}", error.kind()),
+        };
+        if std::fs::write("acceso-datos.txt", note).is_err() {
+            eprintln!("FAKE: no se pudo escribir en el worktree");
+            return Some(1);
+        }
+        send(&json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}));
+        None
     }
 
     fn ok(&mut self, id: &Value) -> Option<i32> {

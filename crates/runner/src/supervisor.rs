@@ -47,9 +47,11 @@ use tokio::task::JoinSet;
 
 use crate::acp::{
     AcpClient, AcpFailure, AcpLimits, AcpProfile, AcpStop, AgentDeclaration, CLAUDE_CODE_PROFILE,
-    CODEX_HOME_NOTE, CODEX_PROFILE, OpenedSession, PermissionAnswer, PermissionEvent,
-    PermissionPolicy, PermissionReply, TurnEnd, clear_codex_plugin_cache, codex_env,
-    codex_home_config, ensure_codex_home, has_repository_config, permission_bridge,
+    CLAUDE_SANDBOX_AVAILABLE, CLAUDE_SANDBOX_NOTE, CLAUDE_UNCONFINED_NOTE, CODEX_CONFINEMENT_NOTE,
+    CODEX_HOME_NOTE, CODEX_PROFILE, DataConfinement, OpenedSession, PermissionAnswer,
+    PermissionEvent, PermissionPolicy, PermissionReply, TurnEnd, clear_codex_plugin_cache,
+    codex_config, codex_env, codex_home_config, ensure_codex_home, has_repository_config,
+    permission_bridge,
 };
 use crate::output::{AgentKind, MAX_TAIL_LINES, OutputLog, Stream, read_tail};
 use crate::process::{
@@ -713,14 +715,22 @@ enum SessionEnd {
     Missing,
 }
 
-/// Antes de lanzar el adaptador: comprobaciones del agente sobre el worktree y su entorno.
-/// `Err` = motivo para cerrar el intento sin lanzar nada.
+/// Lo que queda listo para lanzar el adaptador.
+struct PreparedAcp {
+    env: Vec<(OsString, OsString)>,
+    /// Lanzar el adaptador dentro del sandbox de macOS (HU-023: Claude Code).
+    sandbox: Option<DataConfinement>,
+}
+
+/// Antes de lanzar el adaptador: comprobaciones del agente sobre el worktree y su entorno, y el
+/// aislamiento de los datos de la app (HU-023). `Err` = motivo para cerrar el intento sin
+/// lanzar nada.
 async fn prepare_acp(
     shared: &Shared,
     agent: AcpAgent,
     worktree: &Path,
     log: &mut OutputLog,
-) -> Result<Vec<(OsString, OsString)>, RunFailure> {
+) -> Result<PreparedAcp, RunFailure> {
     let data_dir = shared.config.data_dir.clone();
     let worktree = worktree.to_path_buf();
     let checked = tokio::task::spawn_blocking(move || {
@@ -729,10 +739,11 @@ async fn prepare_acp(
         let env = adapter_env(agent, &data_dir);
         // Después de `adapter_env`, que crea la carpeta propia si falta.
         let home = agent_home_config(agent, &data_dir);
-        (repository, env, home)
+        let confinement = DataConfinement::new(&data_dir, &worktree);
+        (repository, env, home, confinement)
     })
     .await;
-    let Ok((repository, env, home)) = checked else {
+    let Ok((repository, env, home, confinement)) = checked else {
         log.write_system("No se pudo preparar el lanzamiento del adaptador.");
         return Err(RunFailure::Internal);
     };
@@ -782,10 +793,41 @@ async fn prepare_acp(
             return Err(RunFailure::AgentConfigInCodexHome);
         }
     }
-    if agent == AcpAgent::Codex {
-        log.write_system(CODEX_HOME_NOTE);
-    }
-    Ok(env)
+    // HU-023: sin rutas canónicas no hay aislamiento posible → no se lanza (falla cerrado).
+    let confinement = match confinement {
+        Ok(confinement) => confinement,
+        Err(error) => {
+            log.write_system(&format!(
+                "No se pudo preparar el aislamiento de los datos de la app: {}. No se lanza el \
+                 adaptador.",
+                error.kind()
+            ));
+            return Err(RunFailure::AdapterSpawnFailed(agent));
+        }
+    };
+    let mut env = env;
+    let sandbox = match agent {
+        AcpAgent::Codex => {
+            log.write_system(CODEX_HOME_NOTE);
+            log.write_system(CODEX_CONFINEMENT_NOTE);
+            let config = codex_config(&confinement);
+            for (name, value) in &mut env {
+                if name == "CODEX_CONFIG" {
+                    *value = config.clone().into();
+                }
+            }
+            None
+        }
+        AcpAgent::ClaudeCode if CLAUDE_SANDBOX_AVAILABLE => {
+            log.write_system(CLAUDE_SANDBOX_NOTE);
+            Some(confinement)
+        }
+        AcpAgent::ClaudeCode => {
+            log.write_system(CLAUDE_UNCONFINED_NOTE);
+            None
+        }
+    };
+    Ok(PreparedAcp { env, sandbox })
 }
 
 /// Configuración no admitida en la carpeta propia del agente (Codex: [`codex_home_config`]):
@@ -801,6 +843,26 @@ fn agent_home_config(agent: AcpAgent, data_dir: &Path) -> std::io::Result<Option
     }
 }
 
+/// Motivo por el que no se podría lanzar el adaptador (solo se usa con el sandbox, ver
+/// `run_acp`): no existe → `AdapterMissing`; no es un archivo ejecutable → `AdapterSpawnFailed`.
+fn adapter_unlaunchable(path: &Path, agent: AcpAgent) -> Option<RunFailure> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Some(RunFailure::AdapterMissing(agent));
+        }
+        Err(_) => return Some(RunFailure::AdapterSpawnFailed(agent)),
+    };
+    #[cfg(unix)]
+    let executable = {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    };
+    #[cfg(not(unix))]
+    let executable = true;
+    (!metadata.is_file() || !executable).then_some(RunFailure::AdapterSpawnFailed(agent))
+}
+
 /// Un agente vía ACP (HU-019, HU-021).
 async fn run_acp(
     shared: &Shared,
@@ -812,19 +874,38 @@ async fn run_acp(
 ) {
     let agent = launch.agent;
     let mut log = log;
-    let extra_env = match prepare_acp(shared, agent, &launch.worktree, &mut log).await {
-        Ok(env) => env,
+    let prepared = match prepare_acp(shared, agent, &launch.worktree, &mut log).await {
+        Ok(prepared) => prepared,
         Err(failure) => {
             let _ = log.finish();
             finish(shared, dispatch, RunOutcome::Failed(failure)).await;
             return;
         }
     };
+    // Dentro del sandbox el programa que se lanza es `sandbox-exec`: un adaptador que no existe
+    // o no es ejecutable ya no fallaría al lanzar (fallaría `sandbox-exec` después), así que se
+    // comprueba antes, con los mismos motivos que sin él.
+    if prepared.sandbox.is_some()
+        && let Some(failure) = adapter_unlaunchable(&launch.adapter_path, agent)
+    {
+        log.write_system(match failure {
+            RunFailure::AdapterMissing(_) => "No se pudo lanzar el adaptador: no existe.",
+            _ => "No se pudo lanzar el adaptador: no es un archivo ejecutable.",
+        });
+        let _ = log.finish();
+        finish(shared, dispatch, RunOutcome::Failed(failure)).await;
+        return;
+    }
+
+    let (program, args) = match &prepared.sandbox {
+        Some(confinement) => confinement.sandboxed(&launch.adapter_path, &shared.config.acp_args),
+        None => (launch.adapter_path, shared.config.acp_args.clone()),
+    };
     let spec = ProcessSpec {
-        program: launch.adapter_path,
-        args: shared.config.acp_args.clone(),
+        program,
+        args,
         cwd: launch.worktree.clone(),
-        extra_env,
+        extra_env: prepared.env,
         timeout: launch.timeout,
         grace: shared.config.grace,
     };

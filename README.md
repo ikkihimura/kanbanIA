@@ -285,7 +285,7 @@ Cuando Claude Code pide permiso (escribir un archivo, ejecutar un comando…), e
 - Caducidad: **10 minutos**. Si nadie decide, la app responde «rechazar» y el agente sigue; el tiempo máximo del intento sigue contando.
 - Cancelar el intento (o que termine) invalida las peticiones abiertas y las decididas que aún no se habían entregado.
 - Hasta 8 peticiones abiertas por intento; más se rechazan sin preguntar.
-- **Permitir un comando lo ejecuta de verdad en tu equipo** (dentro del worktree como carpeta de trabajo, pero sin sandbox): permite solo lo que entiendas.
+- **Permitir un comando lo ejecuta de verdad en tu equipo** (dentro del worktree como carpeta de trabajo). Fuera de los datos de la app no hay sandbox (ver «Aislamiento de los datos de la app»): permite solo lo que entiendas.
 - Notificación del sistema opcional (desactivada por defecto): «Sistema» → «Ejecuciones» → «Avisarme…». Solo dice «Un agente pide permiso en #N», sin acción ni alcance. Usa `tauri-plugin-notification` 2.8.0 (Apache-2.0 OR MIT) desde Rust; la ventana no tiene permisos de notificación.
 
 ## Codex por ACP (HU-021, M3)
@@ -307,9 +307,18 @@ Qué hace la app con Codex:
 - Carpeta de Codex (`CODEX_HOME`) y carpeta personal (`HOME`) propias: no carga tu configuración, servidores MCP, reglas, historial ni tus skills de `~/.agents`; desactiva búsqueda web, apps, hooks, memorias, analítica y plugins remotos. Antes de cada lanzamiento borra la caché de plugins que Codex descarga y se niega a lanzar si su carpeta contiene configuración (`config.toml`, reglas, `AGENTS.md`, `prompts`, hooks…) o si el repositorio contiene `.codex/`.
 - Entorno sin claves: nunca pasa `OPENAI_*`, `CODEX_API_KEY`, `CODEX_PATH` ni similares.
 
-Comprobado con Codex real (2026-11-16): lee archivos **sin pedir permiso, también fuera del worktree** (podría leer los datos de la app); al pedir escribir solo ofrece «aceptar» o «cancelar», así que **rechazar una escritura detiene su turno** («El agente detuvo su turno tras un permiso rechazado.»); el modelo no ve ninguna skill con la configuración de la app. No informa del coste.
+Comprobado con Codex real (2026-11-16): lee archivos **sin pedir permiso, también fuera del worktree** (salvo los datos de la app desde HU-023); al pedir escribir solo ofrece «aceptar» o «cancelar», así que **rechazar una escritura detiene su turno** («El agente detuvo su turno tras un permiso rechazado.»); el modelo no ve ninguna skill con la configuración de la app. No informa del coste.
 
 Pruebas reales (consumen tu suscripción; solo con autorización): `KANBANIA_ACP_REAL_CODEX=/ruta/codex-acp KANBANIA_CODEX_HOME=/ruta/codex-home cargo test -p kanbania-runner --test acp_real real_codex -- --ignored --nocapture`.
+
+## Aislamiento de los datos de la app (HU-023, M4)
+
+Decisión del propietario: sandbox por agente. Ningún agente debe leer ni modificar el directorio de datos (base, copias, `service.json`, la salida de otros intentos, `codex-home`, otros worktrees) salvo el worktree de su intento.
+
+- **Claude Code (macOS)**: el adaptador se lanza con `/usr/bin/sandbox-exec` y un perfil que niega leer el contenido y escribir en el directorio de datos salvo el worktree, y ejecutar `launchctl`, `open` y `osascript`. Lo aplica el sistema a todo el árbol de procesos. Comprobado en real (2026-11-17): aprobando su permiso, la herramienta Read falló con `EPERM` en `service.json` y en la base; el `README.md` del worktree sí se leyó (el modelo no usó `cat`; `cat`, enlaces simbólicos, enlaces duros nuevos, `cp`, `mv` y rutas en mayúsculas se comprobaron con `/bin/sh` en el mismo perfil). Un enlace duro que ya existiera en el worktree sí se leería, y un comando aprobado podría lanzar procesos fuera del sandbox por otras vías. **Windows/Linux: sin sandbox** (la app lo avisa).
+- **Codex**: macOS no permite anidar sandboxes y Codex ejecuta cada comando en el suyo, así que no se envuelve. Recibe en `CODEX_CONFIG` un perfil de permisos (`default_permissions`, `extends = ":read-only"`) que niega cada entrada hermana del camino al worktree (nunca una carpeta que lo contenga: con «negar los datos, leer el worktree» el modelo creía que su carpeta tampoco era legible y no trabajaba). Comprobado: `codex sandbox` 0.165 con ese perfil niega la base, `service.json` y `auth.json` y deja leer el worktree; en real, el modelo leyó el worktree y se negó a leer los datos (no llegó a intentarlo, así que la aplicación del sandbox por la vía ACP no se observó). Lo que se cree después en esas carpetas no queda negado; un comando aprobado para salir del sandbox no queda limitado; Windows sin comprobar.
+- Sin rutas canónicas (o si el worktree contuviera los datos) el adaptador no se lanza.
+- Pruebas: `crates/runner/src/acp/confine.rs` (perfil real de macOS con `/bin/sh`), `crates/runner/tests/acp.rs` (`claude_code_cannot_read_the_app_data_from_its_worktree`, `codex_gets_a_permissions_profile_that_denies_the_app_data`), reales `real_claude_code_cannot_read_the_app_data_even_if_approved` y `real_codex_cannot_read_the_app_data` en `acp_real.rs`.
 
 ## Instaladores (HU-022, M4)
 
