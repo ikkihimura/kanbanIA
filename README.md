@@ -1,6 +1,12 @@
 # Kanban IA
 
-Kanban desktop local para historias, épicas y agentes de IA. Estado: **MVP local (M2)**: planificación en el tablero y agentes por MCP, validado solo en macOS; no es una versión alfa distribuible. M3 en curso: cada historia puede «Preparar intento» con una instantánea inmutable e iniciarlo en un worktree propio con un proceso de prueba supervisado o con Claude Code por ACP (ver «Ejecución supervisada» y «Claude Code por ACP»). Para completar un ciclo real (proyecto → agente por MCP → entrega → aceptación) y probar con el paquete de demostración, sigue la [guía local](docs/GUIA-LOCAL.md). Planificación en [`docs/`](docs/) y estado en [`docs/BACKLOG.md`](docs/BACKLOG.md).
+Kanban desktop local para historias, épicas y agentes de IA, con estética retro y avatares pixelados. Estado: **alfa 0.2.0 sin firmar** (M4): planificación en el tablero, agentes por MCP y ejecución supervisada de Claude Code y Codex por ACP con aprobaciones. Verificada solo en macOS 26 (Apple Silicon). Windows sin verificar: la CI para Windows está configurada pero aún no se ha ejecutado.
+
+- **Usar la app:** [instalar, actualizar y desinstalar](docs/INSTALAR.md) · [guía local](docs/GUIA-LOCAL.md) (ciclo completo y paquete de demostración sin claves) · [agentes: MCP, Claude Code y Codex](docs/AGENTES.md) · [copias de seguridad](docs/RESPALDO.md).
+- **Colaborar:** [cómo contribuir](CONTRIBUTING.md) · [reportar un problema de seguridad](SECURITY.md) · planificación en [`docs/`](docs/) y estado en [`docs/BACKLOG.md`](docs/BACKLOG.md).
+- **Licencia:** a tu elección, [MIT](LICENSE-MIT) o [Apache-2.0](LICENSE-APACHE).
+
+Este README describe el desarrollo (compilar desde el código); para usar la app basta el instalador.
 
 ## Requisitos
 
@@ -168,7 +174,7 @@ Cada historia tiene un número por proyecto (`#N`) que no se reutiliza, título 
 ## Copias de seguridad
 
 - En «Sistema» → «Copias de seguridad»: **Crear copia ahora**, **Restaurar…** (con confirmación) y **Guardar en carpeta…** (p. ej. un disco externo); también **Restaurar desde una carpeta…**. El panel aparece aunque la base no se pueda abrir, para recuperarla.
-- Cada copia es una carpeta con la base completa, coherente aunque haya escrituras en curso (`VACUUM INTO`), y un `manifest.json` con la versión de esquema, sha256 y lo que **no** incluye: el contenido de los repositorios (solo sus rutas), los registros de ejecución de agentes (llegarán en M3) y las exportaciones Markdown (que no son una copia de seguridad).
+- Cada copia es una carpeta con la base completa, coherente aunque haya escrituras en curso (`VACUUM INTO`), y un `manifest.json` con la versión de esquema, sha256 y lo que **no** incluye: el contenido de los repositorios (solo sus rutas), los registros de ejecución de agentes (`runs/`), los worktrees y las exportaciones Markdown (que no son una copia de seguridad).
 - Restaurar verifica la copia (hashes, integridad, claves foráneas, esquema idéntico al de esta versión o anterior; una copia antigua se migra al abrir), guarda antes una copia automática del estado actual para deshacer y sustituye la base sin que nada escriba mientras tanto. Si la base restaurada no abre, se vuelve sola al estado anterior.
 - Se conservan las 10 copias manuales y las 10 automáticas más recientes en `backups/`.
 
@@ -209,6 +215,8 @@ Configuración (requiere `cargo build --release -p kanbania-mcp`; el binario que
 ```sh
 claude mcp add kanbania --scope local -e KANBANIA_AGENT_TOKEN=kbia_… -- /ruta/a/target/release/kanbania-mcp
 ```
+
+El token queda en el historial del shell y en claro en la configuración de Claude Code (`~/.claude.json`): ver [docs/AGENTES.md](docs/AGENTES.md).
 
 Si prefieres un `.mcp.json` de proyecto (que se versiona), **no pongas el token en él**: usa la expansión de variables y define `KANBANIA_AGENT_TOKEN` en tu entorno.
 
@@ -303,10 +311,18 @@ Comprobado con Codex real (2026-11-16): lee archivos **sin pedir permiso, tambi�
 
 Pruebas reales (consumen tu suscripción; solo con autorización): `KANBANIA_ACP_REAL_CODEX=/ruta/codex-acp KANBANIA_CODEX_HOME=/ruta/codex-home cargo test -p kanbania-runner --test acp_real real_codex -- --ignored --nocapture`.
 
+## Instaladores (HU-022, M4)
+
+- El workflow **Instaladores** (`.github/workflows/installers.yml`) se lanza a mano en GitHub Actions desde `main`, sin cachés: audita las dependencias (`npm audit --omit=dev`, `cargo audit` 0.22.2), pasa `npm run check` y genera, **sin firmar**, el `.dmg` de macOS (Apple Silicon) y el `.msi` y el `-setup.exe` (NSIS) de Windows x64, con sus SHA-256 (integridad de la descarga, no autenticidad), como artefactos del workflow (30 días). No crea releases.
+- En local: `CI=true npm run tauri -- build --bundles dmg` (macOS; sin `CI=true` el AppleScript que decora el `.dmg` en Finder puede agotar el tiempo) o `npm run tauri -- build --bundles msi,nsis` (Windows); salen en `target/release/bundle/`. La app de macOS lleva firma ad-hoc del paquete (`bundle.macOS.signingIdentity: "-"`): sin ella, con cuarentena, macOS la da por «dañada».
+- `cargo audit` ignora RUSTSEC-2026-0459 (SQLite incluida por sqlx 0.9.0) con su motivo en `.cargo/audit.toml`: está mitigada rechazando las copias externas cuyo `-wal` no corresponde a la base, y se retirará al subir sqlx.
+- Firma y notarización: **bloqueadas** (sin credenciales autorizadas). Cómo abrir una app sin firmar: [docs/INSTALAR.md](docs/INSTALAR.md).
+- Versión: `version` del workspace Cargo y de los `package.json` (Tauri toma la del crate de la app). Súbela en ambos antes de generar una versión nueva: el instalador de Windows solo actualiza a una versión mayor.
+
 ## Notas
 
 - Identificador de la app: `dev.ikkidev.kanbania`.
 - Iconos actuales: los de la plantilla de Tauri, provisionales hasta definir la marca.
 - CSP estricta en producción (`tauri.conf.json`); en desarrollo se desactiva (`devCsp: null`) para la recarga en caliente de Vite.
 - `npm audit` reporta avisos moderados de `minimatch` en dependencias de ESLint (solo desarrollo, sin impacto en la app).
-- Licencia: pendiente de decisión del propietario.
+- Licencia: MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`; decisión del propietario, HU-022).

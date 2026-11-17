@@ -41,8 +41,9 @@ const WAL_FILE: &str = "kanbania.sqlite3-wal";
 pub const MAX_KEPT: usize = 10;
 
 /// Lo que una copia no contiene. Se guarda en el manifiesto y se muestra en la app.
-const EXCLUDES: [&str; 4] = [
+const EXCLUDES: [&str; 5] = [
     "El contenido de los repositorios vinculados (solo se guardan sus rutas).",
+    "La carpeta de Codex de la app («codex-home/», con el inicio de sesión de Codex).",
     "La salida de los intentos (registros JSONL en «runs/», fuera de la base).",
     "Los worktrees de los intentos (carpetas en «worktrees/»; sus ramas están en el repositorio).",
     "Las carpetas exportadas en Markdown: son una exportación de la planificación, no una copia.",
@@ -647,7 +648,58 @@ fn copy_verified(source: &Path, manifest: &Manifest, work: &Path) -> Result<(), 
             ));
         }
     }
-    Ok(())
+    check_wal_pairing(work)
+}
+
+/// Mitigación de RUSTSEC-2026-0459 (CVE-2026-119375): la SQLite incluida por sqlx 0.9.0
+/// (`libsqlite3-sys` < 0.38, SQLite < 3.54) puede devolver memoria sin inicializar al abrir una
+/// base junto a un `-wal` con otro tamaño de página. Una copia de una carpeta externa la pudo
+/// preparar otra persona: antes de abrirla, el `-wal` (si trae) debe ser un WAL válido con el
+/// mismo tamaño de página que la base. Retirar cuando sqlx admita `libsqlite3-sys` ≥ 0.39.
+fn check_wal_pairing(work: &Path) -> Result<(), CoreError> {
+    let wal = work.join(WAL_FILE);
+    let wal_bytes = match std::fs::read(&wal) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io(error)),
+    };
+    if wal_bytes.is_empty() {
+        return Ok(());
+    }
+    let damaged = || invalid("La copia está dañada: su registro WAL no corresponde a la base.");
+    let mut header = [0_u8; 100];
+    let mut file = std::fs::File::open(work.join(DATABASE_FILE)).map_err(io)?;
+    std::io::Read::read_exact(&mut file, &mut header).map_err(|_| damaged())?;
+    database_page_size(&header)
+        .zip(wal_page_size(&wal_bytes))
+        .filter(|(db, wal)| db == wal)
+        .map(|_| ())
+        .ok_or_else(damaged)
+}
+
+/// Tamaño de página de la cabecera de una base SQLite (formato de archivo, offset 16).
+fn database_page_size(header: &[u8; 100]) -> Option<u32> {
+    if !header.starts_with(b"SQLite format 3\0") {
+        return None;
+    }
+    match u16::from_be_bytes([header[16], header[17]]) {
+        1 => Some(65_536),
+        n if n >= 512 && n.is_power_of_two() => Some(u32::from(n)),
+        _ => None,
+    }
+}
+
+/// Tamaño de página de la cabecera de un WAL (magia 0x377f0682/3, offset 8).
+fn wal_page_size(wal: &[u8]) -> Option<u32> {
+    let field = |at: usize| {
+        wal.get(at..at + 4)
+            .and_then(|b| <[u8; 4]>::try_from(b).ok())
+            .map(u32::from_be_bytes)
+    };
+    if !matches!(field(0)?, 0x377f_0682 | 0x377f_0683) {
+        return None;
+    }
+    field(8).filter(|n| (512..=65_536).contains(n) && n.is_power_of_two())
 }
 
 /// Integridad, claves foráneas y esquema compatible de la base copiada.
@@ -809,6 +861,38 @@ mod tests {
         assert_eq!(civil_from_days(20_402), (2025, 11, 10));
         assert_eq!(civil_from_days(-1), (1969, 12, 31));
         assert_eq!(civil_from_days(11_016), (2000, 2, 29));
+    }
+
+    fn db_header(raw_page_size: u16) -> [u8; 100] {
+        let mut h = [0_u8; 100];
+        h[..16].copy_from_slice(b"SQLite format 3\0");
+        h[16..18].copy_from_slice(&raw_page_size.to_be_bytes());
+        h
+    }
+
+    fn wal_header(magic: u32, page_size: u32) -> Vec<u8> {
+        let mut w = vec![0_u8; 32];
+        w[..4].copy_from_slice(&magic.to_be_bytes());
+        w[8..12].copy_from_slice(&page_size.to_be_bytes());
+        w
+    }
+
+    #[test]
+    fn page_sizes_are_read_from_both_headers() {
+        assert_eq!(database_page_size(&db_header(4096)), Some(4096));
+        assert_eq!(database_page_size(&db_header(1)), Some(65_536));
+        assert_eq!(database_page_size(&db_header(1000)), None);
+        let mut not_sqlite = db_header(4096);
+        not_sqlite[0] = b'X';
+        assert_eq!(database_page_size(&not_sqlite), None);
+        assert_eq!(wal_page_size(&wal_header(0x377f_0682, 4096)), Some(4096));
+        assert_eq!(
+            wal_page_size(&wal_header(0x377f_0683, 65_536)),
+            Some(65_536)
+        );
+        assert_eq!(wal_page_size(&wal_header(0x1234_5678, 4096)), None);
+        assert_eq!(wal_page_size(&wal_header(0x377f_0682, 3000)), None);
+        assert_eq!(wal_page_size(&[0x37, 0x7f]), None);
     }
 
     #[test]

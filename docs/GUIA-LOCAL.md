@@ -1,6 +1,6 @@
 # Guía local del MVP (M2)
 
-Cómo completar un ciclo real de trabajo con Kanban IA en tu equipo: planificar en el tablero, dejar que un agente de IA tome una historia por MCP, revisar su entrega y aceptarla. Es una **validación local del MVP**, no una versión alfa distribuible: no hay instalador, firma ni actualizaciones (eso es HU-022).
+Cómo completar un ciclo real de trabajo con Kanban IA en tu equipo: planificar en el tablero, dejar que un agente de IA tome una historia por MCP, revisar su entrega y aceptarla. Se escribió como **validación local del MVP** compilando desde el código. Para instalar la alfa con instaladores, actualizar y conocer sus limitaciones, ver [INSTALAR](INSTALAR.md); agentes por MCP y ACP en [AGENTES](AGENTES.md); copias y exportación en [RESPALDO](RESPALDO.md).
 
 Detalle de cada función en el [README](../README.md); estado y evidencia en [BACKLOG](BACKLOG.md).
 
@@ -45,6 +45,8 @@ El paquete solo trae planificación: columnas, 2 épicas, 9 historias con criter
    claude mcp add kanbania --scope local -e KANBANIA_AGENT_TOKEN=kbia_… -- /ruta/a/target/release/kanbania-mcp
    ```
 
+   Este comando deja el token en el historial de tu shell y Claude Code lo guarda en claro en su configuración (con `--scope local`, `~/.claude.json`). Empieza la línea con un espacio (con `HIST_IGNORE_SPACE` en zsh o `HISTCONTROL=ignorespace` en bash) o bórrala del historial, y revoca la credencial si compartes ese archivo.
+
    Con un perfil de demostración añade `-e KANBANIA_DATA_DIR=/ruta/absoluta/perfil-demo`.
 
 6. **Trabajo del agente**: pide al agente algo como «Consulta las historias listas en Kanban IA, reclama la #N, haz el trabajo y entrega el resultado con un resumen y referencias». El agente usa `list_ready_stories`, `get_story_context`, `claim_story`, y puede usar `renew_claim`, `report_blocker` y `create_subtask` antes de `submit_result`. Mientras tanto, en la app:
@@ -67,7 +69,7 @@ El paquete solo trae planificación: columnas, 2 épicas, 9 historias con criter
 | Agente (MCP) | `[unauthorized] Credencial no válida o revocada…` | La credencial se revocó o no existe: crea otra en la app. |
 | Agente (MCP) | `[claim_ended]` | El reclamo terminó (venció, entregó, una persona lo liberó o reasignó, se archivó o aceptó la historia, o se revocó la credencial). El agente debe dejar esa historia. |
 | Agente (MCP) | Mensaje sobre permisos del descriptor del servicio | Cierra y vuelve a abrir la app: se regenera `service.json` con permisos solo del usuario. |
-| Agente (MCP) | Versión de API incompatible | Compila `kanbania-mcp` desde el mismo código que la app. |
+| Agente (MCP) | Versión de API incompatible | Usa el `kanbania-mcp` del mismo artefacto que la app, o compílalo desde el mismo código. |
 | App | «Servicio local: no disponible…» en «Acceso de agentes» | Los agentes no pueden conectarse: cierra Kanban IA y vuelve a abrirlo. |
 | App | «Kanban IA ya está abierto con estos datos en otra ventana o proceso…» | Cierra la otra ventana y pulsa «Reintentar». |
 | App | Errores de migración o esquema más reciente | Los datos no se han tocado; ver README, «Datos locales», y «Sistema» → «Copias de seguridad». |
@@ -86,7 +88,7 @@ Antes de probar con datos que te importen: «Sistema» → «Copias de seguridad
 
 ## 7. Limitaciones y errores conocidos
 
-- Sin instalador, firma ni actualizaciones; el binario MCP se compila a mano y su ruta no es estable (HU-022).
+- El binario MCP no va dentro del instalador: viene aparte en el artefacto del workflow o se compila ([AGENTES](AGENTES.md)). Instaladores, firma y actualización: [INSTALAR](INSTALAR.md).
 - El MCP necesita la app abierta; un solo host por perfil de datos.
 - Un agente no puede volver a reclamar su historia si una persona la mueve a «En curso»: devuélvela a Backlog o Listo.
 - `[claim_ended]` no distingue el motivo exacto del cierre.
@@ -94,11 +96,10 @@ Antes de probar con datos que te importen: «Sistema» → «Copias de seguridad
 - Una entrega por MCP está limitada a 64 KB en total.
 - `mutation_receipts` (recibos de idempotencia) no tiene retención.
 - En Windows, `service.json` hereda los permisos del directorio de datos: no uses `KANBANIA_DATA_DIR` en una carpeta compartida.
-- No hay ejecución ni supervisión de procesos de agentes (M3): la app solo registra lo que el agente reporta.
+- Por MCP, la app solo registra lo que el agente reporta. Las ejecuciones supervisadas (Claude Code y Codex por ACP) están en [AGENTES.md](AGENTES.md).
 - Importar no restaura bloqueos: el paquete los lleva como dato informativo y la historia llega sin bloquear.
 - Los nombres de archivo de una exportación sustituyen tildes y eñes por `-` (p. ej. `0005-planificar-el-men-semanal.md`); el contenido no cambia.
 - En «Acceso de agentes», el estado del servicio local se lee al abrir la sección: no se actualiza solo.
-- Licencia pendiente de decisión del propietario.
 
 ## 8. Evidencia de pruebas
 

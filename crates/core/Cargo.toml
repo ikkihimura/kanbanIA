@@ -3,6 +3,7 @@ name = "kanbania-core"
 description = "Casos de uso y reglas de Kanban IA, independientes del transporte"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 

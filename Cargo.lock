@@ -2119,7 +2119,7 @@ dependencies = [
 
 [[package]]
 name = "kanbania-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dunce",
  "getrandom 0.4.3",
@@ -2138,7 +2138,7 @@ dependencies = [
 
 [[package]]
 name = "kanbania-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "kanbania-core",
  "kanbania-local-service",
@@ -2154,7 +2154,7 @@ dependencies = [
 
 [[package]]
 name = "kanbania-local-service"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "getrandom 0.4.3",
@@ -2172,7 +2172,7 @@ dependencies = [
 
 [[package]]
 name = "kanbania-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "kanbania-core",
  "kanbania-local-service",
@@ -2187,7 +2187,7 @@ dependencies = [
 
 [[package]]
 name = "kanbania-runner"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dunce",
  "kanbania-core",

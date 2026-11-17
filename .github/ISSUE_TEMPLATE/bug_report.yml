@@ -1,0 +1,87 @@
+name: Informe de error
+description: Algo no funciona como esperabas en Kanban IA.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Gracias por informar. Si es una vulnerabilidad, **no la publiques aquí**: usa "Report a vulnerability" en la pestaña Security del repositorio (ver SECURITY.md).
+
+        **Nunca pegues** tokens de agentes (`kbia_…`), claves de proveedores, `service.json`, bases de datos, copias de seguridad, la carpeta `codex-home` (incluye `auth.json`) ni archivos completos de `runs/` (llevan rutas y contenido del repositorio): copia solo las líneas necesarias.
+  - type: input
+    id: version
+    attributes:
+      label: Versión de Kanban IA
+      description: Por ejemplo, 0.2.0. Si compilaste desde el código, indica el commit.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Sistema operativo
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Windows 11 x64
+        - Windows 10 x64
+        - Otro
+    validations:
+      required: true
+  - type: input
+    id: os-version
+    attributes:
+      label: Versión del sistema
+      description: Por ejemplo, macOS 26.1 o Windows 11 24H2.
+  - type: dropdown
+    id: install
+    attributes:
+      label: Cómo la instalaste
+      options:
+        - Instalador .dmg
+        - Instalador .msi
+        - Instalador -setup.exe
+        - Compilada desde el código
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Pasos para reproducirlo
+      placeholder: |
+        1. …
+        2. …
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Qué esperabas
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Qué ocurrió
+      description: Incluye el mensaje o código de error que muestra la app (por ejemplo, `storage_migration_failed`).
+    validations:
+      required: true
+  - type: textarea
+    id: agent
+    attributes:
+      label: Agente implicado (si aplica)
+      description: MCP o ACP, agente (Claude Code, Codex…) y versión del adaptador.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Registros
+      description: |
+        **Antes de pegar, quita tokens, claves, rutas personales (p. ej. tu nombre de usuario en `/Users/…` o `C:\Users\…`) y correos.** La salida de los intentos y los diagnósticos pueden contenerlos.
+      render: text
+  - type: checkboxes
+    id: secrets
+    attributes:
+      label: Comprobación
+      options:
+        - label: He quitado secretos (tokens, claves, rutas personales y correos) de todo lo que he pegado.
+          required: true

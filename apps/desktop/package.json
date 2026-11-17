@@ -1,6 +1,8 @@
 {
   "name": "@kanbania/desktop",
   "private": true,
+  "version": "0.2.0",
+  "license": "MIT OR Apache-2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

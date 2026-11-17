@@ -1,0 +1,130 @@
+name: Instaladores
+
+# Solo a mano (Actions → Instaladores → Run workflow). Genera los instaladores SIN FIRMAR de la
+# alfa como artefactos del workflow (caducan a los 30 días). No crea releases ni publica nada:
+# eso exige una instrucción explícita del propietario (HU-022).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installers-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: auditoría de dependencias
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Pin npm (packageManager)
+        run: npm install -g npm@11.4.2
+
+      # Solo las dependencias que llegan a la app (las de desarrollo tienen avisos conocidos de
+      # ESLint, documentados en README).
+      - name: npm audit (producción)
+        run: npm audit --omit=dev
+
+      - name: Rust toolchain
+        run: rustup toolchain install
+
+      # cargo-audit 0.22.2 (2026-06-05); la base RustSec se descarga en cada ejecución.
+      - name: cargo audit
+        run: |
+          cargo install cargo-audit --locked --version 0.22.2
+          cargo audit
+
+  bundle:
+    name: instaladores (${{ matrix.os }})
+    needs: audit
+    # Solo desde main: quien descarga no ve de qué rama salió un artefacto.
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Apple Silicon (el runner macos-26 es arm64). Intel no se genera en esta alfa.
+          - os: macos-26
+            bundles: dmg
+            paths: |
+              target/release/bundle/dmg/*.dmg
+              target/release/kanbania-mcp
+          - os: windows-2025
+            bundles: msi,nsis
+            paths: |
+              target/release/bundle/msi/*.msi
+              target/release/bundle/nsis/*-setup.exe
+              target/release/kanbania-mcp.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      # Sin cachés (npm ni Rust) en el empaquetado: un instalador sale siempre de una compilación
+      # limpia, nunca de artefactos restaurados que otro workflow pudo escribir.
+      - name: Rust toolchain
+        run: rustup toolchain install
+
+      - name: Pin npm (packageManager)
+        run: npm install -g npm@11.4.2
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # Las mismas comprobaciones que CI antes de empaquetar: un instalador nunca sale de un
+      # árbol que no pasa las pruebas.
+      - name: Comprobaciones (npm run check)
+        run: npm run check
+
+      - name: Contratos generados al día
+        shell: bash
+        run: |
+          changes="$(git status --porcelain -- apps/desktop/src/contracts/generated)"
+          if [ -n "$changes" ]; then
+            echo "Tipos generados desactualizados; ejecuta cargo test y versiona el resultado:"
+            echo "$changes"
+            exit 1
+          fi
+
+      # Sin firma ni notarización (no hay credenciales autorizadas): la distribución pública
+      # queda marcada como «alfa sin firmar» (docs/INSTALAR.md). En macOS solo firma ad-hoc
+      # (`bundle.macOS.signingIdentity: "-"`). Con CI=true (lo pone Actions) el .dmg no decora Finder.
+      - name: Empaquetar
+        run: npm run tauri -- build --bundles ${{ matrix.bundles }} -- --locked
+
+      # Adaptador MCP para agentes (docs/AGENTES.md): binario aparte, no va dentro del instalador.
+      - name: kanbania-mcp
+        run: cargo build --release --locked -p kanbania-mcp
+
+      - name: Huellas SHA-256
+        shell: bash
+        run: |
+          shopt -s nullglob
+          for f in target/release/bundle/dmg/*.dmg target/release/bundle/msi/*.msi target/release/bundle/nsis/*-setup.exe target/release/kanbania-mcp target/release/kanbania-mcp.exe; do
+            [ -f "$f" ] || continue
+            if command -v sha256sum >/dev/null; then sha256sum "$f"; else shasum -a 256 "$f"; fi
+          done | tee SHA256SUMS-${{ matrix.os }}.txt
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kanban-ia-${{ matrix.os }}
+          path: |
+            ${{ matrix.paths }}
+            SHA256SUMS-${{ matrix.os }}.txt
+          if-no-files-found: error
+          retention-days: 30

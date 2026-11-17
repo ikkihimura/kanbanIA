@@ -3,6 +3,7 @@ name = "kanbania-runner"
 description = "Ejecución local de intentos de Kanban IA: worktrees de Git, procesos supervisados y salida acotada"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 

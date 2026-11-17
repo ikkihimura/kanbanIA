@@ -1,6 +1,8 @@
 {
   "name": "kanbania",
   "private": true,
+  "version": "0.2.0",
+  "license": "MIT OR Apache-2.0",
   "type": "module",
   "packageManager": "npm@11.4.2",
   "workspaces": [

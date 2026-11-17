@@ -577,3 +577,68 @@ async fn a_copy_is_verified_with_the_store_open_and_without_changes() {
         .count();
     assert_eq!(leftovers, 0);
 }
+
+/// RUSTSEC-2026-0459 (CVE-2026-119375): una carpeta externa con un `-wal` de otro tamaño de
+/// página no se abre nunca; uno con el mismo tamaño sí (las copias propias pueden traer WAL).
+#[tokio::test]
+async fn a_copy_whose_wal_page_size_differs_from_the_database_is_rejected() {
+    fn sha(bytes: &[u8]) -> String {
+        use sha2::Digest;
+        sha2::Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+    fn craft(dir: &Path, wal_page_size: u32) {
+        let mut wal = vec![0_u8; 32];
+        wal[..4].copy_from_slice(&0x377f_0682_u32.to_be_bytes());
+        wal[8..12].copy_from_slice(&wal_page_size.to_be_bytes());
+        std::fs::write(dir.join("kanbania.sqlite3-wal"), &wal).unwrap();
+        let path = dir.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let files = manifest["files"].as_array_mut().unwrap();
+        files.retain(|f| f["name"] == DATABASE_FILE);
+        files.push(serde_json::json!({
+            "name": "kanbania.sqlite3-wal", "bytes": wal.len(), "sha256": sha(&wal)
+        }));
+        std::fs::write(&path, manifest.to_string()).unwrap();
+    }
+
+    let data = tempfile::tempdir().unwrap();
+    let store = Store::open(data.path()).await.unwrap();
+    let p = project(&store).await;
+    add_story(&store, &p, "de la copia").await;
+    let backup = store.create_backup(BackupKind::Manual).await.unwrap();
+    add_story(&store, &p, "posterior").await;
+    let external = tempfile::tempdir().unwrap();
+    let folder = external
+        .path()
+        .join(save_backup_copy(data.path(), &backup.id, external.path()).unwrap());
+    let page_size: i64 = {
+        let pool = store.reader();
+        sqlx::query_scalar("PRAGMA page_size")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    };
+    let page_size = u32::try_from(page_size).unwrap();
+
+    craft(&folder, page_size * 2);
+    let err = verify_backup(data.path(), &folder).await.unwrap_err();
+    assert_eq!(err.code(), ErrorCode::Validation, "{err:?}");
+    store.close().await;
+    drop(store);
+    let err = restore_backup(data.path(), &folder).await.unwrap_err();
+    assert_eq!(err.code(), ErrorCode::Validation, "{err:?}");
+    let store = Store::open(data.path()).await.unwrap();
+    assert_eq!(titles(&store).await.len(), 2, "la base no cambió");
+    store.close().await;
+    drop(store);
+
+    // Mismo tamaño de página (WAL sin tramas): se restaura.
+    craft(&folder, page_size);
+    restore_backup(data.path(), &folder).await.unwrap();
+    let store = Store::open(data.path()).await.unwrap();
+    assert_eq!(titles(&store).await, ["de la copia"]);
+}

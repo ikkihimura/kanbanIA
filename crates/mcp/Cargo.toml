@@ -3,6 +3,7 @@ name = "kanbania-mcp"
 description = "Servidor MCP (stdio) de Kanban IA: adaptador hacia el servicio local de la app abierta"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 

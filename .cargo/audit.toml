@@ -1,0 +1,13 @@
+# Configuración de `cargo audit` (HU-022). Cada excepción lleva su motivo y su condición de salida.
+[advisories]
+ignore = [
+    # RUSTSEC-2026-0459 / CVE-2026-119375 (SQLite < 3.54: memoria sin inicializar al abrir una
+    # base con un `-wal` de otro tamaño de página). sqlx 0.9.0 (la última) limita
+    # `libsqlite3-sys` a < 0.38 y la corrección llega en 0.39. Mitigado en
+    # `crates/core/src/platform/storage/backup.rs` (`check_wal_pairing`): una copia externa con un
+    # `-wal` de otro tamaño de página se rechaza antes de abrirla (prueba
+    # `a_copy_whose_wal_page_size_differs_from_the_database_is_rejected`). La base propia la
+    # escribe solo la app. Decisión del propietario (2026-11-17). Retirar al subir a una sqlx que
+    # admita `libsqlite3-sys` >= 0.39.
+    "RUSTSEC-2026-0459",
+]
