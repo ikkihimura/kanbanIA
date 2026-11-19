@@ -1086,6 +1086,34 @@ async fn adapter_without_interpreter_is_missing() {
     );
 }
 
+/// Con guardián (HU-024), un adaptador «ejecutable» que el sistema no puede ejecutar (sin
+/// cabecera ni formato válido) ya no falla al lanzar: el guardián sale con 125 y el intento
+/// (o `sandbox-exec`, en macOS, con 126) y el intento sigue diciendo que no se pudo lanzar el
+/// adaptador.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_adapter_the_system_cannot_execute_fails_to_launch() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = Env::new().await;
+    let file = env
+        .base
+        .join("adaptador con espacios")
+        .join("no ejecutable");
+    std::fs::write(&file, [0u8, 1, 2, 3, 0xff, 0xfe]).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    env.set_adapter(Some(file.to_str().unwrap().to_owned()))
+        .await;
+    let (run, detail) = env.scenario(&[]).await;
+    assert_failed(
+        &detail,
+        "No se pudo lanzar el adaptador de Claude Code configurado. Consulta el registro del \
+         intento.",
+    );
+    // El aviso es del guardián o, en macOS, de `sandbox-exec` (va entre ambos).
+    let stderr = env.texts(&run, RunOutputStream::Stderr);
+    assert_eq!(stderr.len(), 1, "{stderr:?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn probe_reports_initialize_only() {
     let env = Env::new().await;
@@ -1278,6 +1306,7 @@ async fn reject_all_policy_answers_without_asking() {
         extra_env: Vec::new(),
         timeout: Duration::from_secs(60),
         grace: Duration::from_secs(1),
+        guard: None,
     };
     let (process, io) = RunningProcess::spawn_protocol(spec, log).unwrap();
     let deadline = process.deadline();

@@ -28,6 +28,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 
 use crate::env::{adapter_extra_env, allowed_env, is_adapter_forbidden, valid_extra_name};
+use crate::guard::GuardLauncher;
 use crate::output::{AgentKind, MAX_LINE_BYTES, OutputLog, OutputStats, Stream};
 use crate::tree::ProcessTree;
 
@@ -55,6 +56,11 @@ pub struct ProcessSpec {
     pub timeout: Duration,
     /// Gracia entre el aviso y la terminación forzosa (Unix; en Windows no hay aviso).
     pub grace: Duration,
+    /// Guardián (HU-024, Unix): si se indica, se lanza el guardián y él lanza `program`, para
+    /// que el árbol termine aunque la app muera de golpe. En Windows se ignora (lo hace el Job
+    /// Object). Con guardián, un programa que no existe ya no falla al lanzar: el guardián
+    /// termina con [`crate::guard::EXIT_NOT_FOUND`]; quien llama debe comprobarlo antes.
+    pub guard: Option<GuardLauncher>,
 }
 
 /// Cómo terminó.
@@ -419,9 +425,8 @@ fn launch(spec: &ProcessSpec, mode: Mode) -> Result<ProcessTree, SpawnError> {
         kind: SpawnErrorKind::InvalidSpec,
         detail,
     })?;
-    let mut command = Command::new(&spec.program);
+    let mut command = guarded_command(spec);
     command
-        .args(&spec.args)
         .current_dir(&spec.cwd)
         .env_clear()
         .envs(allowed_env());
@@ -444,6 +449,19 @@ fn launch(spec: &ProcessSpec, mode: Mode) -> Result<ProcessTree, SpawnError> {
         },
         detail: error.to_string(),
     })
+}
+
+/// Programa y argumentos: directamente o, con guardián (Unix), a través de él.
+fn guarded_command(spec: &ProcessSpec) -> Command {
+    #[cfg(unix)]
+    if let Some(guard) = &spec.guard {
+        let mut command = Command::new(&guard.program);
+        command.args(guard.wrap(spec.grace, &spec.program, &spec.args));
+        return command;
+    }
+    let mut command = Command::new(&spec.program);
+    command.args(&spec.args);
+    command
 }
 
 /// Lanza en modo protocolo y toma stdin y stdout.
@@ -484,6 +502,13 @@ fn outcome_of(status: ExitStatus) -> ProcessOutcome {
 fn validate(spec: &ProcessSpec, mode: Mode) -> Result<(), String> {
     if !spec.program.is_absolute() {
         return Err("el programa debe ser una ruta absoluta".into());
+    }
+    if spec
+        .guard
+        .as_ref()
+        .is_some_and(|guard| !guard.program.is_absolute())
+    {
+        return Err("el guardián debe ser una ruta absoluta".into());
     }
     if !spec.cwd.is_absolute() || !spec.cwd.is_dir() {
         return Err("la carpeta de trabajo debe ser absoluta y existir".into());

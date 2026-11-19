@@ -26,6 +26,7 @@ fn spec(args: &[&str], cwd: &Path) -> ProcessSpec {
         extra_env: Vec::new(),
         timeout: Duration::from_secs(60),
         grace: Duration::from_secs(2),
+        guard: None,
     }
 }
 
@@ -223,6 +224,7 @@ async fn grace_period_escalates_to_sigkill() {
         extra_env: Vec::new(),
         timeout: Duration::from_secs(60),
         grace: Duration::from_millis(500),
+        guard: None,
     };
     let log = OutputLog::create(&out).unwrap();
     let process = RunningProcess::spawn(spec, log).unwrap();
@@ -256,6 +258,7 @@ async fn normal_exit_kills_leftover_descendants() {
         extra_env: Vec::new(),
         timeout: Duration::from_secs(60),
         grace: Duration::from_millis(500),
+        guard: None,
     };
     let report = run(spec, &out).await;
     assert_eq!(report.outcome, ProcessOutcome::Exited { code: 0 });

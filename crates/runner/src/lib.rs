@@ -9,6 +9,7 @@
 //! - [`output`]: salida del proceso en JSONL acotado y rotado, y lectura de la cola para la UI;
 //! - [`worktree`]: crear, inspeccionar y eliminar worktrees con la CLI de Git, sin tocar nunca
 //!   el árbol de trabajo del repositorio original;
+//! - [`guard`]: guardián que termina el árbol de un intento si la app muere de golpe (Unix);
 //! - [`test_process`]: el proceso de prueba incluido («Proceso de prueba (sin IA)»);
 //! - [`supervisor`]: orquesta el núcleo (`runs::supervisor`) y los procesos.
 //!
@@ -17,6 +18,7 @@
 
 pub mod acp;
 mod env;
+pub mod guard;
 pub mod output;
 pub mod process;
 mod redact;

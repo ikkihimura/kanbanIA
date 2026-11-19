@@ -71,6 +71,9 @@ pub async fn probe_adapter(
         extra_env,
         timeout: limit,
         grace: PROBE_GRACE,
+        // Sin guardián (HU-024): solo `initialize`, sin sesión ni trabajo, ≤ 30 s; si la app
+        // muere, el adaptador ve cerrada su entrada.
+        guard: None,
     };
     let (process, io) =
         RunningProcess::spawn_protocol_unlogged(spec).map_err(|error| match error.kind {

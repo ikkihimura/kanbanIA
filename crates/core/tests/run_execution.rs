@@ -927,7 +927,9 @@ async fn startup_interrupts_unverifiable_runs_and_voids_pending_starts() {
         assert_eq!(run.state, RunState::Interrupted);
         assert_eq!(
             run.end_reason.as_deref(),
-            Some("La app se cerró durante la ejecución: no se puede verificar el proceso.")
+            Some(
+                "La app se cerró de forma inesperada durante la ejecución: sus procesos deberían haberse detenido con ella y el worktree, si llegó a crearse, se conserva para revisarlo."
+            )
         );
     }
     // Los de la cola no se tocan.

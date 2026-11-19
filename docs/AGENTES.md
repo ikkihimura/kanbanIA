@@ -102,5 +102,5 @@ Cuando el agente pide permiso (escribir un archivo, ejecutar un comando…), el 
 - Los adaptadores npm necesitan `node` en `PATH`. Si usas nvm y abres la app desde Finder, no lo encuentran: abre la app desde una terminal donde `node` funcione, por ejemplo `"/Applications/Kanban IA.app/Contents/MacOS/kanbania-desktop"`, o usa el binario autónomo de Claude Code.
 - El aislamiento de cada agente depende de opciones propias de su adaptador: vuelve a comprobarlo al cambiar de versión.
 - Un proceso con permisos de tu usuario puede tocar lo que tu usuario puede tocar: los permisos de la app reducen el riesgo, no lo eliminan.
-- Si la app se cierra de golpe, los procesos de agentes pueden seguir vivos en macOS. Al reiniciar, los intentos en marcha quedan «Interrumpido» y nada arranca solo.
+- Si la app se cierra de golpe, sus agentes se detienen con ella: en macOS los termina un proceso guardián en unos segundos (salvo procesos que el agente separe a propósito con `setsid` o en otro grupo); en Windows debería hacerlo el Job Object (sin comprobar). Al reiniciar, los intentos en marcha quedan «Interrumpido», su worktree se conserva y nada arranca solo.
 - Windows: los adaptadores y la supervisión de procesos no se han ejecutado en Windows.

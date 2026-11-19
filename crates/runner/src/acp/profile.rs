@@ -162,6 +162,7 @@ fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
             ));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            #[cfg_attr(not(unix), allow(unused_mut))]
             let mut builder = std::fs::DirBuilder::new();
             #[cfg(unix)]
             {
@@ -292,6 +293,7 @@ mod tests {
     #[test]
     fn codex_env_is_minimal_and_allowed() {
         let env = codex_env(Path::new("/datos/codex-home"));
+        #[cfg_attr(not(unix), allow(unused_variables))]
         let names: Vec<_> = env.iter().map(|(n, _)| n.to_str().unwrap()).collect();
         #[cfg(unix)]
         assert_eq!(

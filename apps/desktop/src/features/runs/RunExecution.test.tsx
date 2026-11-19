@@ -515,7 +515,7 @@ describe("Estados del intento", () => {
         state: "interrupted",
         endedAt: "2026-11-12T10:40:00Z",
         endReason:
-          "La app se cerró durante la ejecución: no se puede verificar el proceso.",
+          "La app se cerró de forma inesperada durante la ejecución: sus procesos deberían haberse detenido con ella y el worktree, si llegó a crearse, se conserva para revisarlo.",
       }),
       finished,
     ]);
@@ -558,7 +558,7 @@ describe("Estados del intento", () => {
     ).not.toBeInTheDocument();
     expect(failed).toHaveTextContent("Superó el tiempo máximo (30 min).");
     expect(interrupted).toHaveTextContent(
-      "La app se cerró durante la ejecución",
+      "La app se cerró de forma inesperada durante la ejecución",
     );
   });
 

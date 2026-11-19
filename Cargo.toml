@@ -20,7 +20,7 @@ toml = "1.2.1"
 kanbania-core = { path = "crates/core" }
 kanbania-local-service = { path = "crates/local-service" }
 kanbania-runner = { path = "crates/runner" }
-nix = { version = "0.31.3", default-features = false, features = ["signal"] }
+nix = { version = "0.31.3", default-features = false, features = ["process", "signal"] }
 process-wrap = { version = "10.0.1", default-features = false, features = ["creation-flags", "job-object", "kill-on-drop", "process-group", "tokio1"] }
 rmcp = { version = "3.9.0", default-features = false }
 same-file = "1.0.6"

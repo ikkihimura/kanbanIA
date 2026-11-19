@@ -299,7 +299,9 @@ pub enum RunOutcome {
 /// Por qué se interrumpen los intentos no verificables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterruptCause {
-    /// Al arrancar el host: intentos que quedaron activos de una sesión anterior.
+    /// Al arrancar el host: intentos que quedaron activos de una sesión anterior (la app murió
+    /// de golpe). Sus procesos los termina el guardián del runner (Unix, HU-024) o el Job Object
+    /// (Windows); el worktree no se toca.
     AppRestarted,
     /// Al salir la app normalmente, tras matar los árboles de procesos.
     AppExiting,
@@ -311,7 +313,7 @@ impl InterruptCause {
     fn reason(self) -> &'static str {
         match self {
             Self::AppRestarted => {
-                "La app se cerró durante la ejecución: no se puede verificar el proceso."
+                "La app se cerró de forma inesperada durante la ejecución: sus procesos deberían haberse detenido con ella y el worktree, si llegó a crearse, se conserva para revisarlo."
             }
             Self::AppExiting => "Se cerró la app.",
             Self::Restoring => {

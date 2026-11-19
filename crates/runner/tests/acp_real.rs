@@ -223,6 +223,7 @@ async fn real_turn_with(
         extra_env,
         timeout: Duration::from_secs(5 * 60),
         grace: Duration::from_secs(5),
+        guard: None,
     };
     let (process, io) = RunningProcess::spawn_protocol(spec, log).unwrap();
     let pid = process.pid();
@@ -958,6 +959,7 @@ async fn real_confined_turn(agent: Real, approve_all: bool) -> Option<(RealTurn,
         extra_env,
         timeout: Duration::from_secs(5 * 60),
         grace: Duration::from_secs(5),
+        guard: None,
     };
     let (process, io) = RunningProcess::spawn_protocol(spec, log).unwrap();
     let pid = process.pid();

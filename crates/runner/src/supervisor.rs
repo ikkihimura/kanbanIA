@@ -53,6 +53,7 @@ use crate::acp::{
     codex_config, codex_env, codex_home_config, ensure_codex_home, has_repository_config,
     permission_bridge,
 };
+use crate::guard::{EXIT_GUARD_ERROR, EXIT_NOT_EXECUTABLE, GuardLauncher};
 use crate::output::{AgentKind, MAX_TAIL_LINES, OutputLog, Stream, read_tail};
 use crate::process::{
     CancelHandle, CancelToken, DEFAULT_GRACE, OutputSink, ProcessOutcome, ProcessSpec,
@@ -104,6 +105,9 @@ pub struct SupervisorConfig {
     pub program: PathBuf,
     /// Argumentos antes del escenario (por defecto, `--kanbania-test-process`).
     pub program_args: Vec<OsString>,
+    /// Guardián de cada proceso (HU-024, Unix): por defecto el mismo ejecutable con
+    /// `--kanbania-guard`. `None` solo en pruebas que lo necesiten.
+    pub guard: Option<GuardLauncher>,
     /// **Solo pruebas**: argumentos tras el escenario (p. ej. `--heartbeat <carpeta>`). El host
     /// nunca los usa.
     pub scenario_args: Vec<OsString>,
@@ -130,6 +134,7 @@ impl SupervisorConfig {
     pub fn new(data_dir: PathBuf, program: PathBuf) -> Self {
         Self {
             data_dir,
+            guard: Some(GuardLauncher::new(program.clone())),
             program,
             program_args: vec![RESERVED_FLAG.into()],
             scenario_args: Vec::new(),
@@ -643,6 +648,7 @@ async fn run_test_process(
         extra_env: Vec::new(),
         timeout,
         grace: shared.config.grace,
+        guard: shared.config.guard.clone(),
     };
     let mut log = log;
     let _ = log.flush();
@@ -713,6 +719,8 @@ enum SessionEnd {
     Internal,
     /// El adaptador no llegó a ejecutarse (p. ej. le falta su intérprete).
     Missing,
+    /// El guardián no pudo ejecutar el adaptador (sin permiso, formato no ejecutable…).
+    Unlaunchable,
 }
 
 /// Lo que queda listo para lanzar el adaptador.
@@ -882,10 +890,10 @@ async fn run_acp(
             return;
         }
     };
-    // Dentro del sandbox el programa que se lanza es `sandbox-exec`: un adaptador que no existe
-    // o no es ejecutable ya no fallaría al lanzar (fallaría `sandbox-exec` después), así que se
-    // comprueba antes, con los mismos motivos que sin él.
-    if prepared.sandbox.is_some()
+    // Con el sandbox o el guardián, el programa que se lanza es `sandbox-exec` o la propia app:
+    // un adaptador que no existe o no es ejecutable ya no fallaría al lanzar (fallaría después),
+    // así que se comprueba antes, con los mismos motivos que sin ellos.
+    if (prepared.sandbox.is_some() || shared.config.guard.is_some())
         && let Some(failure) = adapter_unlaunchable(&launch.adapter_path, agent)
     {
         log.write_system(match failure {
@@ -908,6 +916,7 @@ async fn run_acp(
         extra_env: prepared.env,
         timeout: launch.timeout,
         grace: shared.config.grace,
+        guard: shared.config.guard.clone(),
     };
     let _ = log.flush();
     let (process, io) = match RunningProcess::spawn_protocol(spec, log) {
@@ -1018,6 +1027,22 @@ async fn run_acp(
             }
             Err(SessionEnd::Missing)
         }
+        // Con guardián (HU-024), un adaptador que no se puede ejecutar ya no falla al lanzar:
+        // el guardián sale con 126 (sin permiso) o 125 (otro error del sistema).
+        Err(SessionEnd::Stop(AcpStop::Failed(AcpFailure::Disconnected)))
+            if shared.config.guard.is_some()
+                && matches!(
+                    report.outcome,
+                    ProcessOutcome::Exited {
+                        code: EXIT_NOT_EXECUTABLE | EXIT_GUARD_ERROR
+                    }
+                ) =>
+        {
+            if let Some(log) = log.as_mut() {
+                log.write_system("No se pudo ejecutar el adaptador (código del guardián).");
+            }
+            Err(SessionEnd::Unlaunchable)
+        }
         other => other,
     };
     let (outcome, summary) = match ended {
@@ -1043,6 +1068,10 @@ async fn run_acp(
         ),
         Err(SessionEnd::Missing) => (
             RunOutcome::Failed(RunFailure::AdapterMissing(agent)),
+            "el adaptador no se pudo ejecutar",
+        ),
+        Err(SessionEnd::Unlaunchable) => (
+            RunOutcome::Failed(RunFailure::AdapterSpawnFailed(agent)),
             "el adaptador no se pudo ejecutar",
         ),
     };
