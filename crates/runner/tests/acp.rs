@@ -34,7 +34,7 @@ use kanbania_core::platform::clock::ManualClock;
 use kanbania_core::platform::storage::Store;
 use kanbania_runner::acp::{
     AcpClient, AcpLimits, CLAUDE_CODE_PROFILE, CODEX_HOME_NOTE, ISOLATION_NOTE, ProbeError,
-    TurnEnd, codex_env, probe_adapter,
+    TurnEnd, codex_env, node_path_env, probe_adapter,
 };
 use kanbania_runner::output::{AgentKind, OutputLog, read_tail};
 use kanbania_runner::process::{ProcessSpec, RunningProcess, cancel_pair};
@@ -214,7 +214,28 @@ impl Env {
                 // El mismo agente falso para los dos: su variante la decide el entorno.
                 claude_acp_path: path.clone(),
                 codex_acp_path: path,
+                node_path: None,
                 approval_notifications,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Ruta de node (HU-026), sin tocar el resto de la configuración.
+    async fn set_node(&self, node_path: Option<String>) {
+        let current = get_run_settings(&self.store).await.unwrap();
+        update_run_settings(
+            &self.store,
+            &Actor::Human,
+            &UpdateRunSettingsInput {
+                expected_revision: current.revision,
+                max_concurrency: current.max_concurrency,
+                timeout_minutes: current.timeout_minutes,
+                claude_acp_path: current.claude_acp_path.clone(),
+                codex_acp_path: current.codex_acp_path.clone(),
+                node_path,
+                approval_notifications: current.approval_notifications,
             },
         )
         .await
@@ -2087,5 +2108,113 @@ async fn codex_gets_a_permissions_profile_that_denies_the_app_data() {
         env.texts(&run, RunOutputStream::System)
             .iter()
             .any(|l| l.contains("perfil de permisos"))
+    );
+}
+
+/// Variable que marca la prueba relanzada sin `node` en el `PATH` (HU-026).
+const NODE_HELPER: &str = "KANBANIA_NODE_HELPER";
+const NODE_TEST: &str = "an_npm_adapter_without_node_needs_the_node_path";
+
+/// HU-026: un adaptador npm (`#!/usr/bin/env node`) con una app abierta sin `node` en el `PATH`
+/// (como desde Finder con Node de nvm). La prueba se relanza con `PATH=/usr/bin:/bin` (las
+/// pruebas comparten proceso: no se puede cambiar el entorno aquí). «node» es un script que
+/// arranca el agente falso, así que funcionar demuestra que el adaptador lo encontró.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_npm_adapter_without_node_needs_the_node_path() {
+    if std::env::var_os(NODE_HELPER).is_none() {
+        if ["/usr/bin/node", "/bin/node"]
+            .iter()
+            .any(|path| Path::new(path).exists())
+        {
+            eprintln!("Este sistema tiene node en /usr/bin o /bin: no se puede probar sin él.");
+            return;
+        }
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NODE_TEST, "--nocapture", "--test-threads=1"])
+            .env("PATH", "/usr/bin:/bin")
+            .env(NODE_HELPER, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let env = Env::new().await;
+    let executable = |path: &Path, content: String| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    let adapter = env.base.join("adaptador npm").join("claude-agent-acp");
+    executable(
+        &adapter,
+        "#!/usr/bin/env node\n// adaptador npm de prueba\n".into(),
+    );
+    let node = env.base.join("node de nvm").join("bin").join("node");
+    // `env node <adaptador> <args>`: se descarta el script y se arranca el agente falso.
+    executable(
+        &node,
+        format!("#!/bin/sh\nshift\nexec '{FAKE_ACP}' \"$@\"\n"),
+    );
+
+    // «Comprobar adaptador»: sin ruta de node, el motivo exacto; con ella, responde.
+    let probe = |extra_env: Vec<(OsString, OsString)>| {
+        probe_adapter(
+            adapter.clone(),
+            vec!["ok".into()],
+            env.base.clone(),
+            extra_env,
+            Duration::from_secs(20),
+        )
+    };
+    assert_eq!(probe(Vec::new()).await, Err(ProbeError::NodeNotFound));
+    let declared = probe(node_path_env(Some(&node)).into_iter().collect())
+        .await
+        .unwrap();
+    assert_eq!(declared.name.as_deref(), Some("kanbania-fake-acp"));
+
+    // Un intento: sin ruta de node falla sin lanzar nada y lo dice.
+    env.set_adapter(Some(adapter.to_str().unwrap().to_owned()))
+        .await;
+    let (run, detail) = env.scenario(&["ok"]).await;
+    assert_failed(
+        &detail,
+        "El adaptador necesita node y no se encuentra (pasa al abrir la app desde Finder o el \
+         menú Inicio con Node de nvm): indica la ruta de node en Sistema → Ejecuciones.",
+    );
+    assert!(sessions(&detail).is_empty());
+    assert!(
+        env.texts(&run, RunOutputStream::System)
+            .iter()
+            .any(|line| line.contains("#!/usr/bin/env node")),
+        "{:?}",
+        env.texts(&run, RunOutputStream::System)
+    );
+
+    // Con la ruta de node: el mismo adaptador completa el turno.
+    env.set_node(Some(node.to_str().unwrap().to_owned())).await;
+    let (run, detail) = env.scenario(&["ok"]).await;
+    assert_eq!(detail.run.state, RunState::Completed, "{:?}", detail.run);
+    assert_eq!(sessions(&detail).len(), 1);
+    assert!(
+        env.texts(&run, RunOutputStream::System)
+            .iter()
+            .any(|line| line.contains("ruta de node configurada"))
+    );
+
+    // La ruta guardada desaparece (p. ej. se desinstaló esa versión con nvm): el motivo lo dice.
+    std::fs::remove_file(&node).unwrap();
+    let (_, detail) = env.scenario(&["ok"]).await;
+    assert_failed(
+        &detail,
+        "La ruta de node configurada ya no existe o no es ejecutable (p. ej. tras cambiar de \
+         versión con nvm): actualízala en Sistema → Ejecuciones.",
     );
 }

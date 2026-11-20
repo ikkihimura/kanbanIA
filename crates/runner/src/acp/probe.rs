@@ -11,6 +11,8 @@ use crate::process::{ProcessSpec, RunningProcess, SpawnErrorKind, cancel_pair};
 
 /// Gracia al terminar el adaptador comprobado.
 const PROBE_GRACE: Duration = Duration::from_secs(2);
+/// Límite de la comprobación de `node` (HU-026).
+const NODE_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Por qué falló la comprobación. `Display` es un mensaje seguro (sin rutas ni texto del
 /// agente).
@@ -19,6 +21,9 @@ pub enum ProbeError {
     /// Ruta o carpeta no válidas.
     InvalidSpec,
     NotFound,
+    /// El adaptador es un script `#!/usr/bin/env node` y no hay `node` en el `PATH` que
+    /// recibiría (HU-026).
+    NodeNotFound,
     PermissionDenied,
     SpawnFailed,
     TimedOut,
@@ -33,15 +38,20 @@ impl std::fmt::Display for ProbeError {
         f.write_str(match self {
             Self::InvalidSpec => "La ruta del adaptador no es válida.",
             Self::NotFound => {
-                "No se pudo ejecutar el adaptador: no existe, o le falta su intérprete (p. ej. \
-                 `node` en el PATH con el que se abrió la app)."
+                "No se pudo ejecutar el adaptador: no existe, o le falta su intérprete."
+            }
+            Self::NodeNotFound => {
+                "El adaptador necesita node y no lo encuentra: la app no tiene el PATH de tu \
+                 terminal (pasa al abrirla desde Finder o el menú Inicio con Node de nvm). Indica \
+                 la ruta de node (la que muestra `which node` en una terminal, o pulsa «Buscar \
+                 node») y vuelve a comprobar."
             }
             Self::PermissionDenied => "No hay permiso para ejecutar el adaptador.",
             Self::SpawnFailed => "No se pudo iniciar el adaptador.",
             Self::TimedOut => "El adaptador no respondió a tiempo a «initialize».",
             Self::Disconnected => {
-                "El adaptador terminó sin responder a «initialize» (¿es un adaptador ACP? ¿encuentra \
-                 `node`?)."
+                "El adaptador terminó sin responder a «initialize» (¿es un adaptador ACP?). \
+                 Consulta su salida de errores en una terminal."
             }
             Self::Protocol => "El adaptador no respondió con ACP válido.",
             Self::VersionUnsupported => {
@@ -56,7 +66,9 @@ impl std::error::Error for ProbeError {}
 
 /// Lanza `program` (absoluto, sin shell) en `cwd`, hace `initialize` con el límite `limit` y
 /// termina su árbol. `args` solo se usa en pruebas (la app no pasa argumentos). `extra_env`:
-/// las variables propias del agente, las mismas que en una ejecución (Codex: [`super::codex_env`]).
+/// las variables propias del agente, las mismas que en una ejecución (Codex: [`super::codex_env`]),
+/// y el `PATH` con la carpeta de `node` si hay una configurada ([`super::node_path_env`]). Antes
+/// de lanzar, un script `#!/usr/bin/env node` sin `node` en ese `PATH` → [`ProbeError::NodeNotFound`].
 pub async fn probe_adapter(
     program: PathBuf,
     args: Vec<OsString>,
@@ -64,6 +76,18 @@ pub async fn probe_adapter(
     extra_env: Vec<(OsString, OsString)>,
     limit: Duration,
 ) -> Result<AgentDeclaration, ProbeError> {
+    let path_var = super::effective_path(&extra_env);
+    let check = program.clone();
+    // Si el disco no responde a tiempo, lo decide el lanzamiento.
+    let missing = tokio::time::timeout(
+        NODE_CHECK_TIMEOUT,
+        tokio::task::spawn_blocking(move || super::missing_node(&check, path_var.as_deref())),
+    )
+    .await
+    .is_ok_and(|checked| checked.unwrap_or(false));
+    if missing {
+        return Err(ProbeError::NodeNotFound);
+    }
     let spec = ProcessSpec {
         program,
         args,

@@ -274,7 +274,7 @@ Qué hace la app:
 - Salida: «agente (reportado)» es lo que informa el agente (mensajes, herramientas, permisos, uso), no hechos comprobados; stderr del adaptador con correos y tokens ocultos. El coste que informa el agente se muestra en la salida, pero no se guarda como coste del intento.
 - Cancelar envía `session/cancel`, espera hasta 10 s y después mata el árbol de procesos.
 
-Limitaciones: el adaptador npm es un script de Node y necesita `node` en `PATH` (si abres la app desde Finder con nvm, no lo encuentra: abre la app desde la terminal o usa el binario autónomo); el aislamiento depende de una opción propia del adaptador (vuelve a comprobarlo al cambiar de versión); Windows sin ejecutar.
+Limitaciones: el adaptador npm es un script de Node y necesita `node` (si abres la app desde Finder con nvm, no lo encuentra: indica la «Ruta de node» en «Sistema» → «Ejecuciones», con «Buscar node»; ver [docs/AGENTES.md](docs/AGENTES.md)); el aislamiento depende de una opción propia del adaptador (vuelve a comprobarlo al cambiar de versión); Windows sin ejecutar.
 
 Pruebas: contrato con el agente falso `cargo test -p kanbania-runner --test acp`. Pruebas reales (consumen tu suscripción; solo con autorización): `KANBANIA_ACP_REAL=/ruta/absoluta/claude-agent-acp cargo test -p kanbania-runner --test acp_real -- --ignored --nocapture`.
 
@@ -295,7 +295,7 @@ Segundo agente real: OpenAI Codex a través del adaptador [`@agentclientprotocol
 
 | Herramienta | Versión verificada | Nota |
 | --- | --- | --- |
-| `@agentclientprotocol/codex-acp` | 2.5.0 (2026-11-16) | Incluye `@openai/codex` 0.165. Necesita `node` en `PATH`. |
+| `@agentclientprotocol/codex-acp` | 2.5.0 (2026-11-16) | Incluye `@openai/codex` 0.165. Necesita `node` (ruta de node configurable, HU-026). |
 | Codex CLI (`codex`) | 0.160.0 | Solo para iniciar sesión en la carpeta de Codex de la app. |
 
 1. Instálalo en una carpeta propia: `npm install @agentclientprotocol/codex-acp@2.5.0`.

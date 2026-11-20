@@ -48,7 +48,19 @@ El contenido de las historias se sirve tal cual (puede venir de otros agentes): 
 
 Cada historia puede tener un **intento**: una instantánea inmutable de la historia que se ejecuta en un worktree propio (`<datos>/worktrees/<proyecto>/<intento>`, rama `kanbania/…`). El repositorio original no se toca. Requiere un repositorio vinculado al proyecto y **Git ≥ 2.36**.
 
-La app no incluye ni instala los adaptadores. Instala cada uno en una carpeta propia con npm (necesitan **Node ≥ 22** en `PATH`).
+La app no incluye ni instala los adaptadores. Instala cada uno en una carpeta propia con npm (necesitan **Node ≥ 22**).
+
+### Node al abrir la app desde Finder o el menú Inicio
+
+Los adaptadores npm son programas de Node.js (`#!/usr/bin/env node`). Una app abierta desde Finder, el Dock o el menú Inicio no tiene el `PATH` de tu terminal: si instalaste Node con nvm, fnm o asdf, no lo encuentra.
+
+1. En «Sistema» → «Ejecuciones» → **Ruta de node**, pulsa **Buscar node**: la app propone las instalaciones que encuentra en las ubicaciones habituales (nvm, Homebrew, `/usr/local`, Volta, fnm, asdf, mise y el `PATH` de la app). No ejecuta ninguna; la versión sale del nombre de su carpeta.
+2. Pulsa **Usar** en una de Node 22 o posterior, o pega la que muestra `which node` en una terminal (`where node` en Windows).
+3. Pulsa **Comprobar adaptador** y guarda.
+
+La app pone la carpeta de ese `node` delante del `PATH` de los adaptadores; no cambia ninguna otra variable ni ejecuta tu shell para averiguarlo. Vacío = el `PATH` con el que se abrió la app. No se admite una ruta dentro de los datos de Kanban IA (los agentes trabajan ahí).
+
+En macOS y Linux, si falta `node`, «Comprobar adaptador» y el intento lo dicen («El adaptador necesita node y no se encuentra»), y si la ruta guardada deja de existir (p. ej. al cambiar de versión con nvm), piden actualizarla. En Windows esa detección no existe (los adaptadores npm son `.cmd`): el fallo aparece como un error genérico del adaptador.
 
 ### Claude Code
 
@@ -99,7 +111,7 @@ Cuando el agente pide permiso (escribir un archivo, ejecutar un comando…), el 
   - Claude Code en **macOS** corre en un sandbox del sistema que le impide leerlos o modificarlos directamente, aunque apruebes el permiso (comprobado). Un comando que apruebes podría lanzar procesos fuera del sandbox (la app bloquea `launchctl`, `open` y `osascript`, pero no es una garantía completa). En **Windows no hay sandbox**: podría leerlos.
   - Codex recibe un perfil de permisos que su propio sandbox aplica a sus comandos (comprobado con `codex sandbox`; en la app, el modelo no llegó a intentar leerlos). Si apruebas que un comando salga del sandbox, ese comando ya no queda limitado. Windows sin comprobar.
 - Los tokens y el coste que informa el agente se ven en la salida, pero **no se guardan** en el intento: se muestran como «no disponible». Codex no informa del coste.
-- Los adaptadores npm necesitan `node` en `PATH`. Si usas nvm y abres la app desde Finder, no lo encuentran: abre la app desde una terminal donde `node` funcione, por ejemplo `"/Applications/Kanban IA.app/Contents/MacOS/kanbania-desktop"`, o usa el binario autónomo de Claude Code.
+- Los adaptadores npm necesitan `node`: si abres la app desde Finder con Node de nvm, indica la **Ruta de node** (ver arriba). Toda la carpeta de ese `node` queda delante del `PATH` del adaptador y de los comandos del agente: con nvm son `node`, `npm`, `npx` y tus paquetes globales; con Homebrew (`/opt/homebrew/bin`), todo lo que hayas instalado ahí.
 - El aislamiento de cada agente depende de opciones propias de su adaptador: vuelve a comprobarlo al cambiar de versión.
 - Un proceso con permisos de tu usuario puede tocar lo que tu usuario puede tocar: los permisos de la app reducen el riesgo, no lo eliminan.
 - Si la app se cierra de golpe, sus agentes se detienen con ella: en macOS los termina un proceso guardián en unos segundos (salvo procesos que el agente separe a propósito con `setsid` o en otro grupo); en Windows debería hacerlo el Job Object (sin comprobar). Al reiniciar, los intentos en marcha quedan «Interrumpido», su worktree se conserva y nada arranca solo.

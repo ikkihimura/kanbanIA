@@ -49,9 +49,33 @@ fn present(names: &[&str]) -> Vec<(OsString, OsString)> {
         .collect()
 }
 
-/// Variables permitidas con el valor que tienen en este proceso (las ausentes se omiten).
+/// Variables permitidas con el valor que tienen en este proceso (las ausentes se omiten). El
+/// `PATH`, sin entradas relativas ni vacías ([`inherited_path`]).
 pub(crate) fn allowed_env() -> Vec<(OsString, OsString)> {
     present(ALLOWED)
+        .into_iter()
+        .filter_map(|(name, value)| {
+            if name == "PATH" {
+                inherited_path().map(|path| (name, path))
+            } else {
+                Some((name, value))
+            }
+        })
+        .collect()
+}
+
+/// `PATH` de la app solo con sus entradas absolutas (HU-026). Una entrada relativa o vacía se
+/// buscaría desde el `cwd` del proceso, que es el worktree: un `node` o un `git` plantados en
+/// el repositorio se ejecutarían. `None` si no hay `PATH` o no queda ninguna entrada.
+pub(crate) fn inherited_path() -> Option<OsString> {
+    let path = std::env::var_os("PATH")?;
+    let absolute: Vec<_> = std::env::split_paths(&path)
+        .filter(|dir| dir.is_absolute())
+        .collect();
+    if absolute.is_empty() {
+        return None;
+    }
+    std::env::join_paths(absolute).ok()
 }
 
 /// Variables extra de un adaptador ACP (se suman a [`allowed_env`]).

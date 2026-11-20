@@ -1284,6 +1284,23 @@ fieldset.run-start__scenarios legend {
   user-select: all;
 }
 
+/* Sugerencias de «Buscar node» (HU-026): ruta larga partida en cualquier punto. */
+.node-candidates {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.node-candidates__item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: baseline;
+  font-family: var(--font-mono);
+}
+
 .checkbox:has(input:disabled),
 .checkbox input:disabled {
   cursor: not-allowed;

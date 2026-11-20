@@ -994,6 +994,7 @@ async fn settings_have_defaults_limits_and_revision() {
         timeout_minutes,
         claude_acp_path: None,
         codex_acp_path: None,
+        node_path: None,
         approval_notifications: false,
     };
     for (input, name) in [

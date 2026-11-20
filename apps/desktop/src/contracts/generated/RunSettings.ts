@@ -22,6 +22,12 @@ claudeAcpPath: string | null,
  */
 codexAcpPath: string | null, 
 /**
+ * Ruta absoluta del ejecutable `node` (HU-026), tal como la escribió la persona; su carpeta
+ * se antepone al `PATH` de los adaptadores (los npm son scripts `#!/usr/bin/env node`).
+ * `null` = el `PATH` con el que se abrió la app. Ruta local: nunca para agentes.
+ */
+nodePath: string | null, 
+/**
  * Notificación del sistema cuando un agente pide permiso (HU-020; por defecto, no). El
  * texto nunca lleva el comando ni la ruta.
  */

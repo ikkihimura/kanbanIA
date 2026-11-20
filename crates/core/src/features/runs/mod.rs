@@ -27,6 +27,8 @@
 //!   registra lo que el agente declaró al negociar (`record_acp_session`, evento
 //!   `acp_session`) y termina con motivos del núcleo (`RunFailure`, `RunOutcome`), nunca
 //!   con texto del agente.
+//! - Node (HU-026, `node`): ruta opcional de `node` en `run_settings` (validada igual), que el
+//!   supervisor antepone al `PATH` de los adaptadores; sugerencias sin ejecutar nada.
 //! - Aprobaciones (HU-020, `approval`): peticiones de permiso del agente que decide una persona
 //!   una sola vez (permitir una vez o rechazar), con caducidad, y que el supervisor entrega en
 //!   una transacción que vuelve a comprobar el intento. Cancelar o terminar las cierra.
@@ -42,6 +44,7 @@ mod execution_views;
 mod get;
 mod git_head;
 mod list;
+mod node;
 mod run;
 mod runnable;
 mod settings;
@@ -71,11 +74,12 @@ pub use execution_views::{
 };
 pub use get::{MAX_DETAIL_EVENTS, RunDetail, RunEventRecord, RunStartRequest, get_run};
 pub use list::list_story_runs;
+pub use node::{MAX_NODE_CANDIDATES, NodeCandidate, NodeSearchRoots, find_node_candidates};
 pub use run::{RunState, RunSummary, RunUsage};
 pub use settings::{
     MAX_ADAPTER_PATH_CHARS, MAX_CONCURRENCY, MAX_TIMEOUT_MINUTES, MIN_CONCURRENCY,
-    MIN_TIMEOUT_MINUTES, RunSettings, UpdateRunSettingsInput, check_adapter_path, get_run_settings,
-    update_run_settings,
+    MIN_TIMEOUT_MINUTES, RunSettings, UpdateRunSettingsInput, check_adapter_path, check_node_path,
+    get_run_settings, update_run_settings,
 };
 pub use snapshot::{
     RunSnapshot, SNAPSHOT_SCHEMA_VERSION, SnapshotAgent, SnapshotColumn, SnapshotCriterion,

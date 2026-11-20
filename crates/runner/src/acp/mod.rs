@@ -41,6 +41,7 @@ pub(crate) mod framing;
 #[cfg(all(test, feature = "supervisor"))]
 mod guards;
 pub(crate) mod jsonrpc;
+mod node;
 pub(crate) mod normalize;
 mod permission;
 mod probe;
@@ -55,6 +56,7 @@ pub use confine::{
     codex_config,
 };
 pub use framing::MAX_LINE_BYTES;
+pub use node::{configured_node_unusable, effective_path, missing_node, node_path_env};
 pub use permission::{
     MAX_PENDING_PERMISSIONS, MAX_SCOPE_CHARS, PermissionAnswer, PermissionAsk, PermissionBridge,
     PermissionEvent, PermissionPolicy, PermissionReply, permission_bridge,

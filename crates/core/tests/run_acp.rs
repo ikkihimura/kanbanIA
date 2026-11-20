@@ -20,6 +20,8 @@ use kanbania_core::features::runs::{
     begin_dispatch, create_run, finish_run, get_run, get_run_settings, mark_running, prompt_digest,
     record_acp_session, record_run_event, record_worktree, start_run, update_run_settings,
 };
+#[cfg(unix)]
+use kanbania_core::features::runs::{NodeSearchRoots, check_node_path, find_node_candidates};
 use kanbania_core::features::stories::{
     CreateStoryInput, CriterionDraft, Priority, StorySummary, UpdateStoryInput, create_story,
     get_story, update_story,
@@ -230,6 +232,7 @@ impl Board {
                 timeout_minutes: current.timeout_minutes,
                 claude_acp_path: path.map(str::to_owned),
                 codex_acp_path: None,
+                node_path: None,
                 approval_notifications: false,
             },
         )
@@ -664,6 +667,7 @@ async fn acp_executor_needs_a_configured_adapter() {
     let DispatchExecutor::Acp {
         agent: AcpAgent::ClaudeCode,
         adapter_path,
+        node_path: None,
         instructions,
     } = dispatch.executor
     else {
@@ -799,6 +803,7 @@ async fn adapter_path_is_checked_on_disk_before_saving() {
                     timeout_minutes: 30,
                     claude_acp_path: Some(adapter.to_str().unwrap().into()),
                     codex_acp_path: None,
+                    node_path: None,
                     approval_notifications: false,
                 },
             )
@@ -1352,6 +1357,7 @@ async fn an_unchanged_adapter_path_is_not_checked_again() {
             timeout_minutes: current.timeout_minutes,
             claude_acp_path: Some(format!(" {path} ")),
             codex_acp_path: None,
+            node_path: None,
             approval_notifications: false,
         },
     )
@@ -1378,6 +1384,7 @@ async fn an_unchanged_adapter_path_is_not_checked_again() {
             timeout_minutes: current.timeout_minutes,
             claude_acp_path: Some(path.clone()),
             codex_acp_path: None,
+            node_path: None,
             approval_notifications: false,
         },
     )
@@ -1397,6 +1404,11 @@ async fn spawn_failures_have_neutral_core_reasons() {
             RunFailure::AdapterSpawnFailed(AcpAgent::ClaudeCode),
             "No se pudo lanzar el adaptador de Claude Code configurado. Consulta el registro del \
              intento.",
+        ),
+        (
+            RunFailure::NodeMissing,
+            "El adaptador necesita node y no se encuentra (pasa al abrir la app desde Finder o el \
+             menú Inicio con Node de nvm): indica la ruta de node en Sistema → Ejecuciones.",
         ),
     ] {
         let run = b.preparing(&format!("{failure:?}")).await;
@@ -1437,6 +1449,7 @@ async fn codex_executor_uses_its_own_adapter_path() {
         timeout_minutes: current.timeout_minutes,
         claude_acp_path: current.claude_acp_path.clone(),
         codex_acp_path: Some("codex-acp".into()),
+        node_path: None,
         approval_notifications: false,
     };
     let (code, field, _) = error(update_run_settings(&b.store, &Actor::Human, &input).await);
@@ -1472,6 +1485,7 @@ async fn codex_executor_uses_its_own_adapter_path() {
     let DispatchExecutor::Acp {
         agent,
         adapter_path,
+        node_path: None,
         instructions,
     } = dispatch.executor
     else {
@@ -1491,6 +1505,7 @@ async fn codex_executor_uses_its_own_adapter_path() {
         &UpdateRunSettingsInput {
             expected_revision: current.revision,
             codex_acp_path: None,
+            node_path: None,
             ..input
         },
     )
@@ -1603,6 +1618,7 @@ async fn the_same_team_agent_runs_with_either_adapter() {
             timeout_minutes: current.timeout_minutes,
             claude_acp_path: Some(claude.to_str().unwrap().into()),
             codex_acp_path: Some(codex.to_str().unwrap().into()),
+            node_path: None,
             approval_notifications: false,
         },
     )
@@ -1703,6 +1719,7 @@ async fn a_stale_codex_path_change_is_a_conflict() {
         timeout_minutes: current.timeout_minutes,
         claude_acp_path: None,
         codex_acp_path: Some(codex.to_str().unwrap().into()),
+        node_path: None,
         approval_notifications: false,
     };
     update_run_settings(&b.store, &Actor::Human, &input)
@@ -1714,6 +1731,7 @@ async fn a_stale_codex_path_change_is_a_conflict() {
             &Actor::Human,
             &UpdateRunSettingsInput {
                 codex_acp_path: None,
+                node_path: None,
                 ..input
             },
         )
@@ -1727,5 +1745,196 @@ async fn a_stale_codex_path_change_is_a_conflict() {
             .codex_acp_path
             .as_deref(),
         codex.to_str()
+    );
+}
+
+/// HU-026: la ruta de node se valida como la del adaptador (además debe llamarse `node`), se
+/// guarda tal como se escribió, viaja en el despacho y se puede quitar.
+#[cfg(unix)]
+#[tokio::test]
+async fn node_path_is_validated_saved_and_dispatched() {
+    let b = Board::new().await;
+    let claude = b.adapter("claude-agent-acp");
+    b.set_adapter(Some(claude.to_str().unwrap())).await.unwrap();
+    let set_node = |path: Option<String>| {
+        let store = b.store.clone();
+        async move {
+            let current = get_run_settings(&store).await.unwrap();
+            update_run_settings(
+                &store,
+                &Actor::Human,
+                &UpdateRunSettingsInput {
+                    expected_revision: current.revision,
+                    max_concurrency: current.max_concurrency,
+                    timeout_minutes: current.timeout_minutes,
+                    claude_acp_path: current.claude_acp_path.clone(),
+                    codex_acp_path: None,
+                    node_path: path,
+                    approval_notifications: false,
+                },
+            )
+            .await
+        }
+    };
+
+    let bin = b.repos.path().join("node con espacios").join("bin");
+    std::fs::create_dir_all(bin.join("node-carpeta").join("node")).unwrap();
+    let not_executable = b.repos.path().join("sin-permiso");
+    std::fs::create_dir_all(&not_executable).unwrap();
+    std::fs::write(not_executable.join("node"), "").unwrap();
+    set_mode(&not_executable.join("node"), 0o644);
+    // Dentro de los datos de la app (p. ej. un worktree): un agente podría reescribirlo.
+    let data_dir = b.store.database_path().parent().unwrap().to_path_buf();
+    let in_data = data_dir.join("worktrees").join("node");
+    std::fs::create_dir_all(in_data.parent().unwrap()).unwrap();
+    std::fs::write(&in_data, "#!/bin/sh\n").unwrap();
+    set_mode(&in_data, 0o755);
+    let (_, field, message) = error(set_node(Some(in_data.to_str().unwrap().into())).await);
+    assert_eq!(field, "nodePath");
+    assert!(message.contains("dentro de los datos"), "{message}");
+    assert_eq!(
+        error(check_node_path(in_data.to_str().unwrap(), Some(&data_dir)).await).1,
+        "nodePath"
+    );
+    for (bad, hint) in [
+        ("node".to_owned(), "absoluta"),
+        (
+            format!("{}/con:dos puntos/node", bin.display()),
+            "separador",
+        ),
+        (claude.to_str().unwrap().to_owned(), "«node»"),
+        (format!("{}/../bin/node", bin.display()), "«..»"),
+        ("//servidor/compartido/node".to_owned(), "red"),
+        (bin.join("node").to_str().unwrap().to_owned(), "No existe"),
+        (
+            bin.join("node-carpeta")
+                .join("node")
+                .to_str()
+                .unwrap()
+                .to_owned(),
+            "no es un archivo",
+        ),
+        (
+            not_executable.join("node").to_str().unwrap().to_owned(),
+            "permiso de ejecución",
+        ),
+    ] {
+        let (code, field, message) = error(set_node(Some(bad.clone())).await);
+        assert_eq!(
+            (code, field.as_str()),
+            (ErrorCode::Validation, "nodePath"),
+            "{bad}"
+        );
+        assert!(message.contains(hint), "{bad}: {message}");
+        assert!(
+            !bad.contains('/') || !message.contains(&bad),
+            "sin la ruta en el mensaje: {message}"
+        );
+        // «Comprobar adaptador» usa la misma validación.
+        assert_eq!(error(check_node_path(&bad, None).await).1, "nodePath");
+    }
+
+    let node = bin.join("node");
+    std::fs::write(&node, "#!/bin/sh\n").unwrap();
+    set_mode(&node, 0o755);
+    let typed = node.to_str().unwrap().to_owned();
+    let saved = set_node(Some(format!("  {typed}  "))).await.unwrap();
+    assert_eq!(saved.node_path.as_deref(), Some(typed.as_str()));
+    assert_eq!(saved.claude_acp_path.as_deref(), claude.to_str());
+    assert_eq!(check_node_path(" ", None).await.unwrap(), None);
+    assert_eq!(
+        check_node_path(&typed, None).await.unwrap(),
+        Some(node.clone())
+    );
+
+    let run = b.run("Con node").await;
+    b.start(&run, RunExecutor::ClaudeAcp).await;
+    let DispatchOutcome::Ready(dispatch) = b.dispatch(&run).await else {
+        panic!("debía despacharse");
+    };
+    let DispatchExecutor::Acp { node_path, .. } = dispatch.executor else {
+        panic!("debía ser ACP");
+    };
+    assert_eq!(node_path, Some(node.clone()));
+
+    // Sin cambios no se vuelve a comprobar (aunque ya no exista); vacía → sin ruta.
+    std::fs::remove_file(&node).unwrap();
+    assert_eq!(
+        set_node(Some(typed.clone()))
+            .await
+            .unwrap()
+            .node_path
+            .as_deref(),
+        Some(typed.as_str())
+    );
+    assert_eq!(set_node(Some("  ".into())).await.unwrap().node_path, None);
+}
+
+/// HU-026: «Buscar node» solo propone archivos ejecutables de las ubicaciones habituales, sin
+/// ejecutarlos y sin repetir el mismo archivo; las versiones de un gestor, de mayor a menor.
+#[cfg(unix)]
+#[tokio::test]
+async fn node_candidates_are_found_without_running_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let ran = dir.path().join("se ejecutó");
+    let node = |path: &Path, mode: u32| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("#!/bin/sh\ntouch '{}'\n", ran.display())).unwrap();
+        set_mode(path, mode);
+    };
+    let nvm = home.join(".nvm/versions/node");
+    node(&nvm.join("v20.1.0/bin/node"), 0o755);
+    node(&nvm.join("v22.16.0/bin/node"), 0o755);
+    node(&nvm.join("v9.0.0/bin/node"), 0o755);
+    node(&nvm.join("v18.0.0/bin/node"), 0o644);
+    node(&home.join(".volta/bin/node"), 0o755);
+    node(&home.join(".asdf/installs/nodejs/21.0.0/bin/node"), 0o755);
+    std::fs::create_dir_all(nvm.join("rara versión/bin")).unwrap();
+    node(&nvm.join("rara versión/bin/node"), 0o755);
+    // Una carpeta del sistema con un enlace al de nvm (como Homebrew): el mismo archivo.
+    let system = dir.path().join("homebrew-bin");
+    std::fs::create_dir_all(&system).unwrap();
+    std::os::unix::fs::symlink(nvm.join("v22.16.0/bin/node"), system.join("node")).unwrap();
+    let in_path = dir.path().join("en el path");
+    node(&in_path.join("node"), 0o755);
+
+    let found = find_node_candidates(NodeSearchRoots {
+        home: Some(home.clone()),
+        path_var: Some(
+            std::env::join_paths([Path::new("relativa"), &in_path, &dir.path().join("nada")])
+                .unwrap(),
+        ),
+        system: vec![(system.clone(), "Homebrew")],
+        app_data: None,
+    })
+    .await;
+    let summary: Vec<(String, &str, Option<&str>)> = found
+        .iter()
+        .map(|c| (c.path.clone(), c.source.as_str(), c.version.as_deref()))
+        .collect();
+    let at = |path: PathBuf| path.to_str().unwrap().to_owned();
+    assert_eq!(
+        summary,
+        [
+            (at(in_path.join("node")), "PATH de la app", None),
+            // El enlace de Homebrew y el de nvm son el mismo archivo: una sola entrada, que
+            // conserva la versión de nvm.
+            (at(system.join("node")), "Homebrew", Some("v22.16.0")),
+            (at(nvm.join("v20.1.0/bin/node")), "nvm", Some("v20.1.0")),
+            (at(nvm.join("v9.0.0/bin/node")), "nvm", Some("v9.0.0")),
+            (at(home.join(".volta/bin/node")), "Volta", None),
+            (
+                at(home.join(".asdf/installs/nodejs/21.0.0/bin/node")),
+                "asdf",
+                Some("21.0.0")
+            ),
+        ]
+    );
+    assert!(!ran.exists(), "nunca se ejecuta un candidato");
+    assert!(
+        find_node_candidates(NodeSearchRoots::default())
+            .await
+            .is_empty()
     );
 }

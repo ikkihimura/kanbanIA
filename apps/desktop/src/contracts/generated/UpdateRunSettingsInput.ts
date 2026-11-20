@@ -8,4 +8,9 @@ claudeAcpPath: string | null,
 /**
  * Igual, para Codex (HU-021).
  */
-codexAcpPath: string | null, approvalNotifications: boolean, };
+codexAcpPath: string | null, 
+/**
+ * Vacía o `null` → sin ruta de node. Si no, absoluta, de un archivo ejecutable llamado
+ * `node` (`node.exe` en Windows) (HU-026).
+ */
+nodePath: string | null, approvalNotifications: boolean, };

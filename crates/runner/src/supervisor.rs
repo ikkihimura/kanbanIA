@@ -50,8 +50,8 @@ use crate::acp::{
     CLAUDE_SANDBOX_AVAILABLE, CLAUDE_SANDBOX_NOTE, CLAUDE_UNCONFINED_NOTE, CODEX_CONFINEMENT_NOTE,
     CODEX_HOME_NOTE, CODEX_PROFILE, DataConfinement, OpenedSession, PermissionAnswer,
     PermissionEvent, PermissionPolicy, PermissionReply, TurnEnd, clear_codex_plugin_cache,
-    codex_config, codex_env, codex_home_config, ensure_codex_home, has_repository_config,
-    permission_bridge,
+    codex_config, codex_env, codex_home_config, configured_node_unusable, effective_path,
+    ensure_codex_home, has_repository_config, missing_node, node_path_env, permission_bridge,
 };
 use crate::guard::{EXIT_GUARD_ERROR, EXIT_NOT_EXECUTABLE, GuardLauncher};
 use crate::output::{AgentKind, MAX_TAIL_LINES, OutputLog, Stream, read_tail};
@@ -592,11 +592,13 @@ async fn execute(
         DispatchExecutor::Acp {
             agent,
             adapter_path,
+            node_path,
             instructions,
         } => {
             let launch = AcpLaunch {
                 agent,
                 adapter_path,
+                node_path,
                 instructions,
                 worktree: created,
                 timeout,
@@ -703,10 +705,15 @@ async fn run_test_process(
     finish(shared, dispatch, outcome).await;
 }
 
+/// Límite de las comprobaciones de `node` antes de lanzar el adaptador (HU-026).
+const NODE_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Lo que necesita el ejecutor ACP.
 struct AcpLaunch {
     agent: AcpAgent,
     adapter_path: PathBuf,
+    /// Ruta de `node` configurada (HU-026): su carpeta va delante del `PATH` del adaptador.
+    node_path: Option<PathBuf>,
     instructions: String,
     worktree: PathBuf,
     timeout: Duration,
@@ -882,7 +889,7 @@ async fn run_acp(
 ) {
     let agent = launch.agent;
     let mut log = log;
-    let prepared = match prepare_acp(shared, agent, &launch.worktree, &mut log).await {
+    let mut prepared = match prepare_acp(shared, agent, &launch.worktree, &mut log).await {
         Ok(prepared) => prepared,
         Err(failure) => {
             let _ = log.finish();
@@ -903,6 +910,57 @@ async fn run_acp(
         let _ = log.finish();
         finish(shared, dispatch, RunOutcome::Failed(failure)).await;
         return;
+    }
+    // HU-026: la carpeta de la ruta de node configurada va delante del `PATH` (la única variable
+    // que cambia) y, si el adaptador es un script `#!/usr/bin/env node` sin `node` en ese
+    // `PATH`, no se lanza: saldría con 127 sin hablar ACP. E/S breve con límite de tiempo: si
+    // el disco no responde, lo decide el lanzamiento.
+    let node_path = launch.node_path.clone();
+    let adapter = launch.adapter_path.clone();
+    let node_env = node_path_env(node_path.as_deref());
+    let mut path_env = prepared.env.clone();
+    path_env.extend(node_env.clone());
+    let path_var = effective_path(&path_env);
+    let checked = tokio::time::timeout(
+        NODE_CHECK_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            let unusable = node_path.as_deref().is_some_and(configured_node_unusable);
+            (
+                unusable,
+                !unusable && missing_node(&adapter, path_var.as_deref()),
+            )
+        }),
+    )
+    .await;
+    let (node_unusable, node_missing) = match checked {
+        Ok(Ok(checked)) => checked,
+        _ => (false, false),
+    };
+    let node_failure = if node_unusable {
+        log.write_system(
+            "La ruta de node configurada ya no es un archivo ejecutable (o no se puede poner en el \
+             PATH). No se lanza el adaptador.",
+        );
+        Some(RunFailure::NodePathUnusable)
+    } else if node_missing {
+        log.write_system(
+            "El adaptador es un script `#!/usr/bin/env node` y no hay `node` en su PATH: indica la \
+             ruta de node en Sistema → Ejecuciones. No se lanza el adaptador.",
+        );
+        Some(RunFailure::NodeMissing)
+    } else {
+        None
+    };
+    if let Some(failure) = node_failure {
+        let _ = log.finish();
+        finish(shared, dispatch, RunOutcome::Failed(failure)).await;
+        return;
+    }
+    if let Some(path) = node_env {
+        log.write_system(
+            "Se antepone la carpeta de la ruta de node configurada al PATH del adaptador.",
+        );
+        prepared.env.push(path);
     }
 
     let (program, args) = match &prepared.sandbox {

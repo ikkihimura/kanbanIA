@@ -95,6 +95,9 @@ pub enum DispatchExecutor {
         /// persona (se validó en disco al guardarla; puede haber cambiado después: si no se
         /// puede lanzar → `RunFailure::AdapterMissing`).
         adapter_path: PathBuf,
+        /// Ruta de `node` de la configuración al despachar (HU-026), tal como la escribió la
+        /// persona: su carpeta se antepone al `PATH` del adaptador. `None` = el `PATH` de la app.
+        node_path: Option<PathBuf>,
         /// Instrucciones Markdown de la instantánea, generadas con el mismo código que
         /// `RunSnapshot.instructions` pero sin rutas absolutas de repositorios
         /// (`snapshot::agent_instructions`): el único texto del prompt. El contenido de la
@@ -182,6 +185,12 @@ pub enum RunFailure {
     /// ACP: el adaptador existe pero no se pudo lanzar por otro motivo (el detalle va al
     /// registro del intento).
     AdapterSpawnFailed(AcpAgent),
+    /// ACP (HU-026): el adaptador es un script `#!/usr/bin/env node` y no hay `node` en el
+    /// `PATH` que recibiría (ni en la ruta de node configurada): no se lanza.
+    NodeMissing,
+    /// ACP (HU-026): la ruta de node configurada ya no es un archivo ejecutable (p. ej. se
+    /// desinstaló esa versión con nvm): no se lanza.
+    NodePathUnusable,
     /// ACP (Codex, HU-021): el worktree trae configuración del agente (`.codex/`), que se
     /// cargaría al abrir la sesión (servidores MCP, reglas que ejecutan sin preguntar): no se
     /// lanza.
@@ -245,6 +254,15 @@ impl RunFailure {
             }
             Self::AgentTurnFailed => {
                 "El agente devolvió un error durante el turno. Consulta el registro del intento."
+            }
+            Self::NodePathUnusable => {
+                "La ruta de node configurada ya no existe o no es ejecutable (p. ej. tras \
+                 cambiar de versión con nvm): actualízala en Sistema → Ejecuciones."
+            }
+            Self::NodeMissing => {
+                "El adaptador necesita node y no se encuentra (pasa al abrir la app desde Finder \
+                 o el menú Inicio con Node de nvm): indica la ruta de node en Sistema → \
+                 Ejecuciones."
             }
             Self::AdapterMissing(AcpAgent::ClaudeCode) => {
                 "No se encontró el adaptador de Claude Code configurado o no es ejecutable."
@@ -483,6 +501,7 @@ async fn prepare(
             DispatchExecutor::Acp {
                 agent,
                 adapter_path: PathBuf::from(path),
+                node_path: settings.node_path.as_deref().map(PathBuf::from),
                 instructions: agent_instructions(
                     &load_snapshot(conn, &run.id).await?,
                     repository_id,

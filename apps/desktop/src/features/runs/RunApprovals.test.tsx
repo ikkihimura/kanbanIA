@@ -449,6 +449,7 @@ describe("Sistema → Ejecuciones: notificaciones de permisos", () => {
       timeoutMinutes: 30,
       claudeAcpPath: null,
       codexAcpPath: null,
+      nodePath: null,
       approvalNotifications: false,
       revision: 1,
       ...overrides,
@@ -485,6 +486,7 @@ describe("Sistema → Ejecuciones: notificaciones de permisos", () => {
       timeoutMinutes: 30,
       claudeAcpPath: null,
       codexAcpPath: null,
+      nodePath: null,
       approvalNotifications: true,
     });
     expect(

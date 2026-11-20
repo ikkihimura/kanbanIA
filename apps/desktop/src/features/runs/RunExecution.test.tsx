@@ -46,6 +46,7 @@ vi.mock("../../shared/ipc/commands", async (importOriginal) => ({
   getRunSettings: vi.fn(),
   updateRunSettings: vi.fn(),
   checkAcpAdapter: vi.fn(),
+  findNodeCandidates: vi.fn(),
   getCodexHomeStatus: vi.fn(),
   onRunChange: vi.fn(),
   setUnsavedChanges: vi.fn(),
@@ -199,6 +200,7 @@ function settings(overrides: Partial<RunSettings> = {}): RunSettings {
     timeoutMinutes: 30,
     claudeAcpPath: null,
     codexAcpPath: null,
+    nodePath: null,
     approvalNotifications: false,
     revision: 1,
     ...overrides,
@@ -1371,6 +1373,7 @@ describe("Sistema → Ejecuciones", () => {
       timeoutMinutes: 45,
       claudeAcpPath: null,
       codexAcpPath: null,
+      nodePath: null,
       approvalNotifications: false,
     });
     expect(
@@ -1407,7 +1410,7 @@ describe("Sistema → Ejecuciones", () => {
     await user.click(screen.getByRole("button", { name: "Guardar" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "La configuración cambió mientras la editabas. Ahora es: 4 a la vez, 60 min, sin adaptador de Claude Code, sin adaptador de Codex y sin notificaciones de permisos.",
+      "La configuración cambió mientras la editabas. Ahora es: 4 a la vez, 60 min, sin adaptador de Claude Code, sin adaptador de Codex, sin ruta de node y sin notificaciones de permisos.",
     );
     // Lo escrito se conserva.
     expect(concurrency).toHaveValue(1);
@@ -1419,6 +1422,7 @@ describe("Sistema → Ejecuciones", () => {
       timeoutMinutes: 30,
       claudeAcpPath: null,
       codexAcpPath: null,
+      nodePath: null,
       approvalNotifications: false,
     });
     expect(
@@ -1915,7 +1919,7 @@ describe("Sistema → Ejecuciones: adaptador de Claude Code", () => {
     const path = await screen.findByLabelText("Adaptador de Claude Code (ACP)");
     expect(path).toHaveValue(ACP_PATH);
     expect(path).toHaveAccessibleDescription(
-      /La app no lo incluye ni lo instala\..*necesita node en el PATH.*desde Finder.*binario autónomo.*terminal.*puede consumir tu suscripción o tu saldo.*«Always ask».*permitas una vez o la rechaces.*no cargue tu configuración de Claude Code ni la del repositorio/,
+      /La app no lo incluye ni lo instala\..*necesita node: si la app no lo encuentra, indica arriba la ruta de node.*puede consumir tu suscripción o tu saldo.*«Always ask».*permitas una vez o la rechaces.*no cargue tu configuración de Claude Code ni la del repositorio/,
     );
 
     // Cambiar otro campo también envía la ruta (si faltara, el núcleo la borraría).
@@ -1931,6 +1935,7 @@ describe("Sistema → Ejecuciones: adaptador de Claude Code", () => {
       timeoutMinutes: 30,
       claudeAcpPath: null,
       codexAcpPath: null,
+      nodePath: null,
       approvalNotifications: false,
     });
     await screen.findByText("✓ Configuración guardada.");
@@ -1986,7 +1991,11 @@ describe("Sistema → Ejecuciones: adaptador de Claude Code", () => {
       name: "Comprobar adaptador de Claude Code",
     });
     await user.click(button);
-    expect(mocked.checkAcpAdapter).toHaveBeenCalledWith("claudeCode", ACP_PATH);
+    expect(mocked.checkAcpAdapter).toHaveBeenCalledWith(
+      "claudeCode",
+      ACP_PATH,
+      "",
+    );
     expect(
       await screen.findByText(
         "✓ Responde: Claude Agent 0.107.0 · ACP v1 · capacidades: retomar sesión, imágenes, contexto incrustado, MCP por HTTP",
@@ -2039,11 +2048,173 @@ describe("Sistema → Ejecuciones: adaptador de Claude Code", () => {
     );
     await user.click(button);
     // La ruta mostrada (la guardada) es la que se comprueba.
-    expect(mocked.checkAcpAdapter).toHaveBeenCalledWith("claudeCode", ACP_PATH);
+    expect(mocked.checkAcpAdapter).toHaveBeenCalledWith(
+      "claudeCode",
+      ACP_PATH,
+      "",
+    );
     expect(
       await screen.findByText(`No se pudo comprobar el adaptador: ${message}`),
     ).toBeInTheDocument();
     expect(screen.queryByText(/Responde:/)).not.toBeInTheDocument();
+  });
+});
+
+// --- HU-026: ruta de node para los adaptadores npm ---
+
+const NODE_PATH = "/Users/ana/.nvm/versions/node/v22.16.0/bin/node";
+
+describe("Sistema → Ejecuciones: ruta de node", () => {
+  it("«Buscar node» propone instalaciones; elegir una solo rellena el campo y se guarda al guardar", async () => {
+    const user = userEvent.setup();
+    mocked.getRunSettings.mockResolvedValue(
+      settings({ claudeAcpPath: ACP_PATH }),
+    );
+    mocked.findNodeCandidates.mockResolvedValue([
+      { path: "/opt/homebrew/bin/node", source: "Homebrew", version: null },
+      { path: NODE_PATH, source: "nvm", version: "v22.16.0" },
+      {
+        path: "/Users/ana/.nvm/versions/node/v20.1.0/bin/node",
+        source: "nvm",
+        version: "v20.1.0",
+      },
+    ]);
+    mocked.checkAcpAdapter.mockResolvedValue({
+      protocolVersion: 1,
+      agentName: "claude-agent-acp",
+      agentTitle: null,
+      agentVersion: "0.107.0",
+      capabilities: [],
+    });
+    mocked.updateRunSettings.mockResolvedValue(
+      settings({ claudeAcpPath: ACP_PATH, nodePath: NODE_PATH, revision: 2 }),
+    );
+    render(<RunSettingsPanel />);
+
+    const field = await screen.findByLabelText("Ruta de node (opcional)");
+    expect(field).toHaveValue("");
+    expect(field).toHaveAccessibleDescription(
+      /desde Finder o el menú Inicio.*which node.*where node.*Toda su carpeta se pone delante del PATH de los adaptadores y de los comandos del agente\. Vacío = el PATH con el que se abrió la app\./,
+    );
+    const search = screen.getByRole("button", { name: "Buscar node" });
+    await user.click(search);
+    expect(
+      await screen.findByText("(nvm · v22.16.0)", { exact: false }),
+    ).toBeInTheDocument();
+    expect(search).toHaveAccessibleDescription(
+      /^Se encontraron 3 instalaciones \(no se ha ejecutado ninguna/,
+    );
+    // La lista (con botones) no forma parte de la región viva.
+    expect(search).not.toHaveAccessibleDescription(/homebrew/);
+    expect(
+      screen.getByText("(nvm · v20.1.0 · anterior a 22", { exact: false }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("(Homebrew)", { exact: false }),
+    ).toBeInTheDocument();
+    expect(mocked.updateRunSettings).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: `Usar ${NODE_PATH}` }));
+    expect(field).toHaveValue(NODE_PATH);
+    expect(search).toHaveAccessibleDescription(
+      new RegExp(`Ruta de node elegida \\(sin guardar\\): ${NODE_PATH}$`),
+    );
+    // La elegida queda marcada con texto, sin botón.
+    expect(
+      screen.queryByRole("button", { name: `Usar ${NODE_PATH}` }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("en uso")).toBeInTheDocument();
+    expect(mocked.setUnsavedChanges).toHaveBeenLastCalledWith(true);
+    expect(mocked.updateRunSettings).not.toHaveBeenCalled();
+
+    // «Comprobar adaptador» usa la ruta de node escrita, aún sin guardar.
+    await user.click(
+      screen.getByRole("button", {
+        name: "Comprobar adaptador de Claude Code",
+      }),
+    );
+    expect(mocked.checkAcpAdapter).toHaveBeenLastCalledWith(
+      "claudeCode",
+      ACP_PATH,
+      NODE_PATH,
+    );
+    expect(await screen.findByText(/✓ Responde:/)).toBeInTheDocument();
+    // Cambiar la ruta de node invalida el resultado; volver a ella lo recupera.
+    await user.type(field, "x");
+    expect(screen.queryByText(/✓ Responde:/)).not.toBeInTheDocument();
+    await user.type(field, "{Backspace}");
+    expect(screen.getByText(/✓ Responde:/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Guardar" }));
+    expect(mocked.updateRunSettings).toHaveBeenLastCalledWith(
+      expect.objectContaining({ expectedRevision: 1, nodePath: NODE_PATH }),
+    );
+    await screen.findByText("✓ Configuración guardada.");
+    expect(mocked.setUnsavedChanges).toHaveBeenLastCalledWith(false);
+  });
+
+  it("sin instalaciones lo explica, y un error del núcleo aparece junto al campo", async () => {
+    const user = userEvent.setup();
+    mocked.getRunSettings.mockResolvedValue(settings({ nodePath: NODE_PATH }));
+    mocked.findNodeCandidates.mockResolvedValue([]);
+    const message =
+      "Indica el ejecutable llamado «node» (no su carpeta ni otro programa).";
+    mocked.updateRunSettings.mockRejectedValue(validation("nodePath", message));
+    render(<RunSettingsPanel />);
+
+    const field = await screen.findByLabelText("Ruta de node (opcional)");
+    expect(field).toHaveValue(NODE_PATH);
+    await user.click(screen.getByRole("button", { name: "Buscar node" }));
+    expect(
+      await screen.findByText(
+        /No se encontró node en las ubicaciones habituales/,
+      ),
+    ).toBeInTheDocument();
+
+    await user.clear(field);
+    await user.type(field, "/Users/ana/.nvm");
+    await user.click(screen.getByRole("button", { name: "Guardar" }));
+    const error = await screen.findByText(message);
+    expect(field).toHaveAttribute("aria-invalid", "true");
+    expect(field.getAttribute("aria-describedby")).toContain(error.id);
+    expect(screen.queryByText(/No se pudo guardar/)).not.toBeInTheDocument();
+    // Vaciar el campo = sin ruta de node.
+    mocked.updateRunSettings.mockResolvedValue(settings({ revision: 2 }));
+    await user.clear(field);
+    await user.click(screen.getByRole("button", { name: "Guardar" }));
+    expect(mocked.updateRunSettings).toHaveBeenLastCalledWith(
+      expect.objectContaining({ nodePath: null }),
+    );
+  });
+
+  it("un fallo de node al comprobar el adaptador se explica como tal", async () => {
+    const user = userEvent.setup();
+    mocked.getRunSettings.mockResolvedValue(
+      settings({ claudeAcpPath: ACP_PATH, nodePath: NODE_PATH }),
+    );
+    const missing =
+      "El adaptador necesita node y no lo encuentra: la app no tiene el PATH de tu terminal.";
+    const gone = "No existe ningún archivo en esa ruta (o no se puede leer).";
+    mocked.checkAcpAdapter
+      .mockRejectedValueOnce(validation("claudeAcpPath", missing))
+      .mockRejectedValueOnce(validation("nodePath", gone));
+    render(<RunSettingsPanel />);
+
+    const check = await screen.findByRole("button", {
+      name: "Comprobar adaptador de Claude Code",
+    });
+    await user.click(check);
+    await waitFor(() => {
+      expect(check).toHaveAccessibleDescription(
+        `No se pudo comprobar el adaptador: ${missing}`,
+      );
+    });
+    await user.click(check);
+    await waitFor(() => {
+      expect(check).toHaveAccessibleDescription(
+        `Revisa la ruta de node: ${gone}`,
+      );
+    });
   });
 });
 
@@ -2404,6 +2575,7 @@ describe("Sistema → Ejecuciones: Codex", () => {
       timeoutMinutes: 30,
       claudeAcpPath: ACP_PATH,
       codexAcpPath: CODEX_PATH,
+      nodePath: null,
       approvalNotifications: false,
     });
     expect(
@@ -2457,7 +2629,11 @@ describe("Sistema → Ejecuciones: Codex", () => {
       name: "Comprobar adaptador de Claude Code",
     });
     await user.click(checkCodex);
-    expect(mocked.checkAcpAdapter).toHaveBeenCalledWith("codex", CODEX_PATH);
+    expect(mocked.checkAcpAdapter).toHaveBeenCalledWith(
+      "codex",
+      CODEX_PATH,
+      "",
+    );
     await waitFor(() => {
       expect(checkCodex).toHaveAccessibleDescription(
         "✓ Responde: Codex 0.4.0 · ACP v1 · capacidades: imágenes",
@@ -2469,6 +2645,7 @@ describe("Sistema → Ejecuciones: Codex", () => {
     expect(mocked.checkAcpAdapter).toHaveBeenLastCalledWith(
       "claudeCode",
       ACP_PATH,
+      "",
     );
     await waitFor(() => {
       expect(checkClaude).toHaveAccessibleDescription(

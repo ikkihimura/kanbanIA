@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -17,7 +17,8 @@ pub const MIN_CONCURRENCY: i64 = 1;
 pub const MAX_CONCURRENCY: i64 = 8;
 pub const MIN_TIMEOUT_MINUTES: i64 = 1;
 pub const MAX_TIMEOUT_MINUTES: i64 = 240;
-/// Longitud máxima (en caracteres) de la ruta del adaptador (también la impone la base).
+/// Longitud máxima (en caracteres) de la ruta del adaptador o de `node` (también la impone la
+/// base).
 pub const MAX_ADAPTER_PATH_CHARS: usize = 4096;
 /// Límite de la comprobación en disco de la ruta del adaptador: un disco que no responde no
 /// bloquea la app.
@@ -39,6 +40,10 @@ pub struct RunSettings {
     pub claude_acp_path: Option<String>,
     /// Igual, para el adaptador de Codex (`codex-acp`, HU-021).
     pub codex_acp_path: Option<String>,
+    /// Ruta absoluta del ejecutable `node` (HU-026), tal como la escribió la persona; su carpeta
+    /// se antepone al `PATH` de los adaptadores (los npm son scripts `#!/usr/bin/env node`).
+    /// `null` = el `PATH` con el que se abrió la app. Ruta local: nunca para agentes.
+    pub node_path: Option<String>,
     /// Notificación del sistema cuando un agente pide permiso (HU-020; por defecto, no). El
     /// texto nunca lleva el comando ni la ruta.
     pub approval_notifications: bool,
@@ -70,6 +75,9 @@ pub struct UpdateRunSettingsInput {
     pub claude_acp_path: Option<String>,
     /// Igual, para Codex (HU-021).
     pub codex_acp_path: Option<String>,
+    /// Vacía o `null` → sin ruta de node. Si no, absoluta, de un archivo ejecutable llamado
+    /// `node` (`node.exe` en Windows) (HU-026).
+    pub node_path: Option<String>,
     pub approval_notifications: bool,
 }
 
@@ -82,10 +90,19 @@ pub(super) async fn load_settings(conn: &mut SqliteConnection) -> Result<RunSett
         timeout_minutes,
         claude_acp_path,
         codex_acp_path,
+        node_path,
         approval_notifications,
         revision,
-    ): (i64, i64, Option<String>, Option<String>, bool, i64) = sqlx::query_as(
-        "SELECT max_concurrency, timeout_minutes, claude_acp_path, codex_acp_path, \
+    ): (
+        i64,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        bool,
+        i64,
+    ) = sqlx::query_as(
+        "SELECT max_concurrency, timeout_minutes, claude_acp_path, codex_acp_path, node_path, \
          approval_notifications, revision FROM run_settings WHERE id = 1",
     )
     .fetch_optional(&mut *conn)
@@ -96,6 +113,7 @@ pub(super) async fn load_settings(conn: &mut SqliteConnection) -> Result<RunSett
         timeout_minutes,
         claude_acp_path,
         codex_acp_path,
+        node_path,
         approval_notifications,
         revision,
     })
@@ -111,9 +129,9 @@ pub async fn get_run_settings(store: &Store) -> Result<RunSettings, CoreError> {
 /// `conflict` con la vigente). Fuera de rango → `validation` con el campo. La ruta del
 /// adaptador se comprueba en disco **antes** de la transacción (fuera del runtime, con límite
 /// de tiempo): relativa, de red, inexistente, que no sea un archivo normal tras resolver enlaces
-/// o (en Unix) sin permiso de ejecución → `validation` (`claudeAcpPath`/`codexAcpPath`); solo si
-/// esa ruta cambia
-/// respecto a la guardada en `expectedRevision`. Se guarda tal como la
+/// o (en Unix) sin permiso de ejecución → `validation` (`claudeAcpPath`/`codexAcpPath`); igual
+/// para `nodePath`, que además debe llamarse `node` (HU-026). Solo si esa ruta cambia respecto
+/// a la guardada en `expectedRevision`. Se guarda tal como la
 /// escribió la persona (recortada), no la ruta resuelta. Una transacción
 /// `BEGIN IMMEDIATE`; sin `requestId`: aplicar dos veces los mismos valores con la revisión
 /// nueva es un `conflict`, nunca un cambio silencioso.
@@ -144,18 +162,29 @@ pub async fn update_run_settings(
     // no puede fallar porque el adaptador ya guardado se movió. Se compara con la revisión que
     // la persona editaba; si no coincide, la transacción da `conflict`.
     let current = get_run_settings(store).await?;
+    let data_dir = store.data_dir().map(Path::to_path_buf);
     let claude_path = checked_path(
         &current,
         input,
-        AcpAgent::ClaudeCode,
+        None,
+        PathTarget::Adapter(AcpAgent::ClaudeCode),
         input.claude_acp_path.as_deref(),
     )
     .await?;
     let codex_path = checked_path(
         &current,
         input,
-        AcpAgent::Codex,
+        None,
+        PathTarget::Adapter(AcpAgent::Codex),
         input.codex_acp_path.as_deref(),
+    )
+    .await?;
+    let node_path = checked_path(
+        &current,
+        input,
+        data_dir,
+        PathTarget::Node,
+        input.node_path.as_deref(),
     )
     .await?;
     let input = input.clone();
@@ -164,13 +193,15 @@ pub async fn update_run_settings(
             Box::pin(async move {
                 let updated = sqlx::query(
                     "UPDATE run_settings SET max_concurrency = ?, timeout_minutes = ?, \
-                     claude_acp_path = ?, codex_acp_path = ?, approval_notifications = ?, \
-                     revision = revision + 1 WHERE id = 1 AND revision = ?",
+                     claude_acp_path = ?, codex_acp_path = ?, node_path = ?, \
+                     approval_notifications = ?, revision = revision + 1 \
+                     WHERE id = 1 AND revision = ?",
                 )
                 .bind(input.max_concurrency)
                 .bind(input.timeout_minutes)
                 .bind(claude_path)
                 .bind(codex_path)
+                .bind(node_path)
                 .bind(input.approval_notifications)
                 .bind(input.expected_revision)
                 .execute(&mut *conn)
@@ -186,22 +217,55 @@ pub async fn update_run_settings(
         .await
 }
 
-/// Ruta del adaptador de `agent` tal como se guardará: vacía → `None`; si cambia respecto a la
-/// revisión que se editaba, comprobada en texto y en disco.
+/// Qué ruta se valida: la de un adaptador o la de `node` (HU-026). Mismas reglas de texto y
+/// disco; cambian el campo del error, los mensajes y, para `node`, el nombre del archivo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathTarget {
+    Adapter(AcpAgent),
+    Node,
+}
+
+impl PathTarget {
+    fn field(self) -> &'static str {
+        match self {
+            Self::Adapter(agent) => agent.settings_field(),
+            Self::Node => "nodePath",
+        }
+    }
+
+    /// «del adaptador» / «de node», para los mensajes.
+    fn of(self) -> &'static str {
+        match self {
+            Self::Adapter(_) => "del adaptador",
+            Self::Node => "de node",
+        }
+    }
+
+    fn saved(self, settings: &RunSettings) -> Option<&str> {
+        match self {
+            Self::Adapter(agent) => settings.adapter_path(agent),
+            Self::Node => settings.node_path.as_deref(),
+        }
+    }
+}
+
+/// Ruta tal como se guardará: vacía → `None`; si cambia respecto a la revisión que se editaba,
+/// comprobada en texto y en disco.
 async fn checked_path(
     current: &RunSettings,
     input: &UpdateRunSettingsInput,
-    agent: AcpAgent,
+    data_dir: Option<PathBuf>,
+    target: PathTarget,
     typed: Option<&str>,
 ) -> Result<Option<String>, CoreError> {
     match typed.map(str::trim) {
         None | Some("") => Ok(None),
         Some(path) => {
-            let unchanged = current.revision == input.expected_revision
-                && current.adapter_path(agent) == Some(path);
+            let unchanged =
+                current.revision == input.expected_revision && target.saved(current) == Some(path);
             if !unchanged {
-                validate_adapter_path_text(agent, path)?;
-                check_adapter_on_disk(agent, path.to_owned()).await?;
+                validate_path_text(target, path)?;
+                check_on_disk(target, path.to_owned(), data_dir).await?;
             }
             Ok(Some(path.to_owned()))
         }
@@ -215,41 +279,90 @@ pub async fn check_adapter_path(
     agent: AcpAgent,
     path: &str,
 ) -> Result<std::path::PathBuf, CoreError> {
+    let target = PathTarget::Adapter(agent);
     let path = path.trim();
     if path.is_empty() {
-        return Err(invalid_path(agent, "Indica la ruta del adaptador."));
+        return Err(invalid_path(target, "Indica la ruta del adaptador."));
     }
-    validate_adapter_path_text(agent, path)?;
-    check_adapter_on_disk(agent, path.to_owned()).await?;
+    validate_path_text(target, path)?;
+    check_on_disk(target, path.to_owned(), None).await?;
     Ok(std::path::PathBuf::from(path))
 }
 
-fn invalid_path(agent: AcpAgent, reason: impl Into<String>) -> CoreError {
+/// Igual para la ruta de `node` (HU-026): vacía → `None` (sin ruta de node). Errores →
+/// `validation` en `nodePath`; también si queda dentro de `data_dir` (los worktrees los
+/// escriben los agentes). La usa «Comprobar adaptador» con la ruta escrita o la guardada.
+pub async fn check_node_path(
+    path: &str,
+    data_dir: Option<&Path>,
+) -> Result<Option<std::path::PathBuf>, CoreError> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Ok(None);
+    }
+    validate_path_text(PathTarget::Node, path)?;
+    check_on_disk(
+        PathTarget::Node,
+        path.to_owned(),
+        data_dir.map(Path::to_path_buf),
+    )
+    .await?;
+    Ok(Some(std::path::PathBuf::from(path)))
+}
+
+fn invalid_path(target: PathTarget, reason: impl Into<String>) -> CoreError {
     CoreError::Validation {
-        field: agent.settings_field(),
+        field: target.field(),
         reason: reason.into(),
     }
 }
 
+/// Nombre que debe tener el ejecutable de `node`: su carpeta se antepone al `PATH` y
+/// `#!/usr/bin/env node` busca ese nombre exacto.
+#[cfg(not(windows))]
+fn is_node_file_name(name: &str) -> bool {
+    name == "node"
+}
+
+#[cfg(windows)]
+fn is_node_file_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("node.exe")
+}
+
+/// `true` si `path` pasaría la validación de texto de una ruta de node (para no proponer en
+/// «Buscar node» rutas que después no se podrían guardar).
+pub(super) fn is_valid_node_path_text(path: &str) -> bool {
+    validate_path_text(PathTarget::Node, path).is_ok()
+}
+
 /// Comprobaciones sin tocar el disco: longitud, caracteres, absoluta, normalizada y local.
-fn validate_adapter_path_text(agent: AcpAgent, path: &str) -> Result<(), CoreError> {
+fn validate_path_text(target: PathTarget, path: &str) -> Result<(), CoreError> {
+    let of = target.of();
     if path.chars().count() > MAX_ADAPTER_PATH_CHARS {
         return Err(invalid_path(
-            agent,
-            format!("La ruta del adaptador admite hasta {MAX_ADAPTER_PATH_CHARS} caracteres."),
+            target,
+            format!("La ruta {of} admite hasta {MAX_ADAPTER_PATH_CHARS} caracteres."),
         ));
     }
     if path.chars().any(char::is_control) || has_invisible_formatting(path) {
         return Err(invalid_path(
-            agent,
-            "La ruta del adaptador contiene caracteres no válidos.",
+            target,
+            format!("La ruta {of} contiene caracteres no válidos."),
         ));
     }
     if !Path::new(path).is_absolute() {
         return Err(invalid_path(
-            agent,
-            "Escribe la ruta absoluta del ejecutable del adaptador (p. ej. la que muestra \
-             `which claude-agent-acp` o `which codex-acp`).",
+            target,
+            match target {
+                PathTarget::Adapter(_) => {
+                    "Escribe la ruta absoluta del ejecutable del adaptador (p. ej. la que muestra \
+                     `which claude-agent-acp` o `which codex-acp`)."
+                }
+                PathTarget::Node => {
+                    "Escribe la ruta absoluta del ejecutable de node (p. ej. la que muestra \
+                     `which node` en una terminal)."
+                }
+            },
         ));
     }
     // `.`/`..` permitirían esconder una ruta de red tras un prefijo local.
@@ -258,66 +371,117 @@ fn validate_adapter_path_text(agent: AcpAgent, path: &str) -> Result<(), CoreErr
         .any(|part| part == "." || part == "..")
     {
         return Err(invalid_path(
-            agent,
-            "La ruta del adaptador contiene «.» o «..»: escribe la ruta normalizada.",
+            target,
+            format!("La ruta {of} contiene «.» o «..»: escribe la ruta normalizada."),
         ));
     }
     // Comprobar rutas de red (UNC, `//host`, autofs `/net/`) abriría conexiones salientes o
-    // colgaría la app; además, el adaptador se ejecuta: debe ser local.
+    // colgaría la app; además, el programa se ejecuta: debe ser local.
     let lower = path.to_ascii_lowercase();
     if path.starts_with("\\\\") || path.starts_with("//") || lower.starts_with("/net/") {
         return Err(invalid_path(
-            agent,
-            "La ruta del adaptador es una ruta de red: usa un ejecutable local.",
+            target,
+            format!("La ruta {of} es una ruta de red: usa un ejecutable local."),
+        ));
+    }
+    // Su carpeta va al `PATH`: no puede contener el separador (`:`; `;` en Windows).
+    if target == PathTarget::Node
+        && Path::new(path)
+            .parent()
+            .is_some_and(|dir| std::env::join_paths([dir]).is_err())
+    {
+        return Err(invalid_path(
+            target,
+            "La carpeta de node contiene el separador del PATH («:» o «;»): usa una ruta sin él.",
+        ));
+    }
+    if target == PathTarget::Node
+        && !Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(is_node_file_name)
+    {
+        return Err(invalid_path(
+            target,
+            if cfg!(windows) {
+                "Indica el ejecutable node.exe (no su carpeta ni otro programa)."
+            } else {
+                "Indica el ejecutable llamado «node» (no su carpeta ni otro programa)."
+            },
         ));
     }
     Ok(())
 }
 
 /// Resultado de la comprobación en disco (sin el detalle del sistema: no se muestra).
-enum AdapterCheck {
+enum DiskCheck {
     Ok,
     Missing,
     NotFile,
     NotExecutable,
+    /// Dentro de los datos de la app (solo se comprueba para `node`).
+    InsideData,
 }
 
 /// Comprueba en disco, fuera del runtime asíncrono y con límite de tiempo, que la ruta lleva a
 /// un archivo normal (tras resolver enlaces simbólicos: la instalación npm usa un enlace en
-/// `.bin`) y, en Unix, con permiso de ejecución. En Windows basta con que sea un archivo.
-async fn check_adapter_on_disk(agent: AcpAgent, path: String) -> Result<(), CoreError> {
+/// `.bin`, Homebrew otro para `node`) y, en Unix, con permiso de ejecución. En Windows basta
+/// con que sea un archivo.
+async fn check_on_disk(
+    target: PathTarget,
+    path: String,
+    data_dir: Option<PathBuf>,
+) -> Result<(), CoreError> {
     let task = tokio::task::spawn_blocking(move || {
         let Ok(resolved) = std::fs::canonicalize(&path) else {
-            return AdapterCheck::Missing;
+            return DiskCheck::Missing;
         };
+        // Un `node` dentro de los datos (p. ej. un worktree) lo podría reescribir un agente.
+        if let Some(data) = data_dir.and_then(|dir| std::fs::canonicalize(dir).ok())
+            && resolved.starts_with(&data)
+        {
+            return DiskCheck::InsideData;
+        }
         let Ok(metadata) = std::fs::metadata(&resolved) else {
-            return AdapterCheck::Missing;
+            return DiskCheck::Missing;
         };
         if !metadata.is_file() {
-            return AdapterCheck::NotFile;
+            return DiskCheck::NotFile;
         }
         if is_executable(&metadata) {
-            AdapterCheck::Ok
+            DiskCheck::Ok
         } else {
-            AdapterCheck::NotExecutable
+            DiskCheck::NotExecutable
         }
     });
     match tokio::time::timeout(ADAPTER_CHECK_TIMEOUT, task).await {
-        Ok(Ok(AdapterCheck::Ok)) => Ok(()),
-        Ok(Ok(AdapterCheck::Missing)) => Err(invalid_path(
-            agent,
+        Ok(Ok(DiskCheck::Ok)) => Ok(()),
+        Ok(Ok(DiskCheck::Missing)) => Err(invalid_path(
+            target,
             "No existe ningún archivo en esa ruta (o no se puede leer).",
         )),
-        Ok(Ok(AdapterCheck::NotFile)) => Err(invalid_path(
-            agent,
-            "Esa ruta no es un archivo: indica el ejecutable del adaptador, no su carpeta.",
+        Ok(Ok(DiskCheck::NotFile)) => Err(invalid_path(
+            target,
+            match target {
+                PathTarget::Adapter(_) => {
+                    "Esa ruta no es un archivo: indica el ejecutable del adaptador, no su carpeta."
+                }
+                PathTarget::Node => {
+                    "Esa ruta no es un archivo: indica el ejecutable de node, no su carpeta."
+                }
+            },
         )),
-        Ok(Ok(AdapterCheck::NotExecutable)) => Err(invalid_path(
-            agent,
+        Ok(Ok(DiskCheck::NotExecutable)) => Err(invalid_path(
+            target,
             "Ese archivo no tiene permiso de ejecución.",
         )),
+        Ok(Ok(DiskCheck::InsideData)) => Err(invalid_path(
+            target,
+            "Esa ruta está dentro de los datos de Kanban IA (donde trabajan los agentes): usa una \
+             instalación de node fuera de ellos.",
+        )),
         Ok(Err(_)) | Err(_) => Err(invalid_path(
-            agent,
+            target,
             "No se pudo comprobar la ruta a tiempo: comprueba que el disco está disponible.",
         )),
     }

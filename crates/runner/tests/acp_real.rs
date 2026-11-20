@@ -669,6 +669,7 @@ async fn real_codex_refuses_repository_config() {
             timeout_minutes: current.timeout_minutes,
             claude_acp_path: None,
             codex_acp_path: Some(adapter.to_str().unwrap().into()),
+            node_path: None,
             approval_notifications: false,
         },
     )

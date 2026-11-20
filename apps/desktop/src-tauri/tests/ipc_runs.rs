@@ -1048,3 +1048,92 @@ fn approvals_through_ipc() {
     .unwrap_err();
     assert_eq!(unknown_project["code"], "not_found");
 }
+
+/// HU-026: la ruta de node por IPC. Se valida (errores en `nodePath`), se guarda, «Comprobar
+/// adaptador» pone su carpeta delante del `PATH` (la escrita sin guardar o, sin ella, la
+/// guardada; vacía = ninguna) y «Buscar node» devuelve una lista.
+#[cfg(unix)]
+#[test]
+fn node_path_through_ipc() {
+    use std::os::unix::fs::PermissionsExt;
+    let data = tempfile::tempdir().unwrap();
+    let app = build_app(data.path());
+    let base = data.path().join("carpeta con espacios");
+    // Fuera de los datos de la app: dentro se rechaza (un agente podría reescribirlo).
+    let outside = tempfile::tempdir().unwrap();
+    let node_dir = outside.path().join("mi-node");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::create_dir_all(&node_dir).unwrap();
+    let node = node_dir.join("node");
+    std::fs::write(&node, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Declara como versión el nombre de la primera carpeta de su `PATH`.
+    let adapter = base.join("adaptador path");
+    std::fs::write(
+        &adapter,
+        "#!/bin/sh\nread line\nid=$(printf '%s' \"$line\" | sed 's/.*\"id\":\\([0-9]*\\).*/\\1/')\n\
+         first=${PATH%%:*}\n\
+         printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"protocolVersion\":1,\
+         \"agentInfo\":{\"name\":\"path\",\"version\":\"%s\"},\
+         \"authMethods\":[],\"agentCapabilities\":{}}}\\n' \"$id\" \"${first##*/}\"\nsleep 30\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let check = |node_path: Option<&str>| {
+        let mut args = json!({ "agent": "claudeCode", "path": adapter.to_str().unwrap() });
+        if let Some(node_path) = node_path {
+            args["nodePath"] = json!(node_path);
+        }
+        invoke(&app, "check_acp_adapter", args)
+    };
+
+    let typed = check(Some(node.to_str().unwrap())).unwrap();
+    assert_eq!(typed["agentVersion"], "mi-node");
+    let wrong = check(Some(adapter.to_str().unwrap())).unwrap_err();
+    assert_eq!(
+        (wrong["code"].as_str(), wrong["field"].as_str()),
+        (Some("validation"), Some("nodePath"))
+    );
+    assert_ne!(check(None).unwrap()["agentVersion"], "mi-node");
+
+    let settings = invoke(&app, "get_run_settings", json!({})).unwrap();
+    assert_eq!(settings["nodePath"], serde_json::Value::Null);
+    let input = |node_path: serde_json::Value, revision: &serde_json::Value| {
+        json!({ "input": {
+            "expectedRevision": revision,
+            "maxConcurrency": 2,
+            "timeoutMinutes": 30,
+            "claudeAcpPath": null,
+            "codexAcpPath": null,
+            "nodePath": node_path,
+            "approvalNotifications": false,
+        } })
+    };
+    let rejected = invoke(
+        &app,
+        "update_run_settings",
+        input(json!("node"), &settings["revision"]),
+    )
+    .unwrap_err();
+    assert_eq!(rejected["field"], "nodePath");
+    let saved = invoke(
+        &app,
+        "update_run_settings",
+        input(json!(node.to_str().unwrap()), &settings["revision"]),
+    )
+    .unwrap();
+    assert_eq!(saved["nodePath"], node.to_str().unwrap());
+    // Sin `nodePath`, la guardada; vacía, ninguna.
+    assert_eq!(check(None).unwrap()["agentVersion"], "mi-node");
+    assert_ne!(check(Some("")).unwrap()["agentVersion"], "mi-node");
+    // Una ruta guardada que desaparece (p. ej. otra versión con nvm): error en su campo.
+    std::fs::remove_file(&node).unwrap();
+    let gone = check(None).unwrap_err();
+    assert_eq!(gone["field"], "nodePath");
+
+    let found = invoke(&app, "find_node_candidates", json!({})).unwrap();
+    for candidate in found.as_array().unwrap() {
+        assert!(candidate["path"].as_str().unwrap().starts_with('/'));
+        assert!(candidate["source"].is_string());
+    }
+}

@@ -16,6 +16,7 @@ import type { StoryActivityInput } from "../../contracts/generated/StoryActivity
 import type { AcpAdapterCheck } from "../../contracts/generated/AcpAdapterCheck";
 import type { AcpAgent } from "../../contracts/generated/AcpAgent";
 import type { CodexHomeStatus } from "../../contracts/generated/CodexHomeStatus";
+import type { NodeCandidate } from "../../contracts/generated/NodeCandidate";
 import type { CancelRunInput } from "../../contracts/generated/CancelRunInput";
 import type { DecideApprovalInput } from "../../contracts/generated/DecideApprovalInput";
 import type { RunApproval } from "../../contracts/generated/RunApproval";
@@ -417,17 +418,27 @@ export function updateRunSettings(
 /**
  * «Comprobar adaptador» (HU-019/021): lanza el adaptador ACP del agente, solo hace
  * `initialize` y devuelve lo que declaró. Con `path` comprueba esa ruta (sin guardarla); sin
- * ella, la configurada. Los fallos son `validation` en el campo de ese agente
- * (`claudeAcpPath` o `codexAcpPath`).
+ * ella, la configurada. Igual con `nodePath` (HU-026; vacía = sin ruta de node): su carpeta va
+ * delante del `PATH` del adaptador. Los fallos son `validation` en el campo de ese agente
+ * (`claudeAcpPath` o `codexAcpPath`) o en `nodePath` si esa ruta no es válida.
  */
 export function checkAcpAdapter(
   agent: AcpAgent,
   path?: string,
+  nodePath?: string,
 ): Promise<AcpAdapterCheck> {
-  return call(
-    "check_acp_adapter",
-    path === undefined ? { agent } : { agent, path },
-  );
+  const args: Record<string, unknown> = { agent };
+  if (path !== undefined) args.path = path;
+  if (nodePath !== undefined) args.nodePath = nodePath;
+  return call("check_acp_adapter", args);
+}
+
+/**
+ * Instalaciones de `node` en las ubicaciones habituales (HU-026: nvm, Homebrew, Volta, fnm,
+ * asdf, mise, PATH de la app…). Solo propone rutas: no ejecuta ni guarda nada.
+ */
+export function findNodeCandidates(): Promise<NodeCandidate[]> {
+  return call("find_node_candidates");
 }
 
 /**

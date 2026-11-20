@@ -7,12 +7,13 @@
 use kanbania_core::error::{CoreError, ErrorPayload};
 use kanbania_core::features::runs::{
     self, AcpAdapterCheck, AcpAgent, CancelRunInput, CodexHomeStatus, CreateRunInput,
-    DecideApprovalInput, RecordWorktreeRemovalInput, RemoveRunWorktreeInput, RunApproval,
-    RunDetail, RunOutputView, RunSettings, RunSummary, RunWorktree, StartRunInput,
-    UpdateRunSettingsInput, WaitingApproval, WorktreeChanges, WorktreeRemoval,
+    DecideApprovalInput, NodeCandidate, NodeSearchRoots, RecordWorktreeRemovalInput,
+    RemoveRunWorktreeInput, RunApproval, RunDetail, RunOutputView, RunSettings, RunSummary,
+    RunWorktree, StartRunInput, UpdateRunSettingsInput, WaitingApproval, WorktreeChanges,
+    WorktreeRemoval,
 };
 use kanbania_core::platform::actor::Actor;
-use kanbania_runner::acp::probe_adapter;
+use kanbania_runner::acp::{node_path_env, probe_adapter};
 use kanbania_runner::supervisor::{adapter_env, git_config, read_run_output};
 use kanbania_runner::worktree::{
     DEFAULT_GIT_TIMEOUT, RemoveOutcome, WorktreeError, WorktreeErrorKind, remove_worktree,
@@ -255,37 +256,65 @@ const ADAPTER_CHECK_LIMIT: std::time::Duration = std::time::Duration::from_secs(
 /// hace solo `initialize` (≤ 30 s), termina su árbol y devuelve lo que declaró (protocolo,
 /// nombre, título, versión y capacidades; sin `_meta` ni datos de cuenta). Con `path`, comprueba
 /// esa ruta antes de guardarla (mismas reglas que la configuración); sin ella, la configurada
-/// para ese agente. No crea sesión ni envía instrucciones (no comprueba la sesión iniciada).
-/// Errores → `validation` (`claudeAcpPath`/`codexAcpPath`) con un mensaje fijo, sin rutas ni
-/// texto del adaptador. Nunca para agentes.
+/// para ese agente. Igual con `nodePath` (HU-026): con ella (vacía = sin ruta de node), esa
+/// ruta sin guardar (validada como al guardarla, errores en `nodePath`); sin ella, la
+/// guardada. Su carpeta va delante del `PATH` del adaptador, como en una ejecución; un script
+/// `#!/usr/bin/env node` sin `node` en ese `PATH` da un mensaje propio. No crea sesión ni envía
+/// instrucciones (no comprueba la sesión iniciada). Errores → `validation`
+/// (`claudeAcpPath`/`codexAcpPath`) con un mensaje fijo, sin rutas ni texto del adaptador.
+/// Nunca para agentes.
 #[tauri::command]
 pub async fn check_acp_adapter(
     slot: State<'_, StorageSlot>,
     agent: AcpAgent,
     path: Option<String>,
+    node_path: Option<String>,
 ) -> Result<AcpAdapterCheck, ErrorPayload> {
-    let requested = match path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
-        Some(path) => path.to_owned(),
-        None => {
-            let store = slot.store().await?;
+    let typed = path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_owned);
+    let saved = if typed.is_none() || node_path.is_none() {
+        let store = slot.store().await?;
+        Some(
             runs::get_run_settings(&store)
                 .await
-                .map_err(|e| e.to_payload(None))?
-                .adapter_path(agent)
-                .map(str::to_owned)
-                .ok_or_else(|| {
-                    adapter_invalid(
-                        agent,
-                        "No hay ningún adaptador configurado: indica su ruta.",
-                    )
-                })?
-        }
+                .map_err(|e| e.to_payload(None))?,
+        )
+    } else {
+        None
+    };
+    let requested = match typed {
+        Some(path) => path,
+        None => saved
+            .as_ref()
+            .and_then(|settings| settings.adapter_path(agent))
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                adapter_invalid(
+                    agent,
+                    "No hay ningún adaptador configurado: indica su ruta.",
+                )
+            })?,
     };
     let program = runs::check_adapter_path(agent, &requested)
         .await
         .map_err(|e| e.to_payload(None))?;
+    // La escrita o, sin ella, la guardada: las dos se validan igual (una guardada pudo
+    // desaparecer al cambiar de versión con nvm, y el error lo dice en su campo).
+    let node_text = match node_path {
+        Some(typed) => typed,
+        None => saved
+            .as_ref()
+            .and_then(|settings| settings.node_path.clone())
+            .unwrap_or_default(),
+    };
+    let node = runs::check_node_path(&node_text, Some(slot.data_dir()))
+        .await
+        .map_err(|e| e.to_payload(None))?;
     let data_dir = slot.data_dir().to_path_buf();
-    let extra_env = tauri::async_runtime::spawn_blocking(move || adapter_env(agent, &data_dir))
+    let mut extra_env = tauri::async_runtime::spawn_blocking(move || adapter_env(agent, &data_dir))
         .await
         .ok()
         .and_then(Result::ok)
@@ -293,6 +322,7 @@ pub async fn check_acp_adapter(
             eprintln!("[runs] no se pudo preparar el entorno del adaptador");
             adapter_invalid(agent, "No se pudo preparar la carpeta propia del agente.")
         })?;
+    extra_env.extend(node_path_env(node.as_deref()));
     let declared = probe_adapter(
         program,
         Vec::new(),
@@ -319,6 +349,14 @@ pub async fn check_acp_adapter(
             .collect(),
     )
     .map_err(|e| e.to_payload(None))
+}
+
+/// Instalaciones de `node` en las ubicaciones habituales (HU-026), para que la persona elija una
+/// como ruta de node. Solo mira archivos: no ejecuta nada ni guarda nada. Rutas locales: solo
+/// para la persona, nunca para agentes.
+#[tauri::command]
+pub async fn find_node_candidates() -> Vec<NodeCandidate> {
+    runs::find_node_candidates(NodeSearchRoots::from_env()).await
 }
 
 /// Estado de la carpeta de Codex de la app (HU-021): su ruta (para que la persona inicie sesión

@@ -316,6 +316,7 @@ impl Env {
                 timeout_minutes: current.timeout_minutes,
                 claude_acp_path: current.claude_acp_path,
                 codex_acp_path: current.codex_acp_path,
+                node_path: None,
                 approval_notifications: false,
             },
         )

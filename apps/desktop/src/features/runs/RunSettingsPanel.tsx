@@ -1,9 +1,11 @@
 import { useId, useState, type ReactNode } from "react";
 import type { AcpAdapterCheck } from "../../contracts/generated/AcpAdapterCheck";
 import type { AcpAgent } from "../../contracts/generated/AcpAgent";
+import type { NodeCandidate } from "../../contracts/generated/NodeCandidate";
 import type { RunSettings } from "../../contracts/generated/RunSettings";
 import {
   checkAcpAdapter,
+  findNodeCandidates,
   getCodexHomeStatus,
   getRunSettings,
   updateRunSettings,
@@ -24,17 +26,39 @@ export const CONCURRENCY_LIMITS = { min: 1, max: 8 } as const;
 export const TIMEOUT_LIMITS = { min: 1, max: 240 } as const;
 
 type Field =
-  "maxConcurrency" | "timeoutMinutes" | "claudeAcpPath" | "codexAcpPath";
+  | "maxConcurrency"
+  | "timeoutMinutes"
+  | "claudeAcpPath"
+  | "codexAcpPath"
+  | "nodePath";
 
-/** Comprobación por agente; función de módulo para que `useMutation` la reciba estable. */
+/**
+ * Comprobación por agente; función de módulo para que `useMutation` la reciba estable. Usa
+ * las rutas escritas (sin guardar): la del adaptador y la de node (vacía = sin ruta de node).
+ */
 function checkAdapter({
   agent,
   path,
+  nodePath,
 }: {
   agent: AcpAgent;
   path: string;
+  nodePath: string;
 }): Promise<AcpAdapterCheck> {
-  return checkAcpAdapter(agent, path);
+  return checkAcpAdapter(agent, path, nodePath);
+}
+
+/** «Buscar node» con la forma que espera `useMutation` (sin argumentos). */
+function searchNode(): Promise<NodeCandidate[]> {
+  return findNodeCandidates();
+}
+
+/** Una sugerencia de node en una línea: origen y versión (según su carpeta). */
+export function describeNodeCandidate(candidate: NodeCandidate): string {
+  if (candidate.version === null) return candidate.source;
+  const major = /^v?(\d+)\./i.exec(candidate.version);
+  const old = major !== null && Number(major[1]) < 22;
+  return `${candidate.source} · ${candidate.version}${old ? " · anterior a 22: los adaptadores no la admiten" : ""}`;
 }
 
 /**
@@ -75,6 +99,7 @@ function isRunSettings(value: unknown): value is RunSettings {
     typeof v.timeoutMinutes === "number" &&
     (typeof v.claudeAcpPath === "string" || v.claudeAcpPath === null) &&
     (typeof v.codexAcpPath === "string" || v.codexAcpPath === null) &&
+    (typeof v.nodePath === "string" || v.nodePath === null) &&
     typeof v.approvalNotifications === "boolean" &&
     typeof v.revision === "number"
   );
@@ -133,6 +158,7 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
   const [timeout, setTimeoutText] = useState(String(initial.timeoutMinutes));
   const [acpPath, setAcpPath] = useState(initial.claudeAcpPath ?? "");
   const [codexPath, setCodexPath] = useState(initial.codexAcpPath ?? "");
+  const [nodePath, setNodePath] = useState(initial.nodePath ?? "");
   const [notify, setNotify] = useState(initial.approvalNotifications);
   const [localErrors, setLocalErrors] = useState<
     Partial<Record<Field, UiError>>
@@ -146,6 +172,7 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
     timeout !== String(base.timeoutMinutes) ||
     acpPath !== (base.claudeAcpPath ?? "") ||
     codexPath !== (base.codexAcpPath ?? "") ||
+    nodePath !== (base.nodePath ?? "") ||
     notify !== base.approvalNotifications;
   useUnsavedChangesGuard(dirty);
 
@@ -177,6 +204,7 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
 
     const trimmedPath = acpPath.trim();
     const trimmedCodex = codexPath.trim();
+    const trimmedNode = nodePath.trim();
     const result = await save.mutate({
       expectedRevision: base.revision,
       maxConcurrency,
@@ -184,6 +212,7 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
       // Siempre se envía: si faltara, el núcleo lo borraría. Vacío = no configurado.
       claudeAcpPath: trimmedPath === "" ? null : trimmedPath,
       codexAcpPath: trimmedCodex === "" ? null : trimmedCodex,
+      nodePath: trimmedNode === "" ? null : trimmedNode,
       // También obligatorio: sin él, el núcleo rechaza la petición.
       approvalNotifications: notify,
     });
@@ -194,6 +223,7 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
       setTimeoutText(String(result.value.timeoutMinutes));
       setAcpPath(result.value.claudeAcpPath ?? "");
       setCodexPath(result.value.codexAcpPath ?? "");
+      setNodePath(result.value.nodePath ?? "");
       setNotify(result.value.approvalNotifications);
       setMessage("Configuración guardada.");
     } else if (
@@ -218,7 +248,8 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
     serverError.field !== "maxConcurrency" &&
     serverError.field !== "timeoutMinutes" &&
     serverError.field !== "claudeAcpPath" &&
-    serverError.field !== "codexAcpPath"
+    serverError.field !== "codexAcpPath" &&
+    serverError.field !== "nodePath"
       ? serverError
       : null;
 
@@ -294,9 +325,19 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
         <FieldError id={`${id}-timeout-error`} error={timeoutError} />
       </div>
 
+      <NodeField
+        value={nodePath}
+        error={fieldError("nodePath")}
+        onChange={(value) => {
+          setNodePath(value);
+          touch();
+        }}
+      />
+
       <AdapterField
         agent="claudeCode"
         executable="claude-agent-acp"
+        nodePath={nodePath}
         value={acpPath}
         error={fieldError("claudeAcpPath")}
         onChange={(value) => {
@@ -311,9 +352,8 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
           Code al iniciar. La app no lo incluye ni lo instala.
         </p>
         <p>
-          Si lo instalaste con npm necesita <code>node</code> en el PATH, y si
-          abres la app desde Finder puede no encontrarlo: usa el binario
-          autónomo de la release del adaptador o abre la app desde la terminal.
+          Si lo instalaste con npm necesita <code>node</code>: si la app no lo
+          encuentra, indica arriba la ruta de node.
         </p>
         <p>
           Usa la sesión ya iniciada de Claude Code: puede consumir tu
@@ -334,6 +374,7 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
       <AdapterField
         agent="codex"
         executable="codex-acp"
+        nodePath={nodePath}
         value={codexPath}
         error={fieldError("codexAcpPath")}
         onChange={(value) => {
@@ -395,7 +436,11 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
             ,{" "}
             {conflict.codexAcpPath === null
               ? "sin adaptador de Codex"
-              : `adaptador de Codex ${conflict.codexAcpPath}`}{" "}
+              : `adaptador de Codex ${conflict.codexAcpPath}`}
+            ,{" "}
+            {conflict.nodePath === null
+              ? "sin ruta de node"
+              : `node ${conflict.nodePath}`}{" "}
             y{" "}
             {conflict.approvalNotifications
               ? "con notificaciones de permisos"
@@ -432,6 +477,8 @@ interface AdapterFieldProps {
   agent: AcpAgent;
   /** Nombre del ejecutable, para el ejemplo de ruta. */
   executable: string;
+  /** Ruta de node escrita (sin guardar), con la que se comprueba el adaptador. */
+  nodePath: string;
   value: string;
   error: UiError | null;
   onChange: (value: string) => void;
@@ -446,6 +493,7 @@ interface AdapterFieldProps {
 function AdapterField({
   agent,
   executable,
+  nodePath,
   value,
   error,
   onChange,
@@ -455,6 +503,11 @@ function AdapterField({
   const name = ACP_AGENT_NAME[agent];
   const check = useMutation(checkAdapter);
   const [checked, setChecked] = useState<AcpAdapterCheck | null>(null);
+  // Ruta de node con la que se hizo la última comprobación: si cambia, el resultado ya no
+  // vale y no se muestra.
+  const [checkedNode, setCheckedNode] = useState<string | null>(null);
+  const node = nodePath.trim();
+  const stale = checkedNode !== node;
   // Se comprueba siempre la ruta escrita (sin guardarla): con el campo vacío no hay nada que
   // comprobar y el botón se deshabilita con la explicación al lado.
   const pathToCheck = value.trim();
@@ -462,7 +515,12 @@ function AdapterField({
   async function handleCheck() {
     if (pathToCheck === "") return;
     setChecked(null);
-    const result = await check.mutate({ agent, path: pathToCheck });
+    setCheckedNode(node);
+    const result = await check.mutate({
+      agent,
+      path: pathToCheck,
+      nodePath: node,
+    });
     if (result.ok) setChecked(result.value);
   }
 
@@ -517,15 +575,155 @@ function AdapterField({
             Comprobando el adaptador (puede tardar unos segundos)…
           </p>
         )}
-        {checked && (
+        {checked && !stale && (
           <p className="relations__saved">✓ {describeAdapterCheck(checked)}</p>
         )}
-        {check.error && (
+        {check.error && !stale && (
           <p className="field__error">
-            No se pudo comprobar el adaptador: {check.error.message}
+            {check.error.field === "nodePath"
+              ? "Revisa la ruta de node: "
+              : "No se pudo comprobar el adaptador: "}
+            {check.error.message}
           </p>
         )}
       </div>
+    </div>
+  );
+}
+
+interface NodeFieldProps {
+  value: string;
+  error: UiError | null;
+  onChange: (value: string) => void;
+}
+
+/**
+ * Ruta de node (HU-026) para los adaptadores npm, con «Buscar node»: propone las instalaciones
+ * encontradas en las ubicaciones habituales (no ejecuta ni guarda nada); elegir una solo
+ * rellena el campo, que se valida al guardar como cualquier otro.
+ */
+function NodeField({ value, error, onChange }: NodeFieldProps) {
+  const id = useId();
+  const search = useMutation(searchNode);
+  const [found, setFound] = useState<NodeCandidate[] | null>(null);
+  // Aviso tras «Usar»: la elección solo rellena el campo.
+  const [chosen, setChosen] = useState<string | null>(null);
+
+  async function handleSearch() {
+    setFound(null);
+    setChosen(null);
+    const result = await search.mutate(undefined);
+    if (result.ok) setFound(result.value);
+  }
+
+  const describedBy = [`${id}-hint`, error ? `${id}-error` : null]
+    .filter(Boolean)
+    .join(" ");
+  const current = value.trim();
+
+  return (
+    <div className="field">
+      <label htmlFor={`${id}-path`}>Ruta de node (opcional)</label>
+      <input
+        id={`${id}-path`}
+        type="text"
+        className="input--mono"
+        spellCheck={false}
+        autoComplete="off"
+        autoCapitalize="off"
+        placeholder="/ruta/absoluta/a/node"
+        value={value}
+        aria-invalid={error ? true : undefined}
+        aria-describedby={describedBy}
+        onChange={(event) => {
+          onChange(event.target.value);
+          setChosen(null);
+        }}
+      />
+      <div id={`${id}-hint`} className="field__hint run-settings__help">
+        <p>
+          Los adaptadores instalados con npm son programas de Node.js. Si abres
+          la app desde Finder o el menú Inicio, no tiene el PATH de tu terminal
+          y puede no encontrar <code>node</code> (pasa con nvm, fnm o asdf).
+          Indica aquí el ejecutable <code>node</code>, Node 22 o posterior (la
+          ruta que muestra <code>which node</code> en una terminal, o{" "}
+          <code>where node</code> en Windows). Toda su carpeta se pone delante
+          del PATH de los adaptadores y de los comandos del agente. Vacío = el
+          PATH con el que se abrió la app.
+        </p>
+      </div>
+      <FieldError id={`${id}-error`} error={error} />
+      <div className="run-start__actions">
+        <button
+          type="button"
+          className="button button--secondary"
+          aria-busy={search.pending}
+          disabled={search.pending}
+          aria-describedby={`${id}-found`}
+          onClick={() => {
+            void handleSearch();
+          }}
+        >
+          Buscar node
+        </button>
+      </div>
+      {/* Solo el resumen es región viva; la lista (con botones) va fuera. */}
+      <div id={`${id}-found`} role="status">
+        {search.pending && (
+          <p className="panel__muted">Buscando instalaciones de node…</p>
+        )}
+        {search.error && (
+          <p className="field__error">
+            No se pudo buscar node: {search.error.message}
+          </p>
+        )}
+        {found !== null && found.length === 0 && (
+          <p className="field__hint">
+            No se encontró node en las ubicaciones habituales. Escribe la ruta
+            que muestra <code>which node</code> en una terminal.
+          </p>
+        )}
+        {found !== null && found.length > 0 && (
+          <p className="field__hint">
+            {found.length === 1
+              ? "Se encontró 1 instalación"
+              : `Se encontraron ${String(found.length)} instalaciones`}{" "}
+            (no se ha ejecutado ninguna; la versión sale del nombre de su
+            carpeta). Elige una y guarda.
+          </p>
+        )}
+        {chosen !== null && (
+          <p className="relations__saved">
+            Ruta de node elegida (sin guardar): {chosen}
+          </p>
+        )}
+      </div>
+      {found !== null && found.length > 0 && (
+        <ul className="node-candidates" aria-label="Instalaciones de node">
+          {found.map((candidate) => (
+            <li key={candidate.path} className="node-candidates__item">
+              <span className="facts__path">{candidate.path}</span>{" "}
+              <span className="panel__muted">
+                ({describeNodeCandidate(candidate)})
+              </span>{" "}
+              {candidate.path === current ? (
+                <span>en uso</span>
+              ) : (
+                <button
+                  type="button"
+                  className="button button--secondary"
+                  onClick={() => {
+                    onChange(candidate.path);
+                    setChosen(candidate.path);
+                  }}
+                >
+                  Usar <span className="visually-hidden">{candidate.path}</span>
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

@@ -96,6 +96,6 @@ Antes, si quieres conservar tus proyectos, crea una copia y guárdala en otra ca
 - macOS solo Apple Silicon; Windows sin probar a mano.
 - Sin actualización automática: cada versión se instala a mano.
 - El servidor MCP (`kanbania-mcp`) no va dentro del instalador: es un binario aparte en el mismo artefacto (o se compila desde el código fuente; ver [AGENTES.md](AGENTES.md)).
-- Los adaptadores npm de los agentes necesitan `node` en `PATH`: si usas nvm y abres la app desde Finder, no lo encuentran (ver [AGENTES.md](AGENTES.md)).
+- Los adaptadores npm de los agentes necesitan `node`: si usas nvm y abres la app desde Finder, indica la «Ruta de node» en «Sistema» → «Ejecuciones» (ver [AGENTES.md](AGENTES.md)).
 - En Windows, `service.json` hereda los permisos del directorio de datos: no uses `KANBANIA_DATA_DIR` en una carpeta compartida con otros usuarios.
 - Iconos provisionales.
