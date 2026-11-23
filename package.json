@@ -20,7 +20,7 @@
     "format": "prettier --write . && cargo fmt --all",
     "format:check": "prettier --check . && cargo fmt --all --check",
     "lint:rust": "cargo clippy --workspace --all-targets --locked -- -D warnings && cargo check -p kanbania-runner --no-default-features --locked",
-    "test:rust": "cargo test --workspace --locked && npm run check:mcp-deps",
+    "test:rust": "cargo test --workspace --locked --no-fail-fast && npm run check:mcp-deps",
     "check:mcp-deps": "node scripts/check-mcp-deps.mjs",
     "licenses": "node scripts/third-party-licenses.mjs",
     "licenses:check": "node scripts/third-party-licenses.mjs --check",

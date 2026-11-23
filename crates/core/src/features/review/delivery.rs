@@ -364,12 +364,18 @@ mod tests {
         }
     }
 
+    /// Ruta absoluta en la plataforma de la prueba.
+    #[cfg(unix)]
+    const ABSOLUTE: &str = "/tmp/informe.pdf";
+    #[cfg(windows)]
+    const ABSOLUTE: &str = r"C:\informe.pdf";
+
     #[test]
     fn only_http_urls_and_absolute_paths_are_accepted() {
         let ok = validate_references(&[
             r(ReferenceKind::Url, " https://github.com/o/r/pull/1 "),
             r(ReferenceKind::Url, "http://localhost:3000/demo"),
-            r(ReferenceKind::Path, "/tmp/informe.pdf"),
+            r(ReferenceKind::Path, ABSOLUTE),
         ])
         .unwrap();
         assert_eq!(ok[0].value, "https://github.com/o/r/pull/1");
@@ -389,7 +395,7 @@ mod tests {
                 "{bad:?}"
             );
         }
-        let many: Vec<_> = (0..11).map(|_| r(ReferenceKind::Path, "/tmp/x")).collect();
+        let many: Vec<_> = (0..11).map(|_| r(ReferenceKind::Path, ABSOLUTE)).collect();
         assert!(validate_references(&many).is_err());
     }
 

@@ -193,9 +193,7 @@ fn sha256_file(path: &Path) -> Result<(u64, String), CoreError> {
 }
 
 fn sync_file(path: &Path) -> Result<(), CoreError> {
-    std::fs::File::open(path)
-        .and_then(|f| f.sync_all())
-        .map_err(io)
+    super::sync_file(path).map_err(io)
 }
 
 /// Tras renombrar, sincroniza el directorio (Unix) para que el cambio sobreviva a un corte de

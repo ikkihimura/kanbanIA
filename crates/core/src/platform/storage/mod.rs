@@ -243,8 +243,18 @@ fn restore_previous(backup: &Path, database: &Path) -> std::io::Result<()> {
     staging.push(".restoring");
     let staging = PathBuf::from(staging);
     std::fs::copy(backup, &staging)?;
-    std::fs::File::open(&staging)?.sync_all()?;
+    sync_file(&staging)?;
     std::fs::rename(&staging, database)
+}
+
+/// Lleva a disco un archivo ya escrito. Se abre con escritura: en Windows `FlushFileBuffers`
+/// (lo que hace `sync_all`) exige un manejador con permiso de escritura y con uno de solo
+/// lectura falla con «Access is denied».
+pub(crate) fn sync_file(path: &Path) -> std::io::Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .sync_all()
 }
 
 #[cfg(test)]
