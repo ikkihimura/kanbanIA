@@ -32,9 +32,11 @@ use kanbania_core::features::team::{
 use kanbania_core::platform::actor::Actor;
 use kanbania_core::platform::clock::ManualClock;
 use kanbania_core::platform::storage::Store;
+#[cfg(unix)]
+use kanbania_runner::acp::node_path_env;
 use kanbania_runner::acp::{
     AcpClient, AcpLimits, CLAUDE_CODE_PROFILE, CODEX_HOME_NOTE, ISOLATION_NOTE, ProbeError,
-    TurnEnd, codex_env, node_path_env, probe_adapter,
+    TurnEnd, codex_env, probe_adapter,
 };
 use kanbania_runner::output::{AgentKind, OutputLog, read_tail};
 use kanbania_runner::process::{ProcessSpec, RunningProcess, cancel_pair};
@@ -224,6 +226,7 @@ impl Env {
     }
 
     /// Ruta de node (HU-026), sin tocar el resto de la configuración.
+    #[cfg(unix)]
     async fn set_node(&self, node_path: Option<String>) {
         let current = get_run_settings(&self.store).await.unwrap();
         update_run_settings(
@@ -2114,7 +2117,9 @@ async fn codex_gets_a_permissions_profile_that_denies_the_app_data() {
 }
 
 /// Variable que marca la prueba relanzada sin `node` en el `PATH` (HU-026).
+#[cfg(unix)]
 const NODE_HELPER: &str = "KANBANIA_NODE_HELPER";
+#[cfg(unix)]
 const NODE_TEST: &str = "an_npm_adapter_without_node_needs_the_node_path";
 
 /// HU-026: un adaptador npm (`#!/usr/bin/env node`) con una app abierta sin `node` en el `PATH`

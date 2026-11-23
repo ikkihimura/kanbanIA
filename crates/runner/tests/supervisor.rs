@@ -617,6 +617,7 @@ async fn shutdown_interrupts_running_attempts_and_kills_their_trees() {
     let supervisor = env.supervisor(config).await;
     let run = env.queued("Lenta", TestScenario::Slow, &supervisor).await;
     env.wait_for(&run, &[RunState::Running]).await;
+    #[cfg(unix)]
     let pids = env.slow_pids(&run).await;
     common::wait_heartbeats_alive(&beats).await;
 
