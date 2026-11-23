@@ -24,10 +24,12 @@ import {
 /** Iguales que los límites del núcleo (`run_settings`); el núcleo vuelve a validarlos. */
 export const CONCURRENCY_LIMITS = { min: 1, max: 8 } as const;
 export const TIMEOUT_LIMITS = { min: 1, max: 240 } as const;
+export const RETENTION_LIMITS = { min: 1, max: 3650 } as const;
 
 type Field =
   | "maxConcurrency"
   | "timeoutMinutes"
+  | "retentionDays"
   | "claudeAcpPath"
   | "codexAcpPath"
   | "nodePath";
@@ -101,6 +103,7 @@ function isRunSettings(value: unknown): value is RunSettings {
     (typeof v.codexAcpPath === "string" || v.codexAcpPath === null) &&
     (typeof v.nodePath === "string" || v.nodePath === null) &&
     typeof v.approvalNotifications === "boolean" &&
+    typeof v.retentionDays === "number" &&
     typeof v.revision === "number"
   );
 }
@@ -160,6 +163,7 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
   const [codexPath, setCodexPath] = useState(initial.codexAcpPath ?? "");
   const [nodePath, setNodePath] = useState(initial.nodePath ?? "");
   const [notify, setNotify] = useState(initial.approvalNotifications);
+  const [retention, setRetention] = useState(String(initial.retentionDays));
   const [localErrors, setLocalErrors] = useState<
     Partial<Record<Field, UiError>>
   >({});
@@ -173,7 +177,8 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
     acpPath !== (base.claudeAcpPath ?? "") ||
     codexPath !== (base.codexAcpPath ?? "") ||
     nodePath !== (base.nodePath ?? "") ||
-    notify !== base.approvalNotifications;
+    notify !== base.approvalNotifications ||
+    retention !== String(base.retentionDays);
   useUnsavedChangesGuard(dirty);
 
   const touch = () => {
@@ -185,6 +190,7 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
   async function handleSubmit() {
     const maxConcurrency = parseInRange(concurrency, CONCURRENCY_LIMITS);
     const timeoutMinutes = parseInRange(timeout, TIMEOUT_LIMITS);
+    const retentionDays = parseInRange(retention, RETENTION_LIMITS);
     const errors: Partial<Record<Field, UiError>> = {};
     if (maxConcurrency === null)
       errors.maxConcurrency = {
@@ -198,9 +204,20 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
         field: "timeoutMinutes",
         message: `Escribe un número entero de minutos entre ${String(TIMEOUT_LIMITS.min)} y ${String(TIMEOUT_LIMITS.max)}.`,
       };
+    if (retentionDays === null)
+      errors.retentionDays = {
+        code: "validation",
+        field: "retentionDays",
+        message: `Escribe un número entero de días entre ${String(RETENTION_LIMITS.min)} y ${String(RETENTION_LIMITS.max)}.`,
+      };
     setLocalErrors(errors);
     setMessage("");
-    if (maxConcurrency === null || timeoutMinutes === null) return;
+    if (
+      maxConcurrency === null ||
+      timeoutMinutes === null ||
+      retentionDays === null
+    )
+      return;
 
     const trimmedPath = acpPath.trim();
     const trimmedCodex = codexPath.trim();
@@ -215,6 +232,8 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
       nodePath: trimmedNode === "" ? null : trimmedNode,
       // También obligatorio: sin él, el núcleo rechaza la petición.
       approvalNotifications: notify,
+      // Se envía siempre (ausente = no cambia, pero así guarda lo que se ve).
+      retentionDays,
     });
     if (result.ok) {
       setBase(result.value);
@@ -225,6 +244,7 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
       setCodexPath(result.value.codexAcpPath ?? "");
       setNodePath(result.value.nodePath ?? "");
       setNotify(result.value.approvalNotifications);
+      setRetention(String(result.value.retentionDays));
       setMessage("Configuración guardada.");
     } else if (
       result.error.code === "conflict" &&
@@ -242,11 +262,13 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
     localErrors[field] ?? (serverError?.field === field ? serverError : null);
   const concurrencyError = fieldError("maxConcurrency");
   const timeoutError = fieldError("timeoutMinutes");
+  const retentionError = fieldError("retentionDays");
   const generalError =
     serverError &&
     serverError.code !== "conflict" &&
     serverError.field !== "maxConcurrency" &&
     serverError.field !== "timeoutMinutes" &&
+    serverError.field !== "retentionDays" &&
     serverError.field !== "claudeAcpPath" &&
     serverError.field !== "codexAcpPath" &&
     serverError.field !== "nodePath"
@@ -323,6 +345,37 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
           ejecución usa el valor vigente al salir de la cola.
         </span>
         <FieldError id={`${id}-timeout-error`} error={timeoutError} />
+      </div>
+
+      <div className="field">
+        <label htmlFor={`${id}-retention`}>
+          Antigüedad para proponer limpieza (días)
+        </label>
+        <input
+          id={`${id}-retention`}
+          type="number"
+          inputMode="numeric"
+          min={RETENTION_LIMITS.min}
+          max={RETENTION_LIMITS.max}
+          step={1}
+          value={retention}
+          aria-invalid={retentionError ? true : undefined}
+          aria-describedby={describe(
+            `${id}-retention-hint`,
+            retentionError,
+            `${id}-retention-error`,
+          )}
+          onChange={(event) => {
+            setRetention(event.target.value);
+            touch();
+          }}
+        />
+        <span id={`${id}-retention-hint`} className="field__hint">
+          Entre {RETENTION_LIMITS.min} y {RETENTION_LIMITS.max}. Al limpiar se
+          proponen los intentos terminados hace más días que esto. Nada se borra
+          solo.
+        </span>
+        <FieldError id={`${id}-retention-error`} error={retentionError} />
       </div>
 
       <NodeField
@@ -429,7 +482,8 @@ function SettingsForm({ initial }: { initial: RunSettings }) {
         <div className="run-form__alert" role="alert">
           <p>
             La configuración cambió mientras la editabas. Ahora es:{" "}
-            {conflict.maxConcurrency} a la vez, {conflict.timeoutMinutes} min,{" "}
+            {conflict.maxConcurrency} a la vez, {conflict.timeoutMinutes} min,
+            limpieza a partir de {conflict.retentionDays} días,{" "}
             {conflict.claudeAcpPath === null
               ? "sin adaptador de Claude Code"
               : `adaptador de Claude Code ${conflict.claudeAcpPath}`}

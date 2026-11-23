@@ -29,7 +29,7 @@ pub enum WorktreeRemoval {
 }
 
 impl WorktreeRemoval {
-    fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::Clean => "clean",
             Self::Discarded => "discarded",
@@ -66,6 +66,9 @@ pub struct RunWorktree {
     pub created_at: String,
     pub removed_at: Option<String>,
     pub removal: Option<WorktreeRemoval>,
+    /// Cuándo se borró la rama en una limpieza (HU-025; solo con confirmación explícita).
+    #[serde(default)]
+    pub branch_deleted_at: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -78,6 +81,7 @@ struct WorktreeRow {
     created_at: String,
     removed_at: Option<String>,
     removal: Option<String>,
+    branch_deleted_at: Option<String>,
 }
 
 pub(super) async fn load_worktree(
@@ -89,7 +93,9 @@ pub(super) async fn load_worktree(
         iso_from_ms!("created_at_ms"),
         " AS created_at, ",
         iso_from_ms!("removed_at_ms"),
-        " AS removed_at, removal FROM run_worktrees WHERE run_id = ?"
+        " AS removed_at, removal, ",
+        iso_from_ms!("branch_deleted_at_ms"),
+        " AS branch_deleted_at FROM run_worktrees WHERE run_id = ?"
     ))
     .bind(run_id)
     .fetch_optional(&mut *conn)
@@ -108,6 +114,7 @@ pub(super) async fn load_worktree(
             base_commit: r.base_commit,
             created_at: r.created_at,
             removed_at: r.removed_at,
+            branch_deleted_at: r.branch_deleted_at,
         })
     })
     .transpose()

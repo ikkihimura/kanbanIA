@@ -32,6 +32,11 @@ import type { RunWorktree } from "../../contracts/generated/RunWorktree";
 import type { StartRunInput } from "../../contracts/generated/StartRunInput";
 import type { UpdateRunSettingsInput } from "../../contracts/generated/UpdateRunSettingsInput";
 import type { WorktreeChanges } from "../../contracts/generated/WorktreeChanges";
+import type { CleanRunInput } from "../../contracts/generated/CleanRunInput";
+import type { CleanRunResult } from "../../contracts/generated/CleanRunResult";
+import type { RemoveOrphanWorktreeInput } from "../../contracts/generated/RemoveOrphanWorktreeInput";
+import type { RetentionPlan } from "../../contracts/generated/RetentionPlan";
+import type { WorktreeRemoval } from "../../contracts/generated/WorktreeRemoval";
 import type { BackupInfo } from "../../contracts/generated/BackupInfo";
 import type { RestoreOutcome } from "../../contracts/generated/RestoreOutcome";
 import type { RestoreSource } from "../../contracts/generated/RestoreSource";
@@ -402,6 +407,34 @@ export function removeRunWorktree(
   input: RemoveRunWorktreeInput,
 ): Promise<RunWorktree> {
   return call("remove_run_worktree", { input });
+}
+
+/**
+ * Plan de limpieza (HU-025): cuánto ocupan la salida de los intentos y los worktrees, los
+ * intentos terminados hace más de `retentionDays` que se pueden limpiar y los worktrees sin
+ * intento. No borra nada; ejecuta Git y mide el disco (puede tardar): pídelo a demanda.
+ */
+export function getRetentionPlan(): Promise<RetentionPlan> {
+  return call("get_retention_plan");
+}
+
+/**
+ * Limpia lo elegido de un intento terminado (salida, worktree, rama). Si eliminar el worktree
+ * perdería algo, `validation` en `force` hasta pedir `discardWorktreeChanges`; otros fallos,
+ * `validation` en `worktree`, `branch` o `runId`, o `not_found`.
+ */
+export function cleanRun(input: CleanRunInput): Promise<CleanRunResult> {
+  return call("clean_run", { input });
+}
+
+/**
+ * Elimina una carpeta de worktree sin intento (con las comprobaciones de HU-018). Si
+ * perdería algo, `validation` en `force` hasta pedir `discardChanges`. La rama se conserva.
+ */
+export function removeOrphanWorktree(
+  input: RemoveOrphanWorktreeInput,
+): Promise<WorktreeRemoval> {
+  return call("remove_orphan_worktree", { input });
 }
 
 export function getRunSettings(): Promise<RunSettings> {

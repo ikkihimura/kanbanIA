@@ -485,6 +485,9 @@ pub async fn validate_registered(
 
     prepare_hooks_dir(&git.empty_hooks_dir)?;
     let repository = existing_dir(repository)?;
+    // Antes de ejecutar Git en el worktree: su `.git` lo escribe el agente y podría señalar a
+    // un repositorio propio (con filtros que el Git de la app ejecutaría sin sandbox).
+    check_admin_link(&repository, &canonical_path)?;
     require_toplevel(git, &repository, None).await?;
     let output = run_git(
         git,
@@ -515,6 +518,183 @@ pub async fn validate_registered(
         ));
     }
     Ok(canonical_path)
+}
+
+/// Prefijo de las ramas de los intentos: la limpieza (HU-025) nunca toca otra rama.
+pub const RUN_BRANCH_PREFIX: &str = "kanbania/";
+
+/// Rama de un intento en el repositorio: `None` si ya no existe; si existe, cuántos commits
+/// suyos no están en ninguna otra rama (`None` dentro si no se pudo saber). Solo lectura.
+pub async fn branch_status(
+    git: &GitConfig,
+    repository: &Path,
+    branch: &str,
+) -> Result<Option<Option<u64>>, WorktreeError> {
+    validate_run_branch(branch)?;
+    prepare_hooks_dir(&git.empty_hooks_dir)?;
+    let repository = existing_dir(repository)?;
+    require_toplevel(git, &repository, None).await?;
+    let in_repo = |args: Vec<OsString>| {
+        let mut full: Vec<OsString> = vec!["-C".into(), repository.clone().into_os_string()];
+        full.extend(args);
+        full
+    };
+    let reference = format!("refs/heads/{branch}");
+    let exists = run_git(
+        git,
+        in_repo(vec![
+            "show-ref".into(),
+            "--verify".into(),
+            "--quiet".into(),
+            reference.clone().into(),
+        ]),
+    )
+    .await?;
+    if !exists.success {
+        return Ok(None);
+    }
+    // Commits de la rama que no están en ninguna otra (`--exclude` usa el nombre sin
+    // `refs/heads/` cuando acompaña a `--branches`).
+    let output = run_git(
+        git,
+        in_repo(vec![
+            "rev-list".into(),
+            "--count".into(),
+            reference.into(),
+            "--not".into(),
+            format!("--exclude={branch}").into(),
+            "--branches".into(),
+        ]),
+    )
+    .await?;
+    let count = output
+        .success
+        .then(|| {
+            String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .parse::<u64>()
+                .ok()
+        })
+        .flatten();
+    Ok(Some(count))
+}
+
+/// Borra la rama de un intento (`git branch -D`: también con trabajo sin integrar; la persona
+/// lo confirmó una por una). `false` si ya no existía. Git se niega si la rama está en uso en
+/// algún worktree → [`WorktreeErrorKind::GitFailed`].
+pub async fn delete_branch(
+    git: &GitConfig,
+    repository: &Path,
+    branch: &str,
+) -> Result<bool, WorktreeError> {
+    if branch_status(git, repository, branch).await?.is_none() {
+        return Ok(false);
+    }
+    let repository = existing_dir(repository)?;
+    let output = run_git(
+        git,
+        vec![
+            "-C".into(),
+            repository.into_os_string(),
+            "branch".into(),
+            "-D".into(),
+            "--".into(),
+            branch.into(),
+        ],
+    )
+    .await?;
+    if !output.success {
+        return Err(WorktreeError::new(
+            WorktreeErrorKind::GitFailed,
+            output.stderr_text(),
+        ));
+    }
+    Ok(true)
+}
+
+fn validate_run_branch(branch: &str) -> Result<(), WorktreeError> {
+    validate_branch(branch)?;
+    if branch.starts_with(RUN_BRANCH_PREFIX) {
+        Ok(())
+    } else {
+        Err(WorktreeError::new(
+            WorktreeErrorKind::InvalidInput,
+            "no es una rama de intento",
+        ))
+    }
+}
+
+/// De dónde sale una carpeta de worktree sin fila (huérfana, HU-025): el repositorio cuyo
+/// `.git/worktrees/<nombre>` señala su archivo `.git` y la rama de su HEAD (si es una rama de
+/// intento válida). Solo lee dos archivos pequeños; `None` si no tiene esa forma (entonces no
+/// se puede comprobar ni eliminar con Git). Quien llama debe pasar después por
+/// [`validate_registered`] (lo hacen [`worktree_status`] y [`remove_worktree`]).
+pub fn orphan_origin(path: &Path) -> Option<(PathBuf, Option<String>)> {
+    let gitdir = gitdir_pointer(path)?;
+    let common = gitdir.parent()?;
+    if common.file_name()? != "worktrees" {
+        return None;
+    }
+    let dot_git = common.parent()?;
+    if dot_git.file_name()? != ".git" {
+        return None;
+    }
+    let repository = dot_git.parent()?.to_path_buf();
+    let branch = read_small(&gitdir.join("HEAD"))
+        .and_then(|head| {
+            head.trim()
+                .strip_prefix("ref: refs/heads/")
+                .map(str::to_owned)
+        })
+        .filter(|branch| validate_run_branch(branch).is_ok());
+    Some((repository, branch))
+}
+
+/// Carpeta de administración a la que señala el archivo `<worktree>/.git` (`gitdir: …`;
+/// relativa al worktree si Git usa rutas relativas), canónica. `None` si no tiene esa forma.
+fn gitdir_pointer(worktree: &Path) -> Option<PathBuf> {
+    let pointer = read_small(&worktree.join(".git"))?;
+    let target = Path::new(pointer.strip_prefix("gitdir:")?.trim());
+    dunce::canonicalize(worktree.join(target)).ok()
+}
+
+/// El worktree y el repositorio se señalan mutuamente, comprobado sin Git: `<worktree>/.git`
+/// apunta a `<repo>/.git/worktrees/<n>`, que guarda en `gitdir` la ruta de ese `.git` y cuyo
+/// `commondir` es `<repo>/.git`. Si no (un `.git` reescrito, un repositorio cuyo `.git` no es
+/// una carpeta…), [`WorktreeErrorKind::NotRegistered`]: no se ejecuta Git ahí.
+fn check_admin_link(repository: &Path, worktree: &Path) -> Result<(), WorktreeError> {
+    let fail = |detail: &str| WorktreeError::new(WorktreeErrorKind::NotRegistered, detail);
+    let common = repository.join(".git");
+    let is_dir = std::fs::symlink_metadata(&common).is_ok_and(|m| m.is_dir());
+    let common = dunce::canonicalize(&common)
+        .ok()
+        .filter(|_| is_dir)
+        .ok_or_else(|| fail("el repositorio no tiene una carpeta .git"))?;
+    let admin =
+        gitdir_pointer(worktree).ok_or_else(|| fail("el .git del worktree no es válido"))?;
+    if admin.parent() != Some(common.join("worktrees").as_path()) {
+        return Err(fail("el .git del worktree señala a otro repositorio"));
+    }
+    let back = read_small(&admin.join("gitdir"))
+        .and_then(|text| dunce::canonicalize(admin.join(text.trim())).ok());
+    if back.as_deref() != Some(worktree.join(".git").as_path()) {
+        return Err(fail("el repositorio no señala a este worktree"));
+    }
+    let commondir = read_small(&admin.join("commondir"))
+        .and_then(|text| dunce::canonicalize(admin.join(text.trim())).ok());
+    if commondir.as_deref() != Some(common.as_path()) {
+        return Err(fail("commondir no es el del repositorio"));
+    }
+    Ok(())
+}
+
+/// Archivo normal (nunca un FIFO ni un enlace) de como mucho 4 KiB, como texto.
+fn read_small(path: &Path) -> Option<String> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > 4096 {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
 }
 
 /// Comprueba el nombre de rama: ASCII `[A-Za-z0-9._/-]`, ≤ 100, sin `..`, `//`, `@{`, sin

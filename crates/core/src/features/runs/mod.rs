@@ -45,6 +45,7 @@ mod get;
 mod git_head;
 mod list;
 mod node;
+mod retention;
 mod run;
 mod runnable;
 mod settings;
@@ -75,11 +76,18 @@ pub use execution_views::{
 pub use get::{MAX_DETAIL_EVENTS, RunDetail, RunEventRecord, RunStartRequest, get_run};
 pub use list::list_story_runs;
 pub use node::{MAX_NODE_CANDIDATES, NodeCandidate, NodeSearchRoots, find_node_candidates};
+pub use retention::{
+    CleanRunInput, CleanRunResult, CleanupRecord, CleanupTarget, DiskUsage, MAX_RETENTION_ITEMS,
+    OrphanWorktree, RemoveOrphanWorktreeInput, RetentionBranch, RetentionCandidate,
+    RetentionCandidates, RetentionItem, RetentionPlan, RetentionWorktree, WorktreeCheck,
+    cleanup_target, linked_repository_paths, live_worktree_paths, record_cleanup,
+    retention_candidates,
+};
 pub use run::{RunState, RunSummary, RunUsage};
 pub use settings::{
-    MAX_ADAPTER_PATH_CHARS, MAX_CONCURRENCY, MAX_TIMEOUT_MINUTES, MIN_CONCURRENCY,
-    MIN_TIMEOUT_MINUTES, RunSettings, UpdateRunSettingsInput, check_adapter_path, check_node_path,
-    get_run_settings, update_run_settings,
+    MAX_ADAPTER_PATH_CHARS, MAX_CONCURRENCY, MAX_RETENTION_DAYS, MAX_TIMEOUT_MINUTES,
+    MIN_CONCURRENCY, MIN_RETENTION_DAYS, MIN_TIMEOUT_MINUTES, RunSettings, UpdateRunSettingsInput,
+    check_adapter_path, check_node_path, get_run_settings, update_run_settings,
 };
 pub use snapshot::{
     RunSnapshot, SNAPSHOT_SCHEMA_VERSION, SnapshotAgent, SnapshotColumn, SnapshotCriterion,

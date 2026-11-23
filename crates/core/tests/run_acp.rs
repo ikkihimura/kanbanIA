@@ -233,6 +233,7 @@ impl Board {
                 claude_acp_path: path.map(str::to_owned),
                 codex_acp_path: None,
                 node_path: None,
+                retention_days: None,
                 approval_notifications: false,
             },
         )
@@ -438,7 +439,21 @@ async fn migration_0013_keeps_existing_start_requests_as_test_process() {
         .await
         .unwrap();
         for table in tables {
-            let copy = format!("INSERT INTO main.\"{table}\" SELECT * FROM src.\"{table}\"");
+            // Solo las columnas que existen en 0012 (las migraciones posteriores añaden más).
+            let columns: Vec<String> =
+                sqlx::query_scalar("SELECT name FROM pragma_table_info(?, 'main')")
+                    .bind(&table)
+                    .fetch_all(&mut *conn)
+                    .await
+                    .unwrap();
+            let columns = columns
+                .iter()
+                .map(|c| format!("\"{c}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let copy = format!(
+                "INSERT INTO main.\"{table}\" ({columns}) SELECT {columns} FROM src.\"{table}\""
+            );
             sqlx::raw_sql(sqlx::AssertSqlSafe(copy))
                 .execute(&mut *conn)
                 .await
@@ -804,6 +819,7 @@ async fn adapter_path_is_checked_on_disk_before_saving() {
                     claude_acp_path: Some(adapter.to_str().unwrap().into()),
                     codex_acp_path: None,
                     node_path: None,
+                    retention_days: None,
                     approval_notifications: false,
                 },
             )
@@ -1358,6 +1374,7 @@ async fn an_unchanged_adapter_path_is_not_checked_again() {
             claude_acp_path: Some(format!(" {path} ")),
             codex_acp_path: None,
             node_path: None,
+            retention_days: None,
             approval_notifications: false,
         },
     )
@@ -1385,6 +1402,7 @@ async fn an_unchanged_adapter_path_is_not_checked_again() {
             claude_acp_path: Some(path.clone()),
             codex_acp_path: None,
             node_path: None,
+            retention_days: None,
             approval_notifications: false,
         },
     )
@@ -1450,6 +1468,7 @@ async fn codex_executor_uses_its_own_adapter_path() {
         claude_acp_path: current.claude_acp_path.clone(),
         codex_acp_path: Some("codex-acp".into()),
         node_path: None,
+        retention_days: None,
         approval_notifications: false,
     };
     let (code, field, _) = error(update_run_settings(&b.store, &Actor::Human, &input).await);
@@ -1506,6 +1525,7 @@ async fn codex_executor_uses_its_own_adapter_path() {
             expected_revision: current.revision,
             codex_acp_path: None,
             node_path: None,
+            retention_days: None,
             ..input
         },
     )
@@ -1619,6 +1639,7 @@ async fn the_same_team_agent_runs_with_either_adapter() {
             claude_acp_path: Some(claude.to_str().unwrap().into()),
             codex_acp_path: Some(codex.to_str().unwrap().into()),
             node_path: None,
+            retention_days: None,
             approval_notifications: false,
         },
     )
@@ -1720,6 +1741,7 @@ async fn a_stale_codex_path_change_is_a_conflict() {
         claude_acp_path: None,
         codex_acp_path: Some(codex.to_str().unwrap().into()),
         node_path: None,
+        retention_days: None,
         approval_notifications: false,
     };
     update_run_settings(&b.store, &Actor::Human, &input)
@@ -1732,6 +1754,7 @@ async fn a_stale_codex_path_change_is_a_conflict() {
             &UpdateRunSettingsInput {
                 codex_acp_path: None,
                 node_path: None,
+                retention_days: None,
                 ..input
             },
         )
@@ -1770,6 +1793,7 @@ async fn node_path_is_validated_saved_and_dispatched() {
                     claude_acp_path: current.claude_acp_path.clone(),
                     codex_acp_path: None,
                     node_path: path,
+                    retention_days: None,
                     approval_notifications: false,
                 },
             )

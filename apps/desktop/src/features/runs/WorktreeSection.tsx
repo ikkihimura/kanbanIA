@@ -202,7 +202,19 @@ export function WorktreeSection({
             <dt>Ruta</dt>
             <dd className="repo__path">{worktree.path}</dd>
             <dt>Rama</dt>
-            <dd className="input--mono">{worktree.branch}</dd>
+            <dd>
+              <span className="input--mono">{worktree.branch}</span>
+              {worktree.branchDeletedAt !== null && (
+                <>
+                  {" "}
+                  · ya no existe (anotado al limpiar el{" "}
+                  <time dateTime={worktree.branchDeletedAt}>
+                    {formatDateTime(worktree.branchDeletedAt)}
+                  </time>
+                  )
+                </>
+              )}
+            </dd>
             <dt>Commit base</dt>
             <dd className="input--mono">{worktree.baseCommit}</dd>
             <dt>Creado</dt>
@@ -223,11 +235,20 @@ export function WorktreeSection({
               </>
             )}
           </dl>
-          <p className="field__hint">
-            La rama se conserva siempre al eliminar el worktree: los commits que
-            estén en ella no se pierden. Antes de eliminarlo se comprueba si hay
-            cambios, archivos ignorados o commits fuera de la rama.
-          </p>
+          {worktree.branchDeletedAt === null ? (
+            <p className="field__hint">
+              La rama se conserva siempre al eliminar el worktree: los commits
+              que estén en ella no se pierden. Antes de eliminarlo se comprueba
+              si hay cambios, archivos ignorados o commits fuera de la rama.
+            </p>
+          ) : (
+            <p className="field__hint">
+              La rama del intento ya no existe: se borró al limpiar, con
+              confirmación explícita, o ya no estaba. Sus commits que no
+              estuvieran en otra rama solo quedan en el reflog de Git hasta que
+              este los recoja.
+            </p>
+          )}
 
           {!removed && !ended && (
             <p className="field__hint">

@@ -31,4 +31,9 @@ nodePath: string | null,
  * Notificación del sistema cuando un agente pide permiso (HU-020; por defecto, no). El
  * texto nunca lleva el comando ni la ruta.
  */
-approvalNotifications: boolean, revision: number, };
+approvalNotifications: boolean, 
+/**
+ * Antigüedad en días a partir de la cual la limpieza propone un intento terminado
+ * (1..3650; por defecto 30). Nunca borra nada sola (HU-025).
+ */
+retentionDays: number, revision: number, };

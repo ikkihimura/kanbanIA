@@ -6,6 +6,11 @@
 //!
 //! Comprobación, mutación y recibo ocurren en la misma transacción `BEGIN IMMEDIATE`.
 //! Si la mutación falla no se guarda recibo, así que un reintento vuelve a ejecutarla.
+//!
+//! Retención (HU-025, decisión del propietario): los recibos duran [`RECEIPT_RETENTION_DAYS`].
+//! Dentro de esa ventana, repetir la misma petición nunca la aplica dos veces; los más antiguos
+//! los borra [`Store::prune_mutation_receipts`] al abrir el almacén. La hora del recibo sale del
+//! reloj del núcleo (`Store::now_ms`), como toda regla con vencimiento.
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -14,6 +19,12 @@ use sqlx::SqliteConnection;
 
 use super::storage::{Store, TxFuture};
 use crate::error::CoreError;
+use crate::platform::clock::iso_from_ms;
+
+/// Días que se conserva un recibo de idempotencia (HU-025). Un reintento real llega en segundos
+/// o minutos; pasada esta ventana, el mismo `request_id` se trataría como una petición nueva.
+pub const RECEIPT_RETENTION_DAYS: i64 = 30;
+const DAY_MS: i64 = 86_400_000;
 
 const MAX_ACTOR_LEN: usize = 64;
 const MAX_REQUEST_ID_LEN: usize = 128;
@@ -152,21 +163,46 @@ impl Store {
 
         let result = mutation(&mut tx).await?;
 
-        sqlx::query(
+        sqlx::query(concat!(
             "INSERT INTO mutation_receipts \
-             (actor, request_id, operation, payload_hash, response_json) \
-             VALUES (?, ?, ?, ?, ?)",
-        )
+             (actor, request_id, operation, payload_hash, response_json, created_at) \
+             VALUES (?, ?, ?, ?, ?, ",
+            iso_from_ms!("?"),
+            ")"
+        ))
         .bind(&key.actor)
         .bind(&key.request_id)
         .bind(key.operation)
         .bind(&hash)
         .bind(serde_json::to_string(&result)?)
+        .bind(self.now_ms())
         .execute(&mut *tx)
         .await?;
 
         tx.commit().await?;
         Ok(result)
+    }
+}
+
+impl Store {
+    /// Borra los recibos de más de [`RECEIPT_RETENTION_DAYS`] según el reloj del núcleo y
+    /// devuelve cuántos. Lo llama el host al abrir el almacén; los de la ventana se conservan,
+    /// así que la idempotencia dentro de ella no cambia.
+    pub async fn prune_mutation_receipts(&self) -> Result<u64, CoreError> {
+        let cutoff = self.now_ms() - RECEIPT_RETENTION_DAYS * DAY_MS;
+        self.write(move |conn| {
+            Box::pin(async move {
+                Ok(sqlx::query(concat!(
+                    "DELETE FROM mutation_receipts WHERE created_at < ",
+                    iso_from_ms!("?")
+                ))
+                .bind(cutoff)
+                .execute(&mut *conn)
+                .await?
+                .rows_affected())
+            })
+        })
+        .await
     }
 }
 

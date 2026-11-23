@@ -37,4 +37,8 @@ worktree: RunWorktree | null,
 /**
  * Peticiones de permiso del agente (HU-020), la más reciente primero.
  */
-approvals: Array<RunApproval>, };
+approvals: Array<RunApproval>, 
+/**
+ * Cuándo se borró su salida en una limpieza (HU-025); los eventos se conservan.
+ */
+outputRemovedAt: string | null, };

@@ -670,6 +670,7 @@ async fn real_codex_refuses_repository_config() {
             claude_acp_path: None,
             codex_acp_path: Some(adapter.to_str().unwrap().into()),
             node_path: None,
+            retention_days: None,
             approval_notifications: false,
         },
     )

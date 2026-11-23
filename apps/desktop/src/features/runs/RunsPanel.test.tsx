@@ -173,6 +173,7 @@ function detail(overrides: Partial<RunDetail> = {}): RunDetail {
     cancelReason: null,
     worktree: null,
     approvals: [],
+    outputRemovedAt: null,
     ...overrides,
   };
 }

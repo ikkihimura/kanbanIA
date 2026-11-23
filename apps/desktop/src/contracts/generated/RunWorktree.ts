@@ -17,4 +17,8 @@ branch: string,
 /**
  * Commit congelado en la instantánea desde el que se creó.
  */
-baseCommit: string, createdAt: string, removedAt: string | null, removal: WorktreeRemoval | null, };
+baseCommit: string, createdAt: string, removedAt: string | null, removal: WorktreeRemoval | null, 
+/**
+ * Cuándo se borró la rama en una limpieza (HU-025; solo con confirmación explícita).
+ */
+branchDeletedAt: string | null, };

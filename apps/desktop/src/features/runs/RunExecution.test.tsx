@@ -156,6 +156,7 @@ function detail(
     cancelReason: null,
     worktree: null,
     approvals: [],
+    outputRemovedAt: null,
     ...overrides,
   };
 }
@@ -170,6 +171,7 @@ function worktree(overrides: Partial<RunWorktree> = {}): RunWorktree {
     createdAt: "2026-11-12T10:01:00Z",
     removedAt: null,
     removal: null,
+    branchDeletedAt: null,
     ...overrides,
   };
 }
@@ -202,6 +204,7 @@ function settings(overrides: Partial<RunSettings> = {}): RunSettings {
     codexAcpPath: null,
     nodePath: null,
     approvalNotifications: false,
+    retentionDays: 30,
     revision: 1,
     ...overrides,
   };
@@ -1375,6 +1378,7 @@ describe("Sistema → Ejecuciones", () => {
       codexAcpPath: null,
       nodePath: null,
       approvalNotifications: false,
+      retentionDays: 30,
     });
     expect(
       await screen.findByText("✓ Configuración guardada."),
@@ -1410,7 +1414,7 @@ describe("Sistema → Ejecuciones", () => {
     await user.click(screen.getByRole("button", { name: "Guardar" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "La configuración cambió mientras la editabas. Ahora es: 4 a la vez, 60 min, sin adaptador de Claude Code, sin adaptador de Codex, sin ruta de node y sin notificaciones de permisos.",
+      "La configuración cambió mientras la editabas. Ahora es: 4 a la vez, 60 min, limpieza a partir de 30 días, sin adaptador de Claude Code, sin adaptador de Codex, sin ruta de node y sin notificaciones de permisos.",
     );
     // Lo escrito se conserva.
     expect(concurrency).toHaveValue(1);
@@ -1424,6 +1428,7 @@ describe("Sistema → Ejecuciones", () => {
       codexAcpPath: null,
       nodePath: null,
       approvalNotifications: false,
+      retentionDays: 30,
     });
     expect(
       await screen.findByText("✓ Configuración guardada."),
@@ -1937,6 +1942,7 @@ describe("Sistema → Ejecuciones: adaptador de Claude Code", () => {
       codexAcpPath: null,
       nodePath: null,
       approvalNotifications: false,
+      retentionDays: 30,
     });
     await screen.findByText("✓ Configuración guardada.");
 
@@ -2577,6 +2583,7 @@ describe("Sistema → Ejecuciones: Codex", () => {
       codexAcpPath: CODEX_PATH,
       nodePath: null,
       approvalNotifications: false,
+      retentionDays: 30,
     });
     expect(
       await screen.findByText("✓ Configuración guardada."),

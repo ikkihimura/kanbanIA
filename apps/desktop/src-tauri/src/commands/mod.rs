@@ -10,6 +10,7 @@ pub mod portability;
 pub mod projects;
 pub mod relations;
 pub mod repositories;
+pub mod retention;
 pub mod review;
 pub mod runs;
 pub mod storage;

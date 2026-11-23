@@ -67,6 +67,9 @@ pub struct RunDetail {
     /// Peticiones de permiso del agente (HU-020), la más reciente primero.
     #[serde(default)]
     pub approvals: Vec<RunApproval>,
+    /// Cuándo se borró su salida en una limpieza (HU-025); los eventos se conservan.
+    #[serde(default)]
+    pub output_removed_at: Option<String>,
 }
 
 /// Detalle de un intento del proyecto (otro proyecto o inexistente → «no encontrado»). Se lee
@@ -89,11 +92,15 @@ async fn load(
     run_id: &str,
 ) -> Result<RunDetail, CoreError> {
     let run = require_run(conn, project_id, run_id).await?;
-    let (snapshot, cancel_reason): (String, Option<String>) =
-        sqlx::query_as("SELECT snapshot, cancel_reason FROM runs WHERE id = ?")
-            .bind(&run.id)
-            .fetch_one(&mut *conn)
-            .await?;
+    let (snapshot, cancel_reason, output_removed_at): (String, Option<String>, Option<String>) =
+        sqlx::query_as(concat!(
+            "SELECT snapshot, cancel_reason, ",
+            iso_from_ms!("output_removed_at_ms"),
+            " FROM runs WHERE id = ?"
+        ))
+        .bind(&run.id)
+        .fetch_one(&mut *conn)
+        .await?;
     let start_request = load_start_request(conn, &run.id).await?;
     let worktree = load_worktree(conn, &run.id).await?;
     let approvals = approvals_of_run(conn, &run.id).await?;
@@ -132,6 +139,7 @@ async fn load(
         cancel_reason,
         worktree,
         approvals,
+        output_removed_at,
     })
 }
 

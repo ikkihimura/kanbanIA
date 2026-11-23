@@ -17,6 +17,9 @@ pub const MIN_CONCURRENCY: i64 = 1;
 pub const MAX_CONCURRENCY: i64 = 8;
 pub const MIN_TIMEOUT_MINUTES: i64 = 1;
 pub const MAX_TIMEOUT_MINUTES: i64 = 240;
+/// Antigüedad (días) a partir de la cual un intento terminado se propone para limpiar (HU-025).
+pub const MIN_RETENTION_DAYS: i64 = 1;
+pub const MAX_RETENTION_DAYS: i64 = 3650;
 /// Longitud máxima (en caracteres) de la ruta del adaptador o de `node` (también la impone la
 /// base).
 pub const MAX_ADAPTER_PATH_CHARS: usize = 4096;
@@ -47,6 +50,10 @@ pub struct RunSettings {
     /// Notificación del sistema cuando un agente pide permiso (HU-020; por defecto, no). El
     /// texto nunca lleva el comando ni la ruta.
     pub approval_notifications: bool,
+    /// Antigüedad en días a partir de la cual la limpieza propone un intento terminado
+    /// (1..3650; por defecto 30). Nunca borra nada sola (HU-025).
+    #[ts(type = "number")]
+    pub retention_days: i64,
     #[ts(type = "number")]
     pub revision: i64,
 }
@@ -79,43 +86,43 @@ pub struct UpdateRunSettingsInput {
     /// `node` (`node.exe` en Windows) (HU-026).
     pub node_path: Option<String>,
     pub approval_notifications: bool,
+    /// Días de retención (HU-025). Ausente o `null` → se conserva el valor vigente.
+    #[serde(default)]
+    #[ts(type = "number | null", optional)]
+    pub retention_days: Option<i64>,
 }
 
 const ENTITY: &str = "Configuración de ejecución";
 
+#[derive(sqlx::FromRow)]
+struct SettingsRow {
+    max_concurrency: i64,
+    timeout_minutes: i64,
+    claude_acp_path: Option<String>,
+    codex_acp_path: Option<String>,
+    node_path: Option<String>,
+    approval_notifications: bool,
+    retention_days: i64,
+    revision: i64,
+}
+
 pub(super) async fn load_settings(conn: &mut SqliteConnection) -> Result<RunSettings, CoreError> {
-    #[allow(clippy::type_complexity)]
-    let (
-        max_concurrency,
-        timeout_minutes,
-        claude_acp_path,
-        codex_acp_path,
-        node_path,
-        approval_notifications,
-        revision,
-    ): (
-        i64,
-        i64,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        bool,
-        i64,
-    ) = sqlx::query_as(
+    let row: SettingsRow = sqlx::query_as(
         "SELECT max_concurrency, timeout_minutes, claude_acp_path, codex_acp_path, node_path, \
-         approval_notifications, revision FROM run_settings WHERE id = 1",
+         approval_notifications, retention_days, revision FROM run_settings WHERE id = 1",
     )
     .fetch_optional(&mut *conn)
     .await?
     .ok_or(CoreError::NotFound { entity: ENTITY })?;
     Ok(RunSettings {
-        max_concurrency,
-        timeout_minutes,
-        claude_acp_path,
-        codex_acp_path,
-        node_path,
-        approval_notifications,
-        revision,
+        max_concurrency: row.max_concurrency,
+        timeout_minutes: row.timeout_minutes,
+        claude_acp_path: row.claude_acp_path,
+        codex_acp_path: row.codex_acp_path,
+        node_path: row.node_path,
+        approval_notifications: row.approval_notifications,
+        retention_days: row.retention_days,
+        revision: row.revision,
     })
 }
 
@@ -158,6 +165,17 @@ pub async fn update_run_settings(
             ),
         });
     }
+    if let Some(days) = input.retention_days
+        && !(MIN_RETENTION_DAYS..=MAX_RETENTION_DAYS).contains(&days)
+    {
+        return Err(CoreError::Validation {
+            field: "retentionDays",
+            reason: format!(
+                "La antigüedad para limpiar debe estar entre {MIN_RETENTION_DAYS} y \
+                 {MAX_RETENTION_DAYS} días."
+            ),
+        });
+    }
     // Solo se comprueba en disco una ruta que cambia: guardar otra cosa (p. ej. la concurrencia)
     // no puede fallar porque el adaptador ya guardado se movió. Se compara con la revisión que
     // la persona editaba; si no coincide, la transacción da `conflict`.
@@ -194,7 +212,8 @@ pub async fn update_run_settings(
                 let updated = sqlx::query(
                     "UPDATE run_settings SET max_concurrency = ?, timeout_minutes = ?, \
                      claude_acp_path = ?, codex_acp_path = ?, node_path = ?, \
-                     approval_notifications = ?, revision = revision + 1 \
+                     approval_notifications = ?, \
+                     retention_days = coalesce(?, retention_days), revision = revision + 1 \
                      WHERE id = 1 AND revision = ?",
                 )
                 .bind(input.max_concurrency)
@@ -203,6 +222,7 @@ pub async fn update_run_settings(
                 .bind(codex_path)
                 .bind(node_path)
                 .bind(input.approval_notifications)
+                .bind(input.retention_days)
                 .bind(input.expected_revision)
                 .execute(&mut *conn)
                 .await?

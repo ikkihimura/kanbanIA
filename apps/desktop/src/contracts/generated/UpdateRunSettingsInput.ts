@@ -13,4 +13,8 @@ codexAcpPath: string | null,
  * Vacía o `null` → sin ruta de node. Si no, absoluta, de un archivo ejecutable llamado
  * `node` (`node.exe` en Windows) (HU-026).
  */
-nodePath: string | null, approvalNotifications: boolean, };
+nodePath: string | null, approvalNotifications: boolean, 
+/**
+ * Días de retención (HU-025). Ausente o `null` → se conserva el valor vigente.
+ */
+retentionDays?: number | null, };

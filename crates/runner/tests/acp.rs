@@ -215,6 +215,7 @@ impl Env {
                 claude_acp_path: path.clone(),
                 codex_acp_path: path,
                 node_path: None,
+                retention_days: None,
                 approval_notifications,
             },
         )
@@ -236,6 +237,7 @@ impl Env {
                 codex_acp_path: current.codex_acp_path.clone(),
                 node_path,
                 approval_notifications: current.approval_notifications,
+                retention_days: None,
             },
         )
         .await

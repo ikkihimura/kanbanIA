@@ -17,11 +17,14 @@
 //! muestran son fijos y seguros; los detalles (rutas, salida de Git) van aparte, para el log.
 
 pub mod acp;
+#[cfg(feature = "supervisor")]
+pub mod cleanup;
 mod env;
 pub mod guard;
 pub mod output;
 pub mod process;
 mod redact;
+pub mod retention;
 #[cfg(feature = "supervisor")]
 pub mod supervisor;
 pub mod test_process;

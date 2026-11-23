@@ -38,7 +38,14 @@ impl StorageSlot {
 
     async fn try_open(data_dir: &Path) -> SlotState {
         match Store::open(data_dir).await {
-            Ok(store) => SlotState::Ready(store),
+            Ok(store) => {
+                // Retención de los recibos de idempotencia (HU-025): fuera de su ventana. Si
+                // falla, se intenta en el próximo arranque; la app sigue.
+                if let Err(error) = store.prune_mutation_receipts().await {
+                    eprintln!("[almacén] no se pudieron borrar recibos antiguos: {error:?}");
+                }
+                SlotState::Ready(store)
+            }
             Err(error) => {
                 log_open_error(&error);
                 SlotState::Unavailable(StorageStatus::from_error(&error))

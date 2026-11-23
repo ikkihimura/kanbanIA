@@ -317,6 +317,7 @@ impl Env {
                 claude_acp_path: current.claude_acp_path,
                 codex_acp_path: current.codex_acp_path,
                 node_path: None,
+                retention_days: None,
                 approval_notifications: false,
             },
         )

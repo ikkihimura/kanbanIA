@@ -116,6 +116,7 @@ function detail(
     cancelReason: null,
     worktree: null,
     approvals,
+    outputRemovedAt: null,
     ...overrides,
   };
 }
@@ -451,6 +452,7 @@ describe("Sistema → Ejecuciones: notificaciones de permisos", () => {
       codexAcpPath: null,
       nodePath: null,
       approvalNotifications: false,
+      retentionDays: 30,
       revision: 1,
       ...overrides,
     };
@@ -488,6 +490,7 @@ describe("Sistema → Ejecuciones: notificaciones de permisos", () => {
       codexAcpPath: null,
       nodePath: null,
       approvalNotifications: true,
+      retentionDays: 30,
     });
     expect(
       await screen.findByText("✓ Configuración guardada."),

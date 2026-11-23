@@ -183,6 +183,7 @@ function DetailBody({
   onStarted,
   onChanged,
 }: BodyProps) {
+  const id = useId();
   const { run, snapshot } = detail;
   const { story, agent } = snapshot;
   const request = detail.startRequest;
@@ -341,13 +342,28 @@ function DetailBody({
         onChanged={onChanged}
       />
 
-      {run.state !== "queued" && (
-        <RunOutputPanel
-          projectId={projectId}
-          runId={run.id}
-          live={live}
-          refreshSignal={refreshSignal}
-        />
+      {detail.outputRemovedAt !== null ? (
+        <section className="run-output" aria-labelledby={`${id}-output-title`}>
+          <h4 id={`${id}-output-title`} className="relations__title">
+            Salida del proceso
+          </h4>
+          <p className="panel__muted">
+            La salida de este intento se eliminó al limpiar (
+            <time dateTime={detail.outputRemovedAt}>
+              {formatDateTime(detail.outputRemovedAt)}
+            </time>
+            ); sus eventos se conservan.
+          </p>
+        </section>
+      ) : (
+        run.state !== "queued" && (
+          <RunOutputPanel
+            projectId={projectId}
+            runId={run.id}
+            live={live}
+            refreshSignal={refreshSignal}
+          />
+        )
       )}
 
       <div className="run-detail__snapshot">

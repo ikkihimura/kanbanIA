@@ -1137,3 +1137,61 @@ fn node_path_through_ipc() {
         assert!(candidate["source"].is_string());
     }
 }
+
+/// HU-025: la limpieza por IPC. El plan no borra nada; limpiar o eliminar algo que no existe
+/// (otro proyecto, ruta que no es una carpeta huérfana) → no encontrado. El comportamiento con
+/// worktrees reales y reloj controlable está en `crates/runner/tests/cleanup.rs`.
+#[test]
+fn retention_through_ipc() {
+    let data = tempfile::tempdir().unwrap();
+    let app = build_app(data.path());
+    let plan = invoke(&app, "get_retention_plan", json!({})).unwrap();
+    assert_eq!(plan["retentionDays"], 30);
+    assert_eq!(plan["items"], json!([]));
+    assert_eq!(plan["orphans"], json!([]));
+    assert!(plan["cutoff"].is_string());
+    assert!(plan["runsUsage"]["bytes"].is_number());
+
+    let pid = invoke(
+        &app,
+        "create_project",
+        json!({ "input": { "requestId": "p", "name": "P" } }),
+    )
+    .unwrap()["id"]
+        .clone();
+    let missing = invoke(
+        &app,
+        "clean_run",
+        json!({ "input": {
+            "projectId": pid, "runId": "no-existe", "output": true, "worktree": false,
+            "discardWorktreeChanges": false, "branch": false,
+        } }),
+    )
+    .unwrap_err();
+    assert_eq!(missing["code"], "not_found");
+    let orphan = invoke(
+        &app,
+        "remove_orphan_worktree",
+        json!({ "input": { "path": data.path().to_str().unwrap(), "discardChanges": true } }),
+    )
+    .unwrap_err();
+    assert_eq!(orphan["code"], "not_found");
+    assert!(data.path().exists());
+
+    // Los días de retención se guardan con la configuración (y sin enviarlos no cambian).
+    let settings = invoke(&app, "get_run_settings", json!({})).unwrap();
+    assert_eq!(settings["retentionDays"], 30);
+    let saved = invoke(
+        &app,
+        "update_run_settings",
+        json!({ "input": {
+            "expectedRevision": settings["revision"], "maxConcurrency": 2, "timeoutMinutes": 30,
+            "claudeAcpPath": null, "codexAcpPath": null, "nodePath": null,
+            "approvalNotifications": false, "retentionDays": 90,
+        } }),
+    )
+    .unwrap();
+    assert_eq!(saved["retentionDays"], 90);
+    let plan = invoke(&app, "get_retention_plan", json!({})).unwrap();
+    assert_eq!(plan["retentionDays"], 90);
+}

@@ -1404,3 +1404,94 @@ fieldset.run-start__scenarios legend {
     animation: none;
   }
 }
+
+/* ---------- limpieza de ejecuciones (HU-025) ---------- */
+
+.retention {
+  display: grid;
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.retention__list {
+  display: grid;
+  gap: 12px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.retention__fieldset {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 8px 12px 12px;
+  border: 2px solid var(--color-border);
+}
+
+.retention__legend {
+  padding: 0 4px;
+  overflow-wrap: anywhere;
+}
+
+/* Las casillas de cada fila van juntas: sin el margen grande de `.checkbox`. */
+.retention__checkbox {
+  margin: 4px 0;
+}
+
+.retention__nested {
+  margin-left: 24px;
+}
+
+.retention__worktree,
+.retention__branch {
+  display: grid;
+  gap: 2px;
+}
+
+.retention__worktree p,
+.retention__branch p {
+  margin: 0;
+}
+
+/* El texto dice el riesgo; el color solo lo refuerza. */
+.retention__warn {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--color-warn);
+}
+
+.retention__confirm {
+  margin-top: 12px;
+  padding: 12px;
+  border: 2px solid var(--color-danger);
+}
+
+.retention__confirm ul {
+  margin: 0 0 12px;
+}
+
+.retention__results {
+  display: grid;
+  gap: 4px;
+  margin-top: 12px;
+}
+
+.retention__results p {
+  margin: 0;
+}
+
+.retention__result-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.retention__result {
+  color: var(--color-accent);
+}
+
+.retention__result--error {
+  color: var(--color-danger);
+}
