@@ -12,7 +12,11 @@ use tauri::test::{
 use tauri::webview::InvokeRequest;
 use tauri::{App, WebviewUrl, WebviewWindowBuilder};
 
+/// Origen de la app (en Windows, Tauri sirve la app en `http://tauri.localhost`).
+#[cfg(not(windows))]
 const LOCAL_ORIGIN: &str = "tauri://localhost";
+#[cfg(windows)]
+const LOCAL_ORIGIN: &str = "http://tauri.localhost";
 
 fn build_app() -> App<MockRuntime> {
     kanbania_desktop_lib::register_commands(mock_builder())
