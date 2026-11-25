@@ -24,6 +24,11 @@ use serde_json::{Value, json};
 
 const UI: &str = "ui";
 const BIN: &str = env!("CARGO_BIN_EXE_kanbania-mcp");
+/// Ruta absoluta en la plataforma (el agente la reporta; nunca se comprueba en disco).
+#[cfg(unix)]
+const REPORT_PATH: &str = "/tmp/kanbania-informe.txt";
+#[cfg(windows)]
+const REPORT_PATH: &str = r"C:\kanbania-informe.txt";
 
 fn rid() -> String {
     uuid::Uuid::now_v7().to_string()
@@ -792,7 +797,7 @@ async fn an_agent_reports_and_delivers_through_a_real_mcp_client() {
         "summary": "Hecho: migración y pruebas.",
         "references": [
             { "kind": "url", "value": "https://example.com/pr/1" },
-            { "kind": "path", "value": "/tmp/kanbania-informe.txt" },
+            { "kind": "path", "value": REPORT_PATH },
         ],
     });
     let (error, delivered) = call(&client, "submit_result", submit_args.clone()).await;

@@ -26,7 +26,7 @@ use kanbania_core::features::team::{
 };
 use kanbania_core::platform::actor::Actor;
 use kanbania_core::platform::clock::ManualClock;
-use kanbania_core::platform::storage::{BackupKind, Store, backup_path, restore_backup};
+use kanbania_core::platform::storage::{BackupKind, Store, backup_path, restore_backup_waiting};
 use kanbania_runner::cleanup::{clean_run, remove_orphan_worktree, retention_plan};
 use kanbania_runner::supervisor::{Supervisor, SupervisorConfig};
 
@@ -577,10 +577,25 @@ async fn a_restored_copy_leaves_orphan_worktrees_that_can_be_removed() {
         ..
     } = env;
     drop(store);
-    restore_backup(&data_dir, &backup_path(&data_dir, &backup.id).unwrap())
-        .await
-        .unwrap();
-    let store = Store::open(&data_dir).await.unwrap();
+    // Como el host: otra prueba en paralelo que lanza un proceso puede retener un instante el
+    // descriptor del bloqueo (heredado entre `fork` y `exec`).
+    let wait = Duration::from_secs(5);
+    restore_backup_waiting(
+        &data_dir,
+        &backup_path(&data_dir, &backup.id).unwrap(),
+        wait,
+    )
+    .await
+    .unwrap();
+    let started = Instant::now();
+    let store = loop {
+        match Store::open(&data_dir).await {
+            Err(CoreError::StorageLocked) if started.elapsed() < wait => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            other => break other.unwrap(),
+        }
+    };
     // Una carpeta que no es un worktree con la forma <proyecto>/<intento>.
     let stray = data_dir.join("worktrees").join("otro").join("carpeta");
     std::fs::create_dir_all(&stray).unwrap();
