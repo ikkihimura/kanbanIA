@@ -213,7 +213,7 @@ impl Fake {
         if let Some((name, profiles)) = permissions {
             let cwd = std::env::current_dir()
                 .ok()
-                .and_then(|d| std::fs::canonicalize(d).ok())
+                .and_then(|d| dunce::canonicalize(d).ok())
                 .and_then(|d| d.to_str().map(str::to_owned))
                 .unwrap_or_default();
             let profile = &profiles[name.as_str().unwrap_or_default()];

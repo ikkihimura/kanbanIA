@@ -230,10 +230,7 @@ mod tests {
     fn paths_are_canonical_and_the_worktree_cannot_contain_the_data() {
         let (_dir, data, worktree) = layout();
         let c = DataConfinement::new(&data, &worktree).unwrap();
-        assert_eq!(
-            Path::new(c.data_dir()),
-            std::fs::canonicalize(&data).unwrap()
-        );
+        assert_eq!(Path::new(c.data_dir()), dunce::canonicalize(&data).unwrap());
         assert!(Path::new(c.worktree()).starts_with(c.data_dir()));
         assert!(DataConfinement::new(&data, &data).is_err());
         assert!(DataConfinement::new(&worktree, &data).is_err());

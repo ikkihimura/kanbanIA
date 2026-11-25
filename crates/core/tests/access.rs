@@ -119,6 +119,8 @@ async fn the_token_is_never_stored_in_clear() {
     let (p, a) = (project(&store, "Uno").await, agent(&store, "Robo").await);
     let created = credential(&store, &p, &a).await;
     store.close().await;
+    // Suelta el bloqueo del directorio de datos: en Windows impide leer su archivo.
+    drop(store);
 
     // Ni en la base ni en el WAL ni en ningún otro archivo del directorio de datos.
     let secret = created.token.trim_start_matches("kbia_");

@@ -140,6 +140,10 @@ async fn connect(
             .env("KANBANIA_AGENT_TOKEN", token)
             .env("KANBANIA_DATA_DIR", data_dir)
             .stderr(Stdio::from(log));
+        // En Windows, sin `SystemRoot` Winsock no se inicializa y no hay conexión posible.
+        if let Some(root) = std::env::var_os("SystemRoot") {
+            cmd.env("SystemRoot", root);
+        }
     }))
     .unwrap();
     ().serve(transport).await.unwrap()

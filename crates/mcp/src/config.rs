@@ -154,10 +154,15 @@ mod tests {
         };
         assert_eq!(config.data_dir, expected);
 
-        let config = Config::from_vars(vars(&[(TOKEN_ENV, TOKEN), (DATA_DIR_ENV, "/perfil")]))
+        let absolute = if cfg!(windows) {
+            "C:\\perfil"
+        } else {
+            "/perfil"
+        };
+        let config = Config::from_vars(vars(&[(TOKEN_ENV, TOKEN), (DATA_DIR_ENV, absolute)]))
             .ok()
             .unwrap();
-        assert_eq!(config.data_dir, PathBuf::from("/perfil"));
+        assert_eq!(config.data_dir, PathBuf::from(absolute));
         if cfg!(unix) {
             let relative = Config::from_vars(vars(&[(TOKEN_ENV, TOKEN), (DATA_DIR_ENV, "perfil")]));
             assert_eq!(relative.err(), Some(ConfigError::RelativeDataDir));

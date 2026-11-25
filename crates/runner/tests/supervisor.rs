@@ -84,6 +84,8 @@ impl Env {
         let repo = base.join("repositorio con espacios");
         std::fs::create_dir(&repo).unwrap();
         git(&repo, &["init", "-q"]);
+        // En Windows, `core.autocrlf` del sistema cambiaría los finales de línea.
+        git(&repo, &["config", "core.autocrlf", "false"]);
         std::fs::write(repo.join("seguido.txt"), "original\n").unwrap();
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-q", "-m", "inicial"]);

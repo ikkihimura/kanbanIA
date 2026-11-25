@@ -306,7 +306,8 @@ mod tests {
                 "CODEX_CONFIG"
             ]
         );
-        assert!(env.contains(&("HOME".into(), "/datos/codex-home/home".into())));
+        let personal = Path::new("/datos/codex-home").join("home").into_os_string();
+        assert!(env.contains(&("HOME".into(), personal)));
         for (name, _) in &env {
             assert!(!crate::is_adapter_forbidden(name), "{name:?}");
         }

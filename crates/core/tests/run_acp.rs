@@ -741,12 +741,13 @@ async fn adapter_path_is_checked_on_disk_before_saving() {
             "//servidor/compartida/claude-agent-acp".to_owned(),
             "ruta de red",
         ),
-        ("/net/servidor/claude-agent-acp".to_owned(), "ruta de red"),
         (format!("{}\u{202e}", adapter.display()), "no válidos"),
         (format!("{}\u{7}", adapter.display()), "no válidos"),
         (long, "4096"),
     ];
     if cfg!(unix) {
+        // En Windows no es una ruta absoluta (otro mensaje).
+        invalid.push(("/net/servidor/claude-agent-acp".to_owned(), "ruta de red"));
         let not_executable = b.repos.path().join("sin-permiso");
         std::fs::write(&not_executable, "#!/bin/sh\n").unwrap();
         set_mode(&not_executable, 0o644);
