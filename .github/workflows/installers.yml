@@ -121,6 +121,8 @@ jobs:
       # queda marcada como «alfa sin firmar» (docs/INSTALAR.md). En macOS solo firma ad-hoc
       # (`bundle.macOS.signingIdentity: "-"`). Con CI=true (lo pone Actions) el .dmg no decora Finder.
       - name: Empaquetar
+        # En Windows, PowerShell se come los `--` y npm recibiría `--bundles` como configuración.
+        shell: bash
         run: npm run tauri -- build --bundles ${{ matrix.bundles }} -- --locked
 
       # Adaptador MCP para agentes (docs/AGENTES.md): binario aparte, no va dentro del instalador.
