@@ -133,7 +133,10 @@ jobs:
         shell: bash
         run: |
           shopt -s nullglob
-          for f in target/release/bundle/dmg/*.dmg target/release/bundle/msi/*.msi target/release/bundle/nsis/*-setup.exe target/release/kanbania-mcp target/release/kanbania-mcp.exe; do
+          # Git Bash da por existente `kanbania-mcp` si existe `kanbania-mcp.exe`: un nombre por SO.
+          mcp=target/release/kanbania-mcp
+          if [ "$RUNNER_OS" = Windows ]; then mcp=$mcp.exe; fi
+          for f in target/release/bundle/dmg/*.dmg target/release/bundle/msi/*.msi target/release/bundle/nsis/*-setup.exe "$mcp"; do
             [ -f "$f" ] || continue
             if command -v sha256sum >/dev/null; then sha256sum "$f"; else shasum -a 256 "$f"; fi
           done | tee SHA256SUMS-${{ matrix.os }}.txt
