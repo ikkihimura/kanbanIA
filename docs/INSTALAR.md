@@ -9,7 +9,7 @@ Otras guías: [agentes de IA](AGENTES.md), [copias y exportación](RESPALDO.md),
 | Sistema | Estado en esta alfa |
 | --- | --- |
 | macOS 26, Apple Silicon (arm64) | Comprobado (instalación limpia y actualización desde 0.1.0). **Solo Apple Silicon**: no hay instalador para Mac con Intel. Versiones anteriores de macOS sin probar. |
-| Windows 10/11 x64 | **Sin comprobar**: la CI que compila, prueba y genera los instaladores de Windows está configurada pero aún no se ha ejecutado. Requiere WebView2 (ver abajo). |
+| Windows 10/11 x64 | **Sin probar a mano**: la CI compila y pasa todas las pruebas automáticas en Windows y genera sus instaladores, pero nadie los ha instalado todavía. Requiere WebView2 (ver abajo). |
 | Linux | No incluido. |
 
 Solo para usar agentes de IA (opcional, ver [AGENTES.md](AGENTES.md)):
@@ -19,7 +19,7 @@ Solo para usar agentes de IA (opcional, ver [AGENTES.md](AGENTES.md)):
 
 ## Descargar
 
-Los instaladores se generan con GitHub Actions (flujo `installers.yml`, ejecución manual) y se descargan como artefactos de esa ejecución: hace falta una sesión de GitHub, cada artefacto llega como un `.zip` (descomprímelo) y caduca a los 30 días. Comprueba el SHA-256 con `SHA256SUMS-*.txt` (detecta una descarga dañada, no una manipulación).
+Descarga los instaladores de la [página de releases](https://github.com/ikkihimura/kanbanIA/releases) del repositorio (la alfa 0.2.0 está marcada como *pre-release*). Se generan con GitHub Actions (flujo `installers.yml`, ejecución manual); también están como artefactos de esa ejecución durante 30 días (hace falta una sesión de GitHub y llegan como `.zip`). Comprueba el SHA-256 con `SHA256SUMS.txt` de la release (o `SHA256SUMS-*.txt` del artefacto); detecta una descarga dañada, no una manipulación. En macOS, en la carpeta de la descarga: `shasum -a 256 -c --ignore-missing SHA256SUMS.txt`; en Windows, compara la salida de `Get-FileHash <archivo>` (PowerShell) con la línea del archivo.
 
 | Sistema | Archivo |
 | --- | --- |
@@ -36,7 +36,7 @@ Los instaladores se generan con GitHub Actions (flujo `installers.yml`, ejecuci�
    xattr -dr com.apple.quarantine "/Applications/Kanban IA.app"
    ```
 
-   Riesgo: desactiva para esa app la comprobación de Gatekeeper. Hazlo solo con un archivo que hayas descargado tú de la ejecución del flujo del repositorio, nunca con uno que te hayan pasado por otra vía.
+   Riesgo: desactiva para esa app la comprobación de Gatekeeper. Hazlo solo con un archivo que hayas descargado tú de la página de releases o de la ejecución del flujo del repositorio, nunca con uno que te hayan pasado por otra vía.
 
 ## Instalar en Windows
 
@@ -95,7 +95,7 @@ Antes, si quieres conservar tus proyectos, crea una copia y guárdala en otra ca
 - Instaladores sin firma ni notarización: distribución pública como **alfa sin firmar**.
 - macOS solo Apple Silicon; Windows sin probar a mano.
 - Sin actualización automática: cada versión se instala a mano.
-- El servidor MCP (`kanbania-mcp`) no va dentro del instalador: es un binario aparte en el mismo artefacto (o se compila desde el código fuente; ver [AGENTES.md](AGENTES.md)).
+- El servidor MCP (`kanbania-mcp`) no va dentro del instalador: es un binario aparte en la release y en el artefacto (o se compila desde el código fuente; ver [AGENTES.md](AGENTES.md)).
 - Los adaptadores npm de los agentes necesitan `node`: si usas nvm y abres la app desde Finder, indica la «Ruta de node» en «Sistema» → «Ejecuciones» (ver [AGENTES.md](AGENTES.md)).
 - En Windows, `service.json` hereda los permisos del directorio de datos: no uses `KANBANIA_DATA_DIR` en una carpeta compartida con otros usuarios.
 - Iconos provisionales.
