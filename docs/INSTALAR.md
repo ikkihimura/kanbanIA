@@ -9,7 +9,7 @@ Otras guías: [agentes de IA](AGENTES.md), [copias y exportación](RESPALDO.md),
 | Sistema | Estado en esta alfa |
 | --- | --- |
 | macOS 26, Apple Silicon (arm64) | Comprobado (instalación limpia y actualización desde 0.1.0). **Solo Apple Silicon**: no hay instalador para Mac con Intel. Versiones anteriores de macOS sin probar. |
-| Windows 10/11 x64 | **Sin probar a mano**: la CI compila y pasa todas las pruebas automáticas en Windows y genera sus instaladores, pero nadie los ha instalado todavía. Requiere WebView2 (ver abajo). |
+| Windows 10/11 x64 | **Experimental, sin soporte**: la CI compila y pasa todas las pruebas automáticas en Windows y genera sus instaladores, pero nadie los ha instalado todavía y por ahora Windows queda fuera del alcance del proyecto. Requiere WebView2 (ver abajo). |
 | Linux | No incluido. |
 
 Solo para usar agentes de IA (opcional, ver [AGENTES.md](AGENTES.md)):
@@ -44,7 +44,7 @@ Descarga los instaladores de la [página de releases](https://github.com/ikkihim
 2. SmartScreen avisa porque el instalador no está firmado: pulsa **Más información** → **Ejecutar de todas formas**.
 3. WebView2 viene preinstalado en Windows 10 (1803 o posterior) y 11. Si falta, el instalador intenta descargarlo (necesita conexión).
 
-Windows no se ha probado a mano en esta alfa: si algo falla, abre un informe de error (ver [CONTRIBUTING](../CONTRIBUTING.md)).
+Windows es **experimental y sin soporte** en esta alfa (no se ha probado a mano): si algo falla, puedes abrir un informe de error (ver [CONTRIBUTING](../CONTRIBUTING.md)).
 
 ## Dónde están tus datos
 
@@ -93,7 +93,7 @@ Antes, si quieres conservar tus proyectos, crea una copia y guárdala en otra ca
 ## Limitaciones conocidas de la alfa
 
 - Instaladores sin firma ni notarización: distribución pública como **alfa sin firmar**.
-- macOS solo Apple Silicon; Windows sin probar a mano.
+- macOS solo Apple Silicon; Windows experimental y sin soporte (sin probar a mano).
 - Sin actualización automática: cada versión se instala a mano.
 - El servidor MCP (`kanbania-mcp`) no va dentro del instalador: es un binario aparte en la release y en el artefacto (o se compila desde el código fuente; ver [AGENTES.md](AGENTES.md)).
 - Los adaptadores npm de los agentes necesitan `node`: si usas nvm y abres la app desde Finder, indica la «Ruta de node» en «Sistema» → «Ejecuciones» (ver [AGENTES.md](AGENTES.md)).

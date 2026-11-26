@@ -1,6 +1,6 @@
 # Kanban IA
 
-Kanban desktop local para historias, épicas y agentes de IA, con estética retro y avatares pixelados. Estado: **alfa 0.2.0 sin firmar** (M4): planificación en el tablero, agentes por MCP y ejecución supervisada de Claude Code y Codex por ACP con aprobaciones. Verificada solo en macOS 26 (Apple Silicon). Windows sin verificar: la CI para Windows está configurada pero aún no se ha ejecutado.
+Kanban desktop local para historias, épicas y agentes de IA, con estética retro y avatares pixelados. Estado: **alfa 0.2.0 sin firmar** (M4): planificación en el tablero, agentes por MCP y ejecución supervisada de Claude Code y Codex por ACP con aprobaciones. Verificada solo en macOS 26 (Apple Silicon). Windows es experimental y sin soporte por ahora: la CI pasa todas las pruebas automáticas en Windows y genera sus instaladores, pero no se han probado a mano (pendiente en HU-027).
 
 - **Usar la app:** [instalar, actualizar y desinstalar](docs/INSTALAR.md) · [guía local](docs/GUIA-LOCAL.md) (ciclo completo y paquete de demostración sin claves) · [agentes: MCP, Claude Code y Codex](docs/AGENTES.md) · [copias de seguridad](docs/RESPALDO.md).
 - **Colaborar:** [cómo contribuir](CONTRIBUTING.md) · [reportar un problema de seguridad](SECURITY.md) · planificación en [`docs/`](docs/) y estado en [`docs/BACKLOG.md`](docs/BACKLOG.md).
@@ -252,7 +252,7 @@ Cada intento de una historia (HU-017) puede **iniciarse** desde su detalle con u
 - **Repositorio vinculado:** iniciar un intento exige que el repositorio de su instantánea siga vinculado al proyecto en la misma ruta (se vuelve a comprobar al salir de la cola). Si lo desvinculas o lo reubicas, prepara un intento nuevo.
 - Dependencias: `process-wrap` 10.0.1 (Apache-2.0 OR MIT; grupo de procesos y Job Object) y `nix` 0.31.3 (MIT, solo Unix, `killpg`); ya estaban en el lockfile por `rmcp`.
 - Proceso de prueba a mano: `cargo run -p kanbania-runner --bin kanbania-test-process -- success` (o `<app> --kanbania-test-process success`). Pruebas: `cargo test -p kanbania-runner`.
-- Windows: solo se compila en local (`cargo clippy --target x86_64-pc-windows-msvc -p kanbania-runner --no-default-features --all-targets`); no se ha ejecutado.
+- Windows: pruebas automáticas en la CI (`windows-2025`); sin ejecución manual (experimental, HU-027).
 
 ## Claude Code por ACP (HU-019, M3)
 
